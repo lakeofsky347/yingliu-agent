@@ -6,7 +6,7 @@
   "type": "module",
   "main": "dist/desktop/main.cjs",
   "description": "本地视频创作应用：模型对话、分镜节点图、可编辑画面、工程历史与 MP4 导出",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=22.18"
   },
