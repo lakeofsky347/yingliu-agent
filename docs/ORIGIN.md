@@ -10,4 +10,4 @@
 
 不复制父仓的 films、私有素材、凭据、node_modules、原插件二进制或已有工程。npm 锁文件依赖均来自 registry，运行路径不引用父仓。
 
-本仓库自有代码及用户自有工作包数据采用 Apache-2.0，完整条款见根目录 `LICENSE`；版权与提取来源保留在 `NOTICE`。原插件 0.2.0 提取代码及独立应用历史版本的 MIT 许可全文和两项版权声明保留在 `licenses/Legacy-MIT.txt`。第三方依赖继续适用各自的许可，见 `THIRD_PARTY_NOTICES.md`、`licenses/` 及随依赖分发的许可证和 notices；`packs/foundation` 的原始数据、来源哈希与 `design_proposal` 状态保持不变。
+本仓库自有代码及用户自有工作包数据采用 GNU GPL 第 3 版，仅限第 3 版（SPDX：`GPL-3.0-only`），完整条款见根目录 `LICENSE`；版权与提取来源保留在 `NOTICE`。此前仓库采用的 Apache-2.0 许可全文保留在 `licenses/Legacy-Apache-2.0.txt`；原插件 0.2.0 提取代码及独立应用历史版本的 MIT 许可全文和两项版权声明继续保留在 `licenses/Legacy-MIT.txt`。第三方依赖继续适用各自的许可，见 `THIRD_PARTY_NOTICES.md`、`licenses/` 及随依赖分发的许可证和 notices；`packs/foundation` 的原始数据、来源哈希与 `design_proposal` 状态保持不变。
