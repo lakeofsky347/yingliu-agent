@@ -1,0 +1,7 @@
+/** Read dimensions from verified PNG/JPEG/WebP headers before allowing model upload. */
+export function imageMetadata(buffer:Buffer):{mime:string;width:number;height:number}{
+  if(buffer.length>=24&&buffer.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))return {mime:'image/png',width:buffer.readUInt32BE(16),height:buffer.readUInt32BE(20)};
+  if(buffer[0]===255&&buffer[1]===216){let offset=2;while(offset+9<buffer.length){if(buffer[offset]!==255)throw new Error('JPEG标记无效');const marker=buffer[offset+1]!;offset+=2;if(marker===217||marker===218)break;const length=buffer.readUInt16BE(offset);if(length<2||offset+length>buffer.length)throw new Error('JPEG尺寸无效');if([192,193,194,195,197,198,199,201,202,203,205,206,207].includes(marker))return {mime:'image/jpeg',height:buffer.readUInt16BE(offset+3),width:buffer.readUInt16BE(offset+5)};offset+=length;}}
+  if(buffer.length>=30&&buffer.subarray(0,4).toString()==='RIFF'&&buffer.subarray(8,12).toString()==='WEBP'){const kind=buffer.subarray(12,16).toString();if(kind==='VP8X')return {mime:'image/webp',width:1+buffer.readUIntLE(24,3),height:1+buffer.readUIntLE(27,3)};if(kind==='VP8 '&&buffer[23]===157&&buffer[24]===1&&buffer[25]===42)return {mime:'image/webp',width:buffer.readUInt16LE(26)&16383,height:buffer.readUInt16LE(28)&16383};if(kind==='VP8L'&&buffer[20]===47){const bits=buffer.readUInt32LE(21);return {mime:'image/webp',width:(bits&16383)+1,height:((bits>>>14)&16383)+1};}}
+  throw new Error('图片格式或真实尺寸无法验证，仅支持有效PNG/JPEG/WebP');
+}

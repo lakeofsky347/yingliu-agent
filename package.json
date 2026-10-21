@@ -1,7 +1,7 @@
 {
   "name": "yingliu-studio",
   "productName": "映流 Studio",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "main": "dist/desktop/main.cjs",
@@ -18,7 +18,9 @@
     "start": "npm run build && node scripts/start.mjs",
     "package:app": "npm run build && node scripts/package-app.mjs",
     "package:demo": "npm run package:app",
-    "verify": "node --import tsx scripts/verify-app.ts"
+    "verify": "node --import tsx scripts/verify-app.ts",
+    "verify:models": "node --import tsx scripts/verify-model-ui.ts",
+    "verify:film": "node --import tsx scripts/verify-multimodal-film.ts"
   },
   "dependencies": {
     "@comfyorg/litegraph": "0.17.2",

@@ -20,6 +20,7 @@ export interface ProviderConfig {
 }
 export interface ProviderSettings {
   config:ProviderConfig; hasKey:boolean; mode:'demo'|'custom'; credentialStatus?:SecretStoreStatus;
+  ready?:boolean; route?:{provider:string;model:string}; sceneRoute?:{provider:string;model:string}; legacyConfig?:ProviderConfig; legacyHasKey?:boolean; legacyCredentialStatus?:SecretStoreStatus;
 }
 export interface ChatMessage {
   id:string; role:'user'|'assistant'; content:string; createdAt:string;
@@ -36,7 +37,7 @@ export interface ConversationTurn {
   committedRevision?:number; imageAssetIds?:string[];
 }
 export interface ChatInput {
-  message:string; projectId?:string; shotId?:string; provider:string; model:string;
+  message:string; projectId?:string; shotId?:string; provider:string; model:string; role?:'director'|'scene'|'vision';
   intent?:'auto'|'chat'|'discuss'|'create'|'modify'; retryTurnId?:string; packId?:string;
   allowImageUpload?:boolean; imageAssetIds?:string[];
 }

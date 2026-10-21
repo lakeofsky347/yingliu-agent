@@ -5,6 +5,9 @@ import { defaultSceneSource, defaultShot, normalizeSceneDurations } from '../cor
 import type { SceneSource, Shot, VideoProject } from '../shared/types.ts';
 import type { ProviderConfig, ProviderHost, ProviderSettings, SecretStore } from './contracts.ts';
 import { inspectCredential, updateCredential } from './secrets.ts';
+import { ModelRegistry } from '../models/registry.ts';
+import { imageMetadata } from '../models/image-input.ts';
+import type { ModelDefinition, ModelSelection, ResolvedModel } from '../models/contracts.ts';
 
 export const DEMO_PROVIDER = 'demo';
 export const DEMO_MODEL = 'offline-director';
@@ -17,7 +20,7 @@ type StreamOptions=Parameters<ProviderHost['stream']>[0];
 
 function object(value:unknown):Record<string,unknown>{return value!==null&&typeof value==='object'&&!Array.isArray(value)?value as Record<string,unknown>:{};}
 function configuration(value:Partial<ProviderConfig>):ProviderConfig{
-  const fields=Object.fromEntries(Object.entries(value).filter(([key])=>key in DEFAULT));const config={...DEFAULT,...fields,id:'custom'} as ProviderConfig;
+  const fields=Object.fromEntries(Object.entries(value).filter(([key])=>key in DEFAULT));const config={...DEFAULT,...fields,id:String(value.id??'custom')} as ProviderConfig;
   config.name=String(config.name).trim()||DEFAULT.name;config.model=String(config.model).trim();
   const url=new URL(String(config.baseUrl));
   if(!['https:','http:'].includes(url.protocol)||url.username||url.password||url.search||url.hash)throw new Error('模型地址须为无凭据、查询参数或片段的 HTTP(S) 地址');
@@ -39,53 +42,68 @@ function turns(messages:unknown[],allowImages=false):ModelMessage[]{
 }
 function finishReason(reason:unknown){return reason==='stop'?{kind:'stop'}:reason==='length'?{kind:'max-tokens'}:{kind:'failure',failure:{message:`模型未正常结束：${String(reason??'缺少完成原因')}`}};}
 
-/** Configuration is local to this app; only the injected SecretStore handles the key. */
+/** Configuration is local to this app; only the injected SecretStore handles keys. */
 export class ProviderManager {
   private config:ProviderConfig={...DEFAULT};private mode:'demo'|'custom'='custom';private initialized?:Promise<void>;
   private writes:Promise<void>=Promise.resolve();
-  constructor(private dataDirectory:string,private secrets:SecretStore,private options:{allowFixtures?:boolean;fetch?:typeof fetch}={}){}
+  readonly registry:ModelRegistry;
+  constructor(private dataDirectory:string,private secrets:SecretStore,private options:{allowFixtures?:boolean;fetch?:typeof fetch}={}){this.registry=new ModelRegistry(dataDirectory,secrets,{credentialRefFactory:id=>id==='custom'?KEY_REF:`yingliu.models.${id}.api-key`});}
   initialize():Promise<void>{return this.initialized??=(async()=>{
     try{const saved=object(JSON.parse(await readFile(join(this.dataDirectory,'provider.json'),'utf8')));this.config=configuration(object(saved.config));this.mode=saved.mode==='demo'&&this.options.allowFixtures?'demo':'custom';}
     catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+    await this.registry.initialize({connections:[{id:'custom',name:this.config.name,protocol:'chat-completions',baseUrl:this.config.baseUrl,auth:'bearer',credentialRef:KEY_REF,enabled:true,revision:1,requestTimeoutMs:this.config.requestTimeoutMs!,concurrency:2}],models:[this.legacyModel()],roles:[{role:'director',modelId:'custom-model'},{role:'scene',modelId:'custom-model'}]});
   })();}
-  private async currentSettings():Promise<ProviderSettings>{return {config:structuredClone(this.config),...await inspectCredential(this.secrets,KEY_REF),mode:this.mode};}
-  async settings():Promise<ProviderSettings>{await this.initialize();await this.writes;return this.currentSettings();}
+  private legacyModel(config=this.config):ModelDefinition {const {id,name,baseUrl,model,supportsVision,...parameters}=config;return {id:'custom-model',connectionId:'custom',name:model,model,enabled:true,inputModalities:supportsVision?['text','image']:['text'],outputModalities:['text'],parameters:parameters as ModelDefinition['parameters']};}
+  private textConfig(resolved:ResolvedModel):ProviderConfig {const {connection,model}=resolved;if(connection.protocol!=='chat-completions')throw new Error('所选模型不是文本接口');return configuration({...DEFAULT,...model.parameters,id:connection.id,name:connection.name,baseUrl:connection.baseUrl,model:model.model,supportsVision:model.inputModalities.includes('image'),requestTimeoutMs:Math.min(300000,connection.requestTimeoutMs)});}
+  async settings(selection?:ModelSelection):Promise<ProviderSettings>{
+    await this.initialize();await this.writes;let resolved:ResolvedModel;
+    try{resolved=await this.registry.resolve(selection??'director');}catch(error){if(selection)throw error;return {config:structuredClone(this.config),hasKey:false,ready:false,mode:this.mode};}
+    const credential=resolved.connection.auth==='none'?{hasKey:false}:await inspectCredential(this.secrets,resolved.connection.credentialRef);
+    let sceneRoute;try{const scene=await this.registry.resolve('scene');sceneRoute={provider:scene.connection.id,model:scene.model.model};}catch{/* A missing role is shown in the model center. */}
+    const legacyCredential=await inspectCredential(this.secrets,KEY_REF);
+    return {config:this.textConfig(resolved),...credential,legacyHasKey:legacyCredential.hasKey,legacyCredentialStatus:legacyCredential.credentialStatus,ready:resolved.connection.auth==='none'||credential.hasKey,mode:this.mode,route:{provider:resolved.connection.id,model:resolved.model.model},sceneRoute,legacyConfig:structuredClone(this.config)};
+  }
   async save(input:Partial<ProviderConfig>&{apiKey?:string;mode?:'demo'|'custom'}):Promise<ProviderSettings>{
     await this.initialize();const captured=structuredClone(input);const work=this.writes.then(async()=>{
-      const {apiKey,mode,...fields}=captured;const next=configuration({...this.config,...fields});
+      const {apiKey,mode,...fields}=captured;if(Object.keys(fields).length)await this.registry.assertUnused('custom');const next=configuration({...this.config,...fields,id:'custom'});
       if(mode!==undefined&&!['demo','custom'].includes(mode))throw new Error('模型模式无效');
       if(mode==='demo'&&!this.options.allowFixtures)throw new Error('离线 fixture 仅供测试，正常应用使用已配置的模型服务');
       const nextMode=mode??this.mode;await mkdir(this.dataDirectory,{recursive:true});
       const path=join(this.dataDirectory,'provider.json'),temporary=path+'.tmp-'+randomUUID();
-      const commit=async()=>{await writeFile(temporary,JSON.stringify({version:2,config:next,mode:nextMode},null,2)+'\n');await rename(temporary,path);this.config=next;this.mode=nextMode;};
+      const project=async()=>{await writeFile(temporary,JSON.stringify({version:2,config:next,mode:nextMode},null,2)+'\n');await rename(temporary,path);};
+      const commit=async()=>{
+        if(!Object.keys(fields).length&&this.registry.snapshot().models.some(m=>m.id==='custom-model'))await project();
+        else await this.registry.saveBundle({id:'custom',name:next.name,protocol:'chat-completions',baseUrl:next.baseUrl,auth:'bearer',credentialRef:KEY_REF,enabled:true,revision:1,requestTimeoutMs:next.requestTimeoutMs!,concurrency:2},this.legacyModel(next),[{role:'director',modelId:'custom-model'},{role:'scene',modelId:'custom-model'}],project);
+        this.config=next;this.mode=nextMode;
+      };
       try{if(apiKey===undefined)await commit();else await updateCredential(this.secrets,KEY_REF,apiKey.trim()||undefined,commit);}
-      finally{await rm(temporary,{force:true});}return this.currentSettings();
-    });this.writes=work.then(()=>undefined,()=>undefined);return work;
+      finally{await rm(temporary,{force:true});}
+    });this.writes=work.then(()=>undefined,()=>undefined);await work;return this.settings();
   }
-  async check():Promise<{ok:boolean;message:string}>{
-    const settings=await this.settings();if(settings.mode==='demo')return {ok:true,message:'离线演示模型可用；这是确定性演示，未连接远程模型。'};
-    if(settings.credentialStatus&&!settings.credentialStatus.available)return {ok:false,message:settings.credentialStatus.error??'系统安全存储不可用，请解锁后重试。'};
-    const key=await this.secrets.get(KEY_REF);if(!key)return {ok:false,message:'请先保存当前应用的模型 API Key。'};
-    try{const response=await (this.options.fetch??fetch)(this.config.baseUrl+'/models',{headers:{Authorization:`Bearer ${key}`},signal:AbortSignal.timeout(15000)});
+  async check(connectionId?:string):Promise<{ok:boolean;message:string}>{
+    await this.initialize();if(this.mode==='demo')return {ok:true,message:'离线演示模型可用；这是确定性演示，未连接远程模型。'};
+    const state=await this.registry.list(),connection=connectionId?state.connections.find(c=>c.id===connectionId):(await this.registry.resolve('director')).connection;
+    if(!connection)return {ok:false,message:'模型连接不存在'};let key:string|undefined;
+    try{key=await this.registry.credential(connection);const response=await (this.options.fetch??fetch)(connection.baseUrl+'/models',{headers:key?{Authorization:`Bearer ${key}`}:{},signal:AbortSignal.timeout(15000)});
       if(!response.ok)return {ok:false,message:`模型目录检查失败（HTTP ${response.status}）；真实创作仍为 NOT_CHECKED。`};
-      const value=object(await response.json()),models=Array.isArray(value.data)?value.data.map(x=>object(x).id):[];
-      return models.includes(this.config.model)?{ok:true,message:'服务可访问，所选模型在目录中；此检查未执行真实创作，真实创作为 NOT_CHECKED。'}:{ok:true,message:'服务可访问；模型目录未确认所选名称，真实创作为 NOT_CHECKED。'};
-    }catch(error){return {ok:false,message:`连接检查失败：${(error instanceof Error?error.message:'未知错误').split(key).join('[redacted]')}`};}
+      const value=object(await response.json()),models=Array.isArray(value.data)?value.data.map(x=>object(x).id):[],configured=state.models.filter(m=>m.connectionId===connection.id);
+      return configured.every(model=>models.includes(model.model))?{ok:true,message:'服务可访问，所选模型在目录中；此检查未执行真实创作，真实创作为 NOT_CHECKED。'}:{ok:true,message:'服务可访问；模型目录未确认所选名称，真实创作为 NOT_CHECKED。'};
+    }catch(error){const message=error instanceof Error?error.message:'未知错误';return {ok:false,message:`连接检查失败：${key?message.split(key).join('[redacted]'):message}`};}
   }
   host():ProviderHost{return {
-    listProviders:()=>[...(this.options.allowFixtures?[{id:DEMO_PROVIDER,name:'测试 fixture'}]:[]),{id:'custom',name:this.config.name}],
-    listModels:async id=>{await this.initialize();if(id===DEMO_PROVIDER&&this.options.allowFixtures)return [{id:DEMO_MODEL,name:'测试 fixture',inputModalities:['text']}];if(id==='custom')return [{id:this.config.model,name:this.config.model,inputModalities:this.config.supportsVision&&this.config.enableVision?['text','image']:['text']}];throw new Error('未知模型供应商');},
-    resolveModelInfo:async(id,model,signal)=>{signal?.throwIfAborted();if(id!==DEMO_PROVIDER&&id!=='custom'||id===DEMO_PROVIDER&&!this.options.allowFixtures||model!==(id===DEMO_PROVIDER?DEMO_MODEL:this.config.model))throw new Error('模型已变更，请重新选择');return {inputModalities:id==='custom'&&this.config.supportsVision&&this.config.enableVision?['text','image']:['text']};},
+    listProviders:()=>[...(this.options.allowFixtures?[{id:DEMO_PROVIDER,name:'测试 fixture'}]:[]),...this.registry.snapshot().connections.filter(c=>c.enabled&&c.protocol==='chat-completions').map(c=>({id:c.id,name:c.name}))],
+    listModels:async id=>{await this.initialize();if(id===DEMO_PROVIDER&&this.options.allowFixtures)return [{id:DEMO_MODEL,name:'测试 fixture',inputModalities:['text']}];const state=this.registry.snapshot(),connection=state.connections.find(c=>c.id===id&&c.enabled&&c.protocol==='chat-completions');if(!connection)throw new Error('未知模型供应商');return state.models.filter(m=>m.connectionId===id&&m.enabled).map(m=>({id:m.model,name:m.name,inputModalities:m.parameters.enableVision?m.inputModalities:['text']}));},
+    resolveModelInfo:async(id,model,signal)=>{signal?.throwIfAborted();if(id===DEMO_PROVIDER&&this.options.allowFixtures&&model===DEMO_MODEL)return {inputModalities:['text']};await this.initialize();const resolved=await this.registry.resolve({provider:id,model,protocol:'chat-completions'});return {inputModalities:resolved.model.parameters.enableVision?resolved.model.inputModalities:['text']};},
     stream:options=>this.stream(options),
   };}
-  /** Full multi-turn text request, used by the app director. No PNG pixels are implied. */
-  async complete(messages:ModelMessage[],system:string,signal:AbortSignal,maxTokens?:number):Promise<string>{
-    await this.initialize();let result='',stopped=false;
-    for await(const chunk of this.stream({provider:'custom',model:this.config.model,messages,system,maxTokens:maxTokens??this.config.maxTokens!,sessionId:'app-director',signal})){
+  /** Resolve a role or explicit route once per request; no credentials enter returned metadata. */
+  async complete(messages:ModelMessage[],system:string,signal:AbortSignal,maxTokens?:number,selection:ModelSelection='director'):Promise<string>{
+    await this.initialize();const resolved=await this.registry.resolve(selection);let result='',stopped=false;
+    for await(const chunk of this.stream({provider:resolved.connection.id,model:resolved.model.model,messages,system,maxTokens:maxTokens??Number(resolved.model.parameters.maxTokens??DEFAULT.maxTokens),sessionId:'app-director',signal})){
       if(chunk.type==='text-delta')result+=chunk.text??'';
       if(chunk.type==='finish'){if(chunk.reason?.kind!=='stop')throw new Error(chunk.reason?.failure?.message??'模型输出不完整，请缩小修改范围');stopped=true;}
     }
-    if(!stopped||!result.trim())throw new Error('模型没有返回完整文本');const key=await this.secrets.get(KEY_REF);return key?result.split(key).join('[redacted]'):result;
+    if(!stopped||!result.trim())throw new Error('模型没有返回完整文本');const key=await this.registry.credential(resolved.connection);return key?result.split(key).join('[redacted]'):result;
   }
   fixtureEnabled():boolean{return !!this.options.allowFixtures;}
   private async *stream(options:StreamOptions):ReturnType<ProviderHost['stream']>{
@@ -99,20 +117,25 @@ export class ProviderManager {
       const value=input.task==='storyboard'?{shots:demoStoryboard(project).map(s=>({...s,durationSeconds:s.durationFrames/(project.target.fps?.num/project.target.fps?.den||30)}))}:{...demoSceneSource(Number(object(input.shot).params&&object(object(input.shot).params).demoStage||0))};
       yield {type:'text-delta',text:JSON.stringify(value)};yield {type:'finish',reason:{kind:'stop'}};return;
     }
-    if(options.provider!=='custom'||options.model!==this.config.model)throw new Error('请选择当前应用已配置的模型');
-    const key=await this.secrets.get(KEY_REF);if(!key)throw new Error('当前应用未配置模型 API Key，请先打开模型设置');
-    const signal=AbortSignal.any([options.signal,AbortSignal.timeout(this.config.requestTimeoutMs!)]);
+    const resolved=await this.registry.resolve({provider:options.provider,model:options.model,protocol:'chat-completions'});
+    const release=this.registry.acquire(resolved.connection.id,resolved.model.id);
+    let key:string|undefined;
     try{
-    const normalized=turns(options.messages,this.config.supportsVision&&this.config.enableVision);let textSize=options.system.length,images=0,imageBytes=0;
-    for(const turn of normalized){if(typeof turn.content==='string')textSize+=turn.content.length;else for(const part of turn.content){if(part.type==='text')textSize+=part.text.length;else{images++;imageBytes+=Buffer.from(part.image_url.url.slice(part.image_url.url.indexOf(',')+1),'base64').length;}}}
-    if(textSize>this.config.contextCharLimit!)throw new Error('模型文本上下文超过配置上限');
-    if(images>this.config.maxVisionImages!||imageBytes>this.config.maxVisionBytes!)throw new Error('模型图片数量或总字节超过配置上限');
-    const response=await (this.options.fetch??fetch)(this.config.baseUrl+'/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${key}`},signal,
-      body:JSON.stringify({model:this.config.model,messages:[{role:'system',content:options.system},...normalized],max_tokens:Math.max(256,Math.min(this.config.maxTokens!,options.maxTokens)),temperature:this.config.temperature,stream:true})});
-    if(!response.ok)throw new Error(`模型请求失败（HTTP ${response.status}）：${(await response.text()).slice(0,400).split(key).join('[redacted]')}`);
+    key=await this.registry.credential(resolved.connection);
+    const config=this.textConfig(resolved);
+    const redact=(value:string)=>key?value.split(key).join('[redacted]'):value;
+    const signal=AbortSignal.any([options.signal,AbortSignal.timeout(config.requestTimeoutMs!)]);
+    const normalized=turns(options.messages,config.supportsVision&&config.enableVision);let textSize=options.system.length,images=0,imageBytes=0;const imageInputs:{mime:string;buffer:Buffer}[]=[];
+    for(const turn of normalized){if(typeof turn.content==='string')textSize+=turn.content.length;else for(const part of turn.content){if(part.type==='text')textSize+=part.text.length;else{images++;const url=part.image_url.url,buffer=Buffer.from(url.slice(url.indexOf(',')+1),'base64');imageBytes+=buffer.length;imageInputs.push({mime:url.slice(5,url.indexOf(';')),buffer});}}}
+    if(textSize>config.contextCharLimit!)throw new Error('模型文本上下文超过配置上限');
+    if(images>config.maxVisionImages!||imageBytes>config.maxVisionBytes!)throw new Error('模型图片数量或总字节超过配置上限');
+    for(const input of imageInputs){const metadata=imageMetadata(input.buffer);if(metadata.mime!==input.mime||metadata.width<1||metadata.height<1||Math.max(metadata.width,metadata.height)>config.maxVisionDimension!||metadata.width*metadata.height>16_777_216)throw new Error('模型图片实际格式或像素尺寸超出配置上限');}
+    const response=await (this.options.fetch??fetch)(config.baseUrl+'/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',...(key?{Authorization:`Bearer ${key}`}:{})},signal,
+      body:JSON.stringify({model:config.model,messages:[{role:'system',content:options.system},...normalized],max_tokens:Math.max(256,Math.min(config.maxTokens!,options.maxTokens)),temperature:config.temperature,stream:true})});
+    if(!response.ok)throw new Error(`模型请求失败（HTTP ${response.status}）：${redact((await response.text()).slice(0,400))}`);
     if(!response.headers.get('content-type')?.includes('text/event-stream')){
       const data=object(await response.json()),choice=object(Array.isArray(data.choices)?data.choices[0]:undefined),message=object(choice.message);
-      if(typeof message.content==='string')yield {type:'text-delta',text:message.content};yield {type:'finish',reason:finishReason(choice.finish_reason)};return;
+      if(typeof message.content==='string')yield {type:'text-delta',text:redact(message.content)};yield {type:'finish',reason:finishReason(choice.finish_reason)};return;
     }
     if(!response.body)throw new Error('模型流式响应缺少内容');
     const reader=response.body.getReader(),decoder=new TextDecoder();let pending='',finished=false,characters=0;
@@ -127,7 +150,7 @@ export class ProviderManager {
       if(next.done)break;
     }}finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
     if(!finished)throw new Error('模型连接结束但没有完成回执');
-    }catch(error){if(options.signal.aborted)throw options.signal.reason;throw new Error((error instanceof Error?error.message:String(error)).split(key).join('[redacted]'));}
+    }catch(error){if(options.signal.aborted)throw options.signal.reason;const message=error instanceof Error?error.message:String(error);throw new Error(key?message.split(key).join('[redacted]'):message);}finally{release();}
   }
 }
 

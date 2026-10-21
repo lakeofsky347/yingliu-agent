@@ -4,6 +4,8 @@ import { join, resolve } from 'node:path';
 import type { ProviderGroup, RpcResult, StudioSnapshot, VideoProject, TtsSettings } from '../shared/types.ts';
 import type { HostContext } from './platform.ts';
 import { StudioService } from './service.ts';
+import type { MediaProjectPort } from '../jobs/contracts.ts';
+import type { GeneratedFile, MediaTask } from '../jobs/contracts.ts';
 
 export interface StudioFocus { shotId?:string; frame?:number }
 export interface ProjectLocation { id:string; path:string; title:string; archived?:boolean; archivedAt?:string; createdAt?:string; updatedAt?:string }
@@ -35,6 +37,17 @@ export class ProjectHub {
     this.initialized=this.initialize();
   }
   private makeService(restoreRecent=false){return new StudioService(this.ctx,{baseDirectory:this.baseDirectory,restoreRecent});}
+  mediaPort():MediaProjectPort {
+    return {
+      inspect:async id=>{await this.initialized;return (await this.service(id)).inspectMediaProject();},
+      readImage:async(id,assetId,shotId)=>{await this.initialized;return (await this.service(id)).readMediaImage(assetId,shotId);},
+      validateArtifact:async(path,mime,id,signal)=>{await this.initialized;return (await this.service(id)).validateMediaArtifact(path,mime,signal);},
+      applyResult:async input=>{await this.initialized;const service=await this.service(input.projectId);const result=await service.applyMediaResult(input);await this.remember(await service.snapshot());return result;},
+    };
+  }
+  async stageWorkflowMedia(projectId:string,task:MediaTask,files:GeneratedFile[],signal:AbortSignal){await this.initialized;return (await this.service(projectId)).stageWorkflowMedia(task,files,signal);}
+  async workflowVoice(projectId:string,shotId:string,text:string,signal:AbortSignal,settings?:TtsSettings){await this.initialized;return (await this.service(projectId)).workflowVoice(shotId,text,signal,settings);}
+  async workflowCapture(projectId:string,frame:number,signal:AbortSignal,candidate?:import('../workflows/contracts.ts').WorkflowCandidate){await this.initialized;return (await this.service(projectId)).workflowCapture(frame,signal,candidate);}
   private async initialize(){
     try{
       const saved=JSON.parse(await readFile(join(this.baseDirectory,'registry.json'),'utf8'));

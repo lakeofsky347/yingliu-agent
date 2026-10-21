@@ -1,6 +1,6 @@
 # 映流 Studio 操作系统适配进度
 
-更新日期：2026-10-08（Asia/Shanghai）。当前版本 0.2.0。Windows/macOS/Linux 的基础平台代码已实现；目标系统的原生窗口、系统钥匙环和安装验收需分别完成。
+平台基线记录日期：2026-10-08（Asia/Shanghai），对应版本 0.2.0；0.3.0 的新增验证见 [多模态验收](ACCEPTANCE-MULTIMODAL.md)。Windows/macOS/Linux 的基础平台代码已实现；目标系统的原生窗口、系统钥匙环和安装验收需分别完成。
 
 [首轮环境基线](platform-baseline.json)保留适配前结果；本轮实现与验证见 [platform-adaptation.json](platform-adaptation.json)。已有 macOS arm64 验收见 [ACCEPTANCE.md](ACCEPTANCE.md)，不能替代本轮改动的 macOS 回归。
 
