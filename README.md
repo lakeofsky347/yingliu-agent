@@ -87,4 +87,6 @@ node scripts/verify-package.mjs --layout-only
 
 已有 macOS arm64 本机原生验收，签名仍为临时签名、尚未公证。本轮增加 Windows/Linux 可携带目录打包，尚未签名或制作安装器；Linux 包已完成布局和包外服务验证，三个系统的新改动仍需原生及跨机器验收。三系统 CI 已配置，尚未远端运行。Chrome/FFmpeg 由用户提供。Linux 无安全钥匙环时不保存新密钥，仍可手动制作和清除旧密钥。本轮多模型和视频素材功能的本地协议／媒体测试不等同真实供应商质量验收，也不延伸历史记录中的平台验收结论。没有云端成片渲染、多人实时编辑或通用节点市场。
 
+本仓库自有代码及随仓提供的用户自有工作包数据采用 [GNU GPL 第 3 版](LICENSE)，仅限第 3 版（SPDX：`GPL-3.0-only`）。版权和来源说明见 [NOTICE](NOTICE)；历史 Apache-2.0 与 MIT 许可全文分别保留在 [licenses/Legacy-Apache-2.0.txt](licenses/Legacy-Apache-2.0.txt) 和 [licenses/Legacy-MIT.txt](licenses/Legacy-MIT.txt)。第三方组件继续适用各自的许可，详见[第三方声明](THIRD_PARTY_NOTICES.md)。
+
 [多模型与多模态制作](docs/MULTIMODAL.md) · [媒体网关 v1](docs/media-gateway-v1/README.md) · [架构与恢复协议](docs/ARCHITECTURE.md) · [模型导演协议](docs/MODEL-PROTOCOL.md) · [验收证据](docs/ACCEPTANCE.md) · [平台适配进度](docs/PLATFORM-SUPPORT.md) · [提取来源](docs/ORIGIN.md) · [第三方许可](THIRD_PARTY_NOTICES.md)

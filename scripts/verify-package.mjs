@@ -23,9 +23,9 @@ try{
   for(const key of ['appRelative','executableRelative','launcherRelative'])assert.equal(manifest[key],layout[key]);
   const info=JSON.parse(await readFile(join(appRoot,'package.json'),'utf8'));
   assert.equal(info.main,'dist/desktop/main.cjs');assert.equal(info.version,manifest.version);
-  assert.deepEqual((await readdir(appRoot)).sort(),['LICENSE','THIRD_PARTY_NOTICES.md','dist','licenses','node_modules','package.json']);
+  assert.deepEqual((await readdir(appRoot)).sort(),['LICENSE','NOTICE','THIRD_PARTY_NOTICES.md','dist','licenses','node_modules','package.json']);
   assert.deepEqual((await readdir(join(appRoot,'node_modules'))).sort(),['fflate','playwright-core']);
-  for(const file of ['dist/desktop/main.cjs','dist/desktop/preload.cjs','dist/web-server.mjs','dist/ui/index.html','dist/ui/app.js','dist/ui/app.css','LICENSE','THIRD_PARTY_NOTICES.md','licenses/LiteGraph-MIT.txt','licenses/React-MIT.txt','licenses/ReactDOM-MIT.txt','licenses/fflate-MIT.txt','node_modules/playwright-core/LICENSE','node_modules/playwright-core/NOTICE','node_modules/fflate/LICENSE'])assert.ok((await stat(join(appRoot,file))).isFile(),file);
+  for(const file of ['dist/desktop/main.cjs','dist/desktop/preload.cjs','dist/web-server.mjs','dist/ui/index.html','dist/ui/app.js','dist/ui/app.css','LICENSE','NOTICE','THIRD_PARTY_NOTICES.md','licenses/Legacy-Apache-2.0.txt','licenses/Legacy-MIT.txt','licenses/LiteGraph-MIT.txt','licenses/React-MIT.txt','licenses/ReactDOM-MIT.txt','licenses/fflate-MIT.txt','node_modules/playwright-core/LICENSE','node_modules/playwright-core/NOTICE','node_modules/fflate/LICENSE'])assert.ok((await stat(join(appRoot,file))).isFile(),file);
   const runtimeResources=options.platform==='darwin'?'Contents/Resources':'';
   for(const file of ['LICENSE','LICENSES.chromium.html'])assert.ok((await stat(join(app,runtimeResources,file))).isFile(),file);
   assert.ok((await stat(executable)).isFile());assert.ok((await stat(join(app,layout.launcherRelative))).isFile());

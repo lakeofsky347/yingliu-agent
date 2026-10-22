@@ -37,12 +37,16 @@ test('application copy includes runtime dependencies and licenses while omitting
   try {
     const source = join(directory, 'source'), destination = join(directory, 'relocated', 'app');
     for (const path of ['dist/desktop', 'dist/ui', 'licenses', 'node_modules/playwright-core', 'node_modules/fflate', 'node_modules/tsx', '.local', 'projects']) await mkdir(join(source, path), { recursive: true });
-    await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'test-app', productName: '测试应用', version: '1.2.3', main: 'dist/desktop/main.cjs', license: 'MIT', devDependencies: { tsx: 'secret' } }));
-    for (const file of ['dist/desktop/main.cjs', 'dist/desktop/preload.cjs', 'dist/ui/app.js', 'licenses/MIT.txt', 'node_modules/playwright-core/LICENSE', 'node_modules/fflate/LICENSE', 'LICENSE', 'THIRD_PARTY_NOTICES.md', '.env', 'credentials.encrypted.json', '.local/provider.json', 'projects/private.json', 'node_modules/tsx/index.js']) await writeFile(join(source, file), file);
+    await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'test-app', productName: '测试应用', version: '1.2.3', main: 'dist/desktop/main.cjs', license: 'GPL-3.0-only', devDependencies: { tsx: 'secret' } }));
+    for (const file of ['dist/desktop/main.cjs', 'dist/desktop/preload.cjs', 'dist/ui/app.js', 'licenses/MIT.txt', 'licenses/Legacy-Apache-2.0.txt', 'licenses/Legacy-MIT.txt', 'node_modules/playwright-core/LICENSE', 'node_modules/fflate/LICENSE', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', '.env', 'credentials.encrypted.json', '.local/provider.json', 'projects/private.json', 'node_modules/tsx/index.js']) await writeFile(join(source, file), file);
     await copyApplication(source, destination);
-    assert.deepEqual((await readdir(destination)).sort(), ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'dist', 'licenses', 'node_modules', 'package.json']);
+    assert.deepEqual((await readdir(destination)).sort(), ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'dist', 'licenses', 'node_modules', 'package.json']);
     assert.deepEqual((await readdir(join(destination, 'node_modules'))).sort(), ['fflate', 'playwright-core']);
     assert.equal(await readFile(join(destination, 'dist/desktop/main.cjs'), 'utf8'), 'dist/desktop/main.cjs');
+    assert.equal(await readFile(join(destination, 'NOTICE'), 'utf8'), 'NOTICE');
+    assert.equal(await readFile(join(destination, 'licenses/Legacy-Apache-2.0.txt'), 'utf8'), 'licenses/Legacy-Apache-2.0.txt');
+    assert.equal(await readFile(join(destination, 'licenses/Legacy-MIT.txt'), 'utf8'), 'licenses/Legacy-MIT.txt');
+    assert.equal(JSON.parse(await readFile(join(destination, 'package.json'), 'utf8')).license, 'GPL-3.0-only');
     assert.equal(JSON.parse(await readFile(join(destination, 'package.json'), 'utf8')).devDependencies, undefined);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

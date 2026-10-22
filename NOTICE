@@ -1,0 +1,22 @@
+Yingliu Studio
+Copyright (c) 2026 DSH Video Studio contributors
+Copyright (c) 2026 Yingliu Studio contributors
+
+This product includes code extracted and adapted from dsh-video-studio 0.2.0,
+which was originally distributed under the MIT License. The complete historical
+MIT notice, including the original DSH Video Studio and Yingliu Studio copyright
+notices, is preserved in licenses/Legacy-MIT.txt.
+
+Project-owned code and the user-owned frontend-video-foundation recipe, profile
+and template data included in this repository are distributed under the GNU
+General Public License, version 3 only (SPDX: GPL-3.0-only). See LICENSE for the
+complete license text.
+
+This repository was previously distributed under the Apache License, Version
+2.0. Its complete historical license text is preserved in
+licenses/Legacy-Apache-2.0.txt. That file and licenses/Legacy-MIT.txt record the
+earlier licensing history; the current project license is GPL-3.0-only.
+
+Third-party components retain their own licenses and copyright notices. See
+THIRD_PARTY_NOTICES.md, licenses/ and the notices distributed with those
+components.
