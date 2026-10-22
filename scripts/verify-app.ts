@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import {mockCompletionBody} from '../tests/model-gateway.ts';
 import {defaultSceneSource} from '../src/core/index.ts';
 import type {StudioSnapshot,VideoProject} from '../src/shared/types.ts';
-const root=resolve('.'),out=join(root,'artifacts/acceptance-v02'),data=join(root,'.local/acceptance-v02-'+Date.now());await mkdir(out,{recursive:true});
+const root=resolve('.'),out=join(root,'artifacts/acceptance-v03'),data=join(root,'.local/acceptance-v03-'+Date.now());await mkdir(out,{recursive:true});
 const checks:{name:string;status:string;[key:string]:unknown}[]=[];const record=(name:string,details:Record<string,unknown>={})=>{checks.push({name,status:'PASS',...details});console.log('PASS '+name);};
 const platformName=({darwin:'macOS',win32:'Windows',linux:'Linux'} as Record<string,string>)[process.platform]??process.platform;
 let nativeAcceptance:'PASS'|'FAIL'|'NOT_CHECKED'='NOT_CHECKED',nativeRuntime:Record<string,unknown>|undefined;
@@ -61,4 +61,4 @@ try{
   await call('providers.save',{apiKey:''});record('synthetic key removed after acceptance');
   nativeAcceptance='PASS';console.log(JSON.stringify({passed:checks.length,report:join(out,'verification.json')}));
 }catch(error){nativeAcceptance='FAIL';checks.push({name:'native acceptance execution',status:'FAIL',message:error instanceof Error?error.message:String(error)});throw error;}
-finally{await native?.close();await new Promise<void>((accept,reject)=>gateway.close(error=>error?reject(error):accept()));await writeFile(join(out,'verification.json'),JSON.stringify({application:'映流 Studio',version:'0.2.0',checkedAt:new Date().toISOString(),nativeAcceptance,checks,modelProtocol:'actual localhost HTTP gateway with deterministic test responder',realProvider:'NOT_CHECKED',humanFullViewing:'NOT_CHECKED',platform:platformName+' '+process.arch,platformId:process.platform,architecture:process.arch,osRelease:release(),nativeRuntime,dataDirectory:data,requests},null,2)+'\n');}
+finally{await native?.close();await new Promise<void>((accept,reject)=>gateway.close(error=>error?reject(error):accept()));await writeFile(join(out,'verification.json'),JSON.stringify({application:'映流 Studio',version:'0.3.0',checkedAt:new Date().toISOString(),nativeAcceptance,checks,modelProtocol:'actual localhost HTTP gateway with deterministic test responder',realProvider:'NOT_CHECKED',humanFullViewing:'NOT_CHECKED',platform:platformName+' '+process.arch,platformId:process.platform,architecture:process.arch,osRelease:release(),nativeRuntime,dataDirectory:data,requests},null,2)+'\n');}

@@ -53,8 +53,18 @@ test('provider rejects truncated responses and never fetches without an app key'
 test('custom transport sends only enabled embedded images and enforces request text/image budgets',async()=>{
   const directory=await mkdtemp(join(tmpdir(),'yingliu-model-vision-'));let calls=0;const captured:Record<string,any>[]=[];
   try{const providers=new ProviderManager(directory,new MemorySecrets(),{fetch:async(_url,options)=>{calls++;captured.push(JSON.parse(String(options?.body)));return Response.json({choices:[{message:{content:'完整回复'},finish_reason:'stop'}]});}});await providers.save({apiKey:'mock-key',supportsVision:true,contextCharLimit:8000,maxVisionBytes:1024});
-    const image={type:'image_url' as const,image_url:{url:'data:image/png;base64,AA=='}};await assert.rejects(providers.complete([{role:'user',content:[image]}],'system',new AbortController().signal),/未启用/);assert.equal(calls,0);
+    const image={type:'image_url' as const,image_url:{url:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jM1sAAAAASUVORK5CYII='}};await assert.rejects(providers.complete([{role:'user',content:[image]}],'system',new AbortController().signal),/未启用/);assert.equal(calls,0);
     await providers.save({enableVision:true});await providers.complete([{role:'user',content:[{type:'text',text:'本轮授权图片'},image]}],'system',new AbortController().signal);assert.equal(captured[0]!.messages[1].content[1].image_url.url,image.image_url.url);
     await assert.rejects(providers.complete([{role:'user',content:'x'.repeat(8001)}],'system',new AbortController().signal),/文本上下文/);await assert.rejects(providers.complete([{role:'user',content:[image,image,image,image]}],'system',new AbortController().signal),/图片数量/);const oversized={type:'image_url' as const,image_url:{url:'data:image/png;base64,'+Buffer.alloc(1025).toString('base64')}};await assert.rejects(providers.complete([{role:'user',content:[oversized]}],'system',new AbortController().signal),/总字节/);assert.equal(calls,1);
+  }finally{await rm(directory,{recursive:true,force:true});}
+});
+
+
+test('the transport validates real image dimensions for workflow and direct vision calls',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'yingliu-vision-dimension-'));let requests=0;
+  try{const providers=new ProviderManager(directory,new MemorySecrets(),{fetch:async()=>{requests++;return Response.json({choices:[{message:{content:'ok'},finish_reason:'stop'}]});}});await providers.save({apiKey:'synthetic-only',supportsVision:true,enableVision:true,maxVisionDimension:64});
+    const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jM1sAAAAASUVORK5CYII=','base64');png.writeUInt32BE(65,16);
+    await assert.rejects(providers.complete([{role:'user',content:[{type:'image_url',image_url:{url:'data:image/png;base64,'+png.toString('base64')}}]}],'检查关键帧',new AbortController().signal),/像素尺寸/);assert.equal(requests,0);
+    await assert.rejects(providers.complete([{role:'user',content:[{type:'image_url',image_url:{url:'data:image/png;base64,AA=='}}]}],'检查关键帧',new AbortController().signal),/格式|尺寸/);assert.equal(requests,0);
   }finally{await rm(directory,{recursive:true,force:true});}
 });

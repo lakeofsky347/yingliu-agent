@@ -2,6 +2,8 @@ import { join, resolve } from 'node:path';
 import type { BackendPort, ProviderHost, SecretStore } from './contracts.ts';
 import type { RpcResult, StudioSnapshot } from '../shared/types.ts';
 import { ProjectHub } from '../host/project-hub.ts';
+import type { GeneratedFile, MediaTask } from '../jobs/contracts.ts';
+import type { TtsSettings } from '../shared/types.ts';
 
 export interface AppBackendOptions {
   dataDirectory:string;
@@ -19,5 +21,9 @@ export class AppBackend implements BackendPort {
   }
   call<T=StudioSnapshot>(endpoint:string,payload:unknown={}):Promise<T>{return this.hub.call<T>(endpoint,payload);}
   route(endpoint:string,payload:unknown={}):Promise<RpcResult>{return this.hub.route(endpoint,payload);}
+  mediaPort(){return this.hub.mediaPort();}
+  stageWorkflowMedia(id:string,task:MediaTask,files:GeneratedFile[],signal:AbortSignal){return this.hub.stageWorkflowMedia(id,task,files,signal);}
+  workflowVoice(id:string,shotId:string,text:string,signal:AbortSignal,settings?:TtsSettings){return this.hub.workflowVoice(id,shotId,text,signal,settings);}
+  workflowCapture(id:string,frame:number,signal:AbortSignal,candidate?:import('../workflows/contracts.ts').WorkflowCandidate){return this.hub.workflowCapture(id,frame,signal,candidate);}
   dispose():Promise<void>{return this.hub.dispose();}
 }

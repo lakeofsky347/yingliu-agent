@@ -1,3 +1,4 @@
+import { imageMetadata } from '../models/image-input.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -38,6 +39,7 @@ const DIRECTOR=`你是映流 Studio 的对话导演。通过同一个多轮 mess
 工具：
 video_project action=get读取当前工程；action=create提供title/topic/targetDuration/target，仅用户明确新建时使用。
 video_update arguments={expectedRevision,update:{title?,topic?,targetDuration?,target?,storyboard?:{shots:[...]},sourcesByIndex?:[source],addShots?:[{tempId,afterId?,title,intent,composition,action,durationSeconds,assetIds,referenceIds,transition,params,source}],deleteShotIds?:[ID],shotOrder?:[ID或tempId],shotPatches?:[{id,patch:{title?,intent?,composition?,action?,narration?,durationFrames?,durationSeconds?,transition?,assetIds?,referenceIds?,params?}}],assetBindings?:[{shotId,assetId,kind:"asset|reference",remove?:true}],sources?:[{shotId,source}],audioClips?:[...]}}。已有工程不要使用storyboard或全量shots覆盖；稳定ID/sourcePath由应用控制。删除、重排、添加要符合用户明确请求。初次storyboard每镜用title,intent,composition,action,durationSeconds,assetIds,referenceIds,transition,params；sourcesByIndex每镜一份真实源码。新增镜必须给source。
+若工程 videoClips 中有绑定该镜头的片段，宿主已按当前帧绘制视频底图。ctx.hasVideo 表示底图存在，ctx.video 给出 assetId/sourceFrame/time。场景源码仅叠加文字或图形，不用不透明全屏背景遮挡底图，不自行启动 video 播放或累计时间。
 video_inspect arguments={shotId?,includeSource?:true}读取当前已有源码/规范；当前不会返回截图像素。video_render action=preview/check要求提交后预览；默认创作/源码修改后应用检查。video_audio 仅调整已导入音轨的add/update/remove，不导入任意路径、不远程合成。
 参数只填写要改的字段，保留用户未要求修改的标题、时长、文字、布局和主链。用户选中镜头或明确第二/第三镜时只改对应ID；用户明确全片、删除或重排时可处理需要的范围。素材仅引用项目已有ID，不能编造路径或素材；图片若未明确启用发送，仅元信息进入上下文。
 源码为 {html,css,js}，JS ES模块导出render(ctx)，可导出async ready(ctx)。ctx含root,canvas,ctx2d,params,assets,frame,localFrame,progress,time,duration,width,height。按帧独立求值支持重复/倒序，用ctx.params保持可编辑，不使用墙钟/autoplay，不联网、不导入包、不读写文件。所有文字和图像加载都要符合实际资源就绪。
@@ -103,12 +105,6 @@ export function compileDirectorPlan(plan:Obj,snapshot:StudioSnapshot,input:ChatI
   return {intent,reply:typeof plan.message==='string'?plan.message:'已处理当前请求。',candidate,sources:[...sourceMap].map(([shotId,source])=>({shotId,source})),mutated,create:creating,preview:preview||mutated,inspect};
 }
 
-function imageMetadata(buffer:Buffer):{mime:string;width:number;height:number}{
-  if(buffer.length>=24&&buffer.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))return {mime:'image/png',width:buffer.readUInt32BE(16),height:buffer.readUInt32BE(20)};
-  if(buffer[0]===255&&buffer[1]===216){let offset=2;while(offset+9<buffer.length){if(buffer[offset]!==255)throw new Error('JPEG标记无效');const marker=buffer[offset+1]!;offset+=2;if(marker===217||marker===218)break;const length=buffer.readUInt16BE(offset);if(length<2||offset+length>buffer.length)throw new Error('JPEG尺寸无效');if([192,193,194,195,197,198,199,201,202,203,205,206,207].includes(marker))return {mime:'image/jpeg',height:buffer.readUInt16BE(offset+3),width:buffer.readUInt16BE(offset+5)};offset+=length;}}
-  if(buffer.length>=30&&buffer.subarray(0,4).toString()==='RIFF'&&buffer.subarray(8,12).toString()==='WEBP'){const kind=buffer.subarray(12,16).toString();if(kind==='VP8X')return {mime:'image/webp',width:1+buffer.readUIntLE(24,3),height:1+buffer.readUIntLE(27,3)};if(kind==='VP8 '&&buffer[23]===157&&buffer[24]===1&&buffer[25]===42)return {mime:'image/webp',width:buffer.readUInt16LE(26)&16383,height:buffer.readUInt16LE(28)&16383};if(kind==='VP8L'&&buffer[20]===47){const bits=buffer.readUInt32LE(21);return {mime:'image/webp',width:(bits&16383)+1,height:((bits>>>14)&16383)+1};}}
-  throw new Error('图片格式或真实尺寸无法验证，仅支持有效PNG/JPEG/WebP');
-}
 export async function authorizedImages(snapshot:StudioSnapshot,input:ChatInput,config:ProviderConfig,signal:AbortSignal):Promise<{content:ModelContent[];ids:string[]}>{
   const requested=input.imageAssetIds??[];if(!input.allowImageUpload||!config.enableVision||!config.supportsVision)return {content:[],ids:[]};
   if(!snapshot.project||!snapshot.root)throw new Error('请先导入当前工程的图片');if(!requested.length)return {content:[],ids:[]};
@@ -120,7 +116,7 @@ export async function authorizedImages(snapshot:StudioSnapshot,input:ChatInput,c
 
 /** Durable, cancelable conversations; model plans commit once after complete validation. */
 export class ConversationService {
-  private controller?:AbortController;private running?:Promise<unknown>;private activeTurnId?:string;private activeProjectId?:string;private ownedTaskId?:string;private writes:Promise<void>=Promise.resolve();private cancelWork:Promise<unknown>=Promise.resolve();
+  private releaseModel?:()=>void;private controller?:AbortController;private running?:Promise<unknown>;private activeTurnId?:string;private activeProjectId?:string;private ownedTaskId?:string;private writes:Promise<void>=Promise.resolve();private cancelWork:Promise<unknown>=Promise.resolve();
   constructor(private backend:BackendPort,private providers:ProviderManager,private dataDirectory:string){}
   private filename(projectId?:string){return join(this.dataDirectory,'conversations',createHash('sha256').update(projectId??'unbound').digest('hex')+'.json');}
   private persist(conversation:Conversation){const saved=structuredClone(conversation);const work=this.writes.then(async()=>{await mkdir(join(this.dataDirectory,'conversations'),{recursive:true});const path=this.filename(saved.projectId),temporary=path+'.tmp-'+randomUUID();await writeFile(temporary,JSON.stringify(saved,null,2)+'\n');await rename(temporary,path);});this.writes=work.catch(()=>{});return work;}
@@ -136,11 +132,12 @@ export class ConversationService {
   async shutdown():Promise<void>{this.cancel();await this.running?.catch(()=>{});await this.cancelWork;await this.writes;}
   async send(input:ChatInput):Promise<{conversation:Conversation;snapshot:StudioSnapshot}>{
     if(this.controller)throw new Error('已有对话进行中，请等待或取消');const controller=new AbortController();this.controller=controller;
-    const running=this.run(input,controller);this.running=running;try{return await running;}finally{this.controller=undefined;this.activeTurnId=undefined;this.activeProjectId=undefined;this.ownedTaskId=undefined;this.running=undefined;}
+    const running=this.run(input,controller);this.running=running;try{return await running;}finally{this.releaseModel?.();this.releaseModel=undefined;this.controller=undefined;this.activeTurnId=undefined;this.activeProjectId=undefined;this.ownedTaskId=undefined;this.running=undefined;}
   }
   private async run(original:ChatInput,controller:AbortController):Promise<{conversation:Conversation;snapshot:StudioSnapshot}>{
-    const settings=await this.providers.settings();const fixture=original.provider===DEMO_PROVIDER&&this.providers.fixtureEnabled();if(!fixture){if(original.provider!=='custom')throw new Error('请选择当前应用配置的模型');if(original.model!==settings.config.model)throw new Error('模型配置已变化，请重新选择');if(!settings.hasKey)throw new Error(settings.credentialStatus?.error??'请先在模型设置中配置当前应用的API Key；本轮没有创建或修改工程');}
-    let conversation=await this.history(original.projectId),input={...original};const retry=input.retryTurnId?conversation.turns?.find(t=>t.id===input.retryTurnId):undefined;
+    const fixture=original.provider===DEMO_PROVIDER&&this.providers.fixtureEnabled();const selection=original.role??{provider:original.provider,model:original.model};const settings=await this.providers.settings(fixture?undefined:selection);if(!fixture&&!(settings.ready??settings.hasKey))throw new Error(settings.credentialStatus?.error??'请先在模型设置中配置当前应用的API Key；本轮没有创建或修改工程');
+    if(!fixture){const route=await this.providers.registry.resolve(selection);this.releaseModel=this.providers.registry.acquire(route.connection.id,route.model.id);}
+    let conversation=await this.history(original.projectId),input={...original,...(!fixture&&settings.route?settings.route:{})};const retry=input.retryTurnId?conversation.turns?.find(t=>t.id===input.retryTurnId):undefined;
     if(input.retryTurnId&&!retry)throw new Error('重试回合不存在');if(retry&&retry.status==='pending')throw new Error('该回合仍在运行');if(retry)input={...retry.request,...input,message:input.message.trim()||retry.request.message,projectId:input.projectId??retry.request.projectId};
     if(!input.message.trim()||input.message.length>20000)throw new Error('制作请求须为1–20,000字符');
     const signal=AbortSignal.any([controller.signal,AbortSignal.timeout(Math.min(900000,(settings.config.requestTimeoutMs??90000)*4+30000))]);const onAbort=()=>this.cancelOwned();signal.addEventListener('abort',onAbort,{once:true});
@@ -174,7 +171,7 @@ export class ConversationService {
       turns.push({role:'user',content:images.content.length?[{type:'text',text:'当前上下文：'+contextText},...images.content]:'当前上下文：'+contextText});
       const system=DIRECTOR+'\n'+packBriefContext(input.packId);const size=(m:ModelMessage)=>typeof m.content==='string'?m.content.length:m.content.reduce((total,part)=>total+(part.type==='text'?part.text.length:0),0);
       let requestSize=system.length+turns.reduce((total,m)=>total+size(m),0);while(requestSize>maxChars&&turns.length>1)requestSize-=size(turns.shift()!);if(requestSize>maxChars)throw new Error('当前工程与导演提示超过上下文上限，请提高模型上下文限制');
-      const raw=await this.providers.complete(turns,system,signal,config.maxTokens);turns.push({role:'assistant',content:raw});
+      const raw=await this.providers.complete(turns,system,signal,config.maxTokens,{provider:input.provider,model:input.model});turns.push({role:'assistant',content:raw});
       try{const plan=parseModelJson(raw),actions=array(plan.actions??[],'actions');const combined={...plan,actions:[...collected,...actions]};const prepared=compileDirectorPlan(combined,snapshot,input,requested);
         if(plan.done===true&&!prepared.inspect.length){
           try{if(prepared.mutated){signal.throwIfAborted();const candidate=prepared.candidate!;snapshot=prepared.create?await this.backend.call('create',{project:candidate,sources:prepared.sources}):await this.backend.call('apply',{projectId:snapshot.project!.id,expectedRevision:snapshot.project!.revision,project:candidate,sources:prepared.sources});}

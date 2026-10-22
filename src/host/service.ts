@@ -3,12 +3,15 @@ import {readFile,writeFile,mkdir,readdir,rename,rm} from 'node:fs/promises';
 import {resolve,join,relative} from 'node:path';
 import {homedir} from 'node:os';
 import {createProject,compileSpec,defaultSceneSource,updateShot,updateTarget,validateProject,reorderShots} from '../core/index.ts';
-import type {VideoProject,StudioSnapshot,TaskState,EnvironmentSettings,ProviderGroup,RpcResult,SceneSource,Shot,ModelRoute,TtsSettings,AudioClip} from '../shared/types.ts';
+import type {VideoProject,StudioSnapshot,TaskState,EnvironmentSettings,ProviderGroup,RpcResult,SceneSource,Shot,ModelRoute,TtsSettings,AudioClip,VideoClip,Asset} from '../shared/types.ts';
 import type {HostContext} from './platform.ts';
 import {ProjectStore,projectPath,validateStoredProject,validateSources} from './store.ts';
 import {VideoRenderer,detectEnvironment} from './renderer.ts';
 import {AppSceneGenerator,parseSceneSource,normalizeStoryboard} from './generator.ts';
-import {SpeechSynthesizer} from './audio.ts';
+import {SpeechSynthesizer,extractVideoAudio} from './audio.ts';
+import type {MediaProjectPort} from '../jobs/contracts.ts';
+import {inspectGeneratedMedia,readProjectImage} from '../media/inspect.ts';
+import type { GeneratedFile, MediaTask } from '../jobs/contracts.ts';
 import {inspectCredential,isCredentialError,updateCredential} from '../app/secrets.ts';
 import {defaultTtsSettings,validateTtsSettings} from '../shared/tts-capability.ts';
 
@@ -41,6 +44,47 @@ export class StudioService {
     if(recent[0])try{this.project=await this.store.open(recent[0].path);this.root=recent[0].path;await this.recoverTask();await this.refreshPreview();}catch{/* Recent path may have been moved; keep the picker usable. */}
   }
   async snapshot():Promise<StudioSnapshot>{await this.initialized;const credentials=await inspectCredential(this.ctx.credentials,'YINGLIU_TTS_API_KEY');return structuredClone({project:this.project,root:this.root,task:this.task,previewUrl:this.previewUrl,previewRevision:this.previewRevision,assetBaseUrl:this.assetBaseUrl,audioUrl:this.audioUrl,tts:{...this.tts,apiKey:undefined},ttsConfigured:credentials.hasKey,credentialStatus:credentials.credentialStatus,providers:this.providers,environment:detectEnvironment(this.settings),recent:await this.store.recent()});}
+  /** Trusted host port: generated paths never cross the public RPC or model tool surface. */
+  async inspectMediaProject(){await this.initialized;const {project}=this.required();return {revision:project.revision,shotIds:project.shots.map(shot=>shot.id)};}
+  async readMediaImage(assetId:string,shotId?:string){await this.initialized;const {root,project}=this.required();return readProjectImage(root,project,assetId,shotId);}
+  async validateMediaArtifact(path:string,mimeType:string,signal?:AbortSignal){await this.initialized;return inspectGeneratedMedia(path,mimeType,this.settings,signal);}
+  async stageWorkflowMedia(task:MediaTask,files:GeneratedFile[],signal:AbortSignal):Promise<Asset[]>{
+    await this.initialized;const {root,project}=this.required();if(task.projectId!==project.id)throw new Error('素材任务工程不匹配');
+    const assets:Asset[]=[];for(const file of files){signal.throwIfAborted();const asset=await this.store.importAsset(root,{path:file.path,mime:file.mimeType,name:file.name,description:task.prompt},this.settings,signal);asset.generation={taskId:task.id,connectionId:task.connection.id,model:task.model.model,operation:task.operation,prompt:task.prompt,inputHashes:task.inputHashes};assets.push(asset);}return assets;
+  }
+  async workflowVoice(shotId:string,text:string,signal:AbortSignal,settings?:TtsSettings):Promise<Asset>{
+    const prepared=await (async()=>{
+      await this.initialized;signal.throwIfAborted();const {root,project}=this.required(),shot=project.shots.find(item=>item.id===shotId);if(!shot)throw new Error('配音目标镜头不存在');
+      const speechSettings=settings??await this.speechSettings();if(!speechSettings.enabled)throw new Error('请先配置并启用配音服务');validateTtsSettings(speechSettings,detectEnvironment(this.settings));if(!text.trim())throw new Error('配音文本不能为空');
+      return {root,shot,speechSettings};
+    })().catch(error=>{throw Object.assign(error instanceof Error?error:new Error(String(error)),{submissionUncertain:false});});
+    return this.speech.synthesize(prepared.root,{text,name:prepared.shot.title+' · 协作配音'},prepared.speechSettings,this.settings,signal);
+  }
+  async workflowCapture(frame:number,signal:AbortSignal,candidate?:import('../workflows/contracts.ts').WorkflowCandidate){await this.initialized;const {root,project}=this.required();if(candidate){if(candidate.project.id!==project.id)throw new Error('候选工程不匹配');return this.renderer.captureCandidate(root,candidate.project,candidate.sources,this.settings,frame,signal);}const capture=await this.renderer.capture(root,project,this.settings,frame,signal);return {bytes:await readFile(capture.path),mime:'image/png',sha256:capture.sha256};}
+  async applyMediaResult(input:Parameters<MediaProjectPort['applyResult']>[0]):Promise<{assetIds:string[];revision:number}>{
+    await this.initialized;
+    return this.enqueue(async()=>{
+      if(this.disposed)throw new Error('应用服务已停止');this.assertIdle();const {root,project}=this.required();
+      if(input.projectId!==project.id)throw new Error('媒体任务工程不匹配');
+      const applications=(project.extensions.mediaApplications??{}) as Record<string,{assetIds:string[];revision:number}>;
+      const prior=applications[input.provenance.taskId];if(prior)return structuredClone(prior);
+      this.assertRevision(input,true);if(input.shotId&&!project.shots.some(shot=>shot.id===input.shotId))throw new Error('媒体任务镜头已不存在');
+      const next=structuredClone(project),assetIds:string[]=[];
+      for(const file of input.files){
+        const asset=await this.store.importAsset(root,{path:file.path,mime:file.mimeType,name:file.name,description:input.provenance.prompt},this.settings);
+        Object.assign(asset,{generation:structuredClone(input.provenance)});next.assets.push(asset);assetIds.push(asset.id);next.graph.positions[asset.id]=[60,80+(next.assets.length-1)*180];
+      }
+      if(!assetIds.length)throw new Error('媒体任务没有可采用的结果');
+      const shot=next.shots.find(item=>item.id===input.shotId);
+      if(shot){
+        const imageIds=next.assets.filter(asset=>assetIds.includes(asset.id)&&asset.kind==='image').map(asset=>asset.id);shot.assetIds=[...new Set([...shot.assetIds,...imageIds])];
+        const video=next.assets.find(asset=>assetIds.includes(asset.id)&&asset.kind==='video');
+        if(video){next.schemaVersion=2;next.videoClips=[...(next.videoClips??[]).filter(clip=>clip.shotId!==shot.id),{id:randomUUID(),shotId:shot.id,assetId:video.id,trimStart:0,trimEnd:video.duration,speed:1,fit:'cover',audio:'mute'}];}
+      }
+      const applied={assetIds,revision:project.revision+1};next.extensions.mediaApplications={...applications,[input.provenance.taskId]:applied};
+      await this.persist(next,{},'采用生成媒体');return structuredClone(applied);
+    });
+  }
   private required(){if(!this.project||!this.root)throw new Error('请先新建或打开项目');return {project:this.project,root:this.root};}
   private assertIdle(){if(this.task?.status==='running')throw new Error('已有任务运行，请等待或取消');}
   private async refreshPreview(){
@@ -81,6 +125,7 @@ export class StudioService {
     if(metadata.shotOrder)project=reorderShots(project,metadata.shotOrder);
     for(const item of metadata.shotPatches??[])project=updateShot(project,item.id??item.shotId,item.patch);
     if(metadata.audioClips!==undefined)project.audioClips=structuredClone(metadata.audioClips);
+    if(metadata.videoClips!==undefined)project.videoClips=structuredClone(metadata.videoClips);
     if(metadata.sessionIds)project.sessionIds=[...new Set<string>(metadata.sessionIds)];
     if(metadata.extensions)project.extensions={...project.extensions,...metadata.extensions};
     this.fitAudio(project);
@@ -224,7 +269,7 @@ export class StudioService {
   private async performRpc(endpoint:string,payload:unknown):Promise<RpcResult>{
     try{
       await this.initialized;if(this.disposed)throw new Error('应用服务已停止');const data=(payload??{}) as any;
-      if(['save','apply','saveSource','restoreSource','undo','redo','rename','retry','job.retry'].includes(endpoint))this.assertRevision(data,true);
+      if(['save','apply','saveSource','restoreSource','undo','redo','rename','retry','job.retry','video.clip.save','video.clip.remove','video.clip.extract'].includes(endpoint))this.assertRevision(data,true);
       else if(['import','audio','generate','export','preview'].includes(endpoint)&&data.expectedRevision!==undefined)this.assertRevision(data);
       switch(endpoint){
         case 'catalog':this.providers=await Promise.all(this.ctx.llm.listProviders().map(async p=>{try{return {...p,models:await this.ctx.llm.listModels(p.id)};}catch(error){return {...p,models:[],error:error instanceof Error?error.message:'模型目录读取失败'};}}));break;
@@ -244,6 +289,26 @@ export class StudioService {
         case 'save':{if(this.task?.status==='running'&&this.task.kind!=='export')this.assertIdle();const {project}=this.required();if(!data.project||data.project.id!==project.id)throw new Error('项目已切换，请刷新后重试');const next=structuredClone(data.project) as VideoProject;this.fitAudio(next);await this.persist({...next,outputs:project.outputs}, {},'保存工程');break;}
         case 'apply':await this.apply(data);break;
         case 'import':{this.assertIdle();const {root,project}=this.required();const asset=await this.store.importAsset(root,data,this.settings);const next=structuredClone(project);next.assets.push(asset);next.graph.positions[asset.id]=[60,80+(next.assets.length-1)*180];await this.persist(next,{},'导入素材');break;}
+        case 'video.clip.save':{
+          this.assertIdle();const next=structuredClone(this.required().project),raw=data.clip;
+          if(!raw||typeof raw!=='object'||!['mute','keep'].includes(raw.audio??'mute'))throw new Error('视频片段参数无效');
+          if(!next.shots.some(shot=>shot.id===raw.shotId)||!next.assets.some(asset=>asset.id===raw.assetId&&asset.kind==='video'))throw new Error('请选择当前工程的视频素材和镜头');
+          const existing=(next.videoClips??[]).find(clip=>clip.shotId===raw.shotId);
+          if(raw.id&&raw.id!==existing?.id)throw new Error('视频片段已变化，请刷新');
+          const clip:VideoClip={id:existing?.id??randomUUID(),shotId:raw.shotId,assetId:raw.assetId,trimStart:Number(raw.trimStart??0),...(raw.trimEnd!==undefined?{trimEnd:Number(raw.trimEnd)}:{}),speed:Number(raw.speed??1),fit:raw.fit??'cover',audio:raw.audio??'mute'};
+          next.schemaVersion=2;next.videoClips=[...(next.videoClips??[]).filter(item=>item.shotId!==clip.shotId),clip];if(clip.audio==='keep')next.target.audioMode='mixed';await this.persist(next,{},'保存视频片段');break;
+        }
+        case 'video.clip.remove':{
+          this.assertIdle();const next=structuredClone(this.required().project);if(!next.videoClips?.some(clip=>clip.id===data.clipId))throw new Error('视频片段不存在');
+          next.videoClips=next.videoClips.filter(clip=>clip.id!==data.clipId);await this.persist(next,{},'移除视频片段');break;
+        }
+        case 'video.clip.extract':{
+          this.assertIdle();const {root,project}=this.required(),next=structuredClone(project),clip=next.videoClips?.find(item=>item.id===data.clipId);
+          if(!clip)throw new Error('视频片段不存在');const video=next.assets.find(asset=>asset.id===clip.assetId)!;
+          const audio=await extractVideoAudio(root,video,clip,this.settings);next.assets.push(audio);clip.audio='mute';
+          const shot=next.shots.find(item=>item.id===clip.shotId)!;
+          next.audioClips=[...(next.audioClips??[]),{id:randomUUID(),assetId:audio.id,role:'sfx',shotId:clip.shotId,startSeconds:0,trimStart:0,trimEnd:Math.min(audio.duration!,shot.durationFrames*next.target.fps.den/next.target.fps.num),volume:1,fadeIn:0,fadeOut:0}];next.target.audioMode='mixed';await this.persist(next,{},'提取视频原声');break;
+        }
         case 'tts':{
           this.assertIdle();const options:Partial<TtsSettings>={};for(const key of ['endpoint','model','voice','speed','enabled'] as const)if(data[key]!==undefined)(options as any)[key]=data[key];
           const next={...this.tts,...options},file=join(this.baseDirectory,'tts.json'),temporary=file+'.tmp-'+randomUUID();
@@ -297,7 +362,7 @@ export class StudioService {
           return this.performRpc(task.request.endpoint,{...task.request.payload,expectedRevision:data.expectedRevision,_retryOf:task.id});
         }
         case 'cancel':this.controller?.abort(new Error('用户已取消'));break;
-        case 'environment':this.assertIdle();for(const key of ['browserPath','ffmpegPath','ffprobePath'] as const)if(data[key]!==undefined){if(typeof data[key]!=='string')throw new Error('执行文件路径须为字符串');this.settings[key]=data[key];}await mkdir(this.baseDirectory,{recursive:true});await writeFile(join(this.baseDirectory,'environment.json'),JSON.stringify(this.settings,null,2));break;
+        case 'environment':this.assertIdle();if(data.maxVideoBytes!==undefined){if(!Number.isSafeInteger(data.maxVideoBytes)||data.maxVideoBytes<1||data.maxVideoBytes>512*1024*1024)throw new Error('单个视频文件上限须为 1 字节至 512 MiB');this.settings.maxVideoBytes=data.maxVideoBytes;}for(const key of ['browserPath','ffmpegPath','ffprobePath'] as const)if(data[key]!==undefined){if(typeof data[key]!=='string')throw new Error('执行文件路径须为字符串');this.settings[key]=data[key];}await mkdir(this.baseDirectory,{recursive:true});await writeFile(join(this.baseDirectory,'environment.json'),JSON.stringify(this.settings,null,2));break;
         case 'reveal':{const {root}=this.required(),path=resolve(String(data.path??root));if(path!==root&&!path.startsWith(root+'/'))throw new Error('请选择本项目文件');if(!this.ctx.reveal)throw new Error('当前运行器没有文件打开服务');await this.ctx.reveal(path);break;}
         default:throw new Error('未找到应用操作');
       }
