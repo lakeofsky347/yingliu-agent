@@ -35,10 +35,15 @@ export function overBudget(budget: Budget, usage: Usage): string | null {
   return null;
 }
 /** Whether a tool call may run without a human. Cost with a known estimate that would exceed the ceiling is never auto-approved. */
-export function needsApproval(risk: ToolRisk, autoApprove: ToolRisk[], budget: Budget, usage: Usage, estimate: number | null): string | null {
+export function needsApproval(risk: ToolRisk, autoApprove: ToolRisk[], budget: Budget, usage: Usage, estimate: number | null, project?: { maxCost: number | null; spent: number; unknownCostCalls: number; currency: string }): string | null {
+  if (risk === 'cost' && project && project.maxCost !== null) {
+    if (estimate !== null && project.spent + estimate > project.maxCost) return `预计费用 ${estimate} 将超过项目上限 ${project.maxCost} ${project.currency}（已花 ${project.spent.toFixed(2)}）`;
+    if (estimate === null && !autoApprove.includes('cost')) return `会调用收费生成模型（费用未知；项目已花 ${project.spent.toFixed(2)} / 上限 ${project.maxCost} ${project.currency}）`;
+    if (estimate === null) return '费用未知，且设置了项目费用上限';
+  }
   if (risk === 'cost' && budget.maxCost !== null && estimate !== null && usage.cost + estimate > budget.maxCost) return `预计费用 ${estimate} 将超过上限 ${budget.maxCost} ${budget.currency}`;
   if (autoApprove.includes(risk)) return risk === 'cost' && estimate === null && budget.maxCost !== null ? '费用未知，且设置了费用上限' : null;
-  return risk === 'cost' ? (estimate === null ? '会调用收费生成模型（费用未知）' : `会调用收费生成模型（预计 ${estimate} ${budget.currency}）`) : risk === 'export' ? '会导出成片文件' : risk === 'write' ? '会修改工程（可撤销）' : '需要确认';
+  return risk === 'cost' ? (estimate === null ? '会调用收费生成模型（费用未知）' : `会调用收费生成模型（预计 ${estimate} ${budget.currency}）`) : risk === 'export' ? '会导出成片文件' : risk === 'plan' ? '请审阅创作计划（批准后才会保存并按计划执行）' : risk === 'write' ? '会修改工程（可撤销）' : '需要确认';
 }
 
 export type ErrorClass = 'retry' | 'conflict' | 'model' | 'fatal';

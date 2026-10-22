@@ -4,6 +4,9 @@ import type { AgentTool, JsonSchema, ToolContext, ToolResult } from './contracts
 import { bound, summarizeProject } from './context.ts';
 import { synthesize, type SynthSpec } from './synth.ts';
 import type { Capabilities } from './contracts.ts';
+import type { VideoProject } from '../shared/types.ts';
+import { anchorPrompt, dataChecks, frameIssue, normalizeCharacter, normalizeShots, normalizeStyle, pngLuma, type QcReport, type Story } from './story.ts';
+import { SKILLS, skillIndex } from './skills.ts';
 
 const object = (properties: Record<string, JsonSchema>, required: string[] = []): JsonSchema => ({ type: 'object', properties, required, additionalProperties: false });
 const str = (description: string): JsonSchema => ({ type: 'string', description });
@@ -29,6 +32,44 @@ async function directorAction(ctx: ToolContext, tool: 'video_update' | 'video_au
   const sources = Object.fromEntries(plan.sources.map(item => [item.shotId, item.source]));
   const next = await ctx.port.commit(ctx.projectId, snapshot.project?.revision ?? 0, plan.candidate, sources, '智能体：' + label);
   return { content: json({ ok: true, revision: next.project?.revision, project: summarizeProject(next.project) }), revision: next.project?.revision };
+}
+
+const ids = (value: unknown) => Array.isArray(value) ? value.map(String).slice(0, 8) : [];
+async function anchored(ctx: ToolContext, args: Record<string, unknown>): Promise<string> {
+  const prompt = need(args, 'prompt'); const story = await ctx.docs.story();
+  return (prompt + anchorPrompt(story.status === 'approved' || story.characters.length ? story : null, ids(args.characterIds))).slice(0, 4000);
+}
+function keyframes(project: VideoProject): { frame: number; shotId: string }[] {
+  let start = 0; const frames: { frame: number; shotId: string }[] = [];
+  for (const id of project.shotOrder.length ? project.shotOrder : project.shots.map(s => s.id)) { const shot = project.shots.find(s => s.id === id); if (!shot) continue; frames.push({ frame: start + Math.floor(shot.durationFrames / 2), shotId: id }); start += shot.durationFrames; }
+  return frames;
+}
+/** Mutates project in place; returns a description of each change. */
+export function alignToVoice(project: VideoProject, pad: number, wanted: Set<string> | null): { shotId: string; fromSeconds: number; toSeconds: number }[] {
+  const fps = project.target.fps.num / project.target.fps.den; const changes: { shotId: string; fromSeconds: number; toSeconds: number }[] = [];
+  for (const shot of project.shots) {
+    if (wanted && !wanted.has(shot.id)) continue;
+    const voices = (project.audioClips ?? []).filter(c => c.role === 'voice' && c.shotId === shot.id);
+    let length = 0;
+    for (const clip of voices) { const asset = project.assets.find(a => a.id === clip.assetId); if (!asset?.duration) continue; clip.startSeconds = 0; length = Math.max(length, Math.min(clip.trimEnd ?? asset.duration, asset.duration) - clip.trimStart); }
+    if (!length) continue;
+    const frames = Math.max(1, Math.ceil((length + pad) * fps)); if (frames === shot.durationFrames) continue;
+    changes.push({ shotId: shot.id, fromSeconds: Math.round(shot.durationFrames / fps * 100) / 100, toSeconds: Math.round(frames / fps * 100) / 100 }); shot.durationFrames = frames;
+  }
+  if (changes.length) project.targetDuration = Math.round(project.shots.reduce((s, x) => s + x.durationFrames, 0) / fps * 100) / 100;
+  return changes;
+}
+export async function qualityCheck(ctx: ToolContext): Promise<QcReport> {
+  const project = (await ctx.port.snapshot(ctx.projectId)).project; if (!project) throw new Error('没有打开的工程');
+  const story: Story = await ctx.docs.story();
+  const issues = dataChecks(project, story); const unchecked: string[] = [];
+  for (const f of keyframes(project).slice(0, 12)) {
+    ctx.signal.throwIfAborted();
+    try { const shot = await ctx.port.capture(ctx.projectId, f.frame, ctx.signal); const luma = shot.mime === 'image/png' ? pngLuma(shot.bytes) : null; if (!luma) { unchecked.push(`${f.shotId}：画面格式无法分析`); continue; } const issue = frameIssue(f.shotId, luma); if (issue) issues.push(issue); }
+    catch (error) { if (ctx.signal.aborted) throw error; unchecked.push(`${f.shotId}：截帧失败（${error instanceof Error ? error.message : String(error)}）`); }
+  }
+  const report: QcReport = { pass: !issues.some(i => i.severity === 'high'), checkedAt: new Date().toISOString(), issues, unchecked };
+  await ctx.docs.saveQc(report); return report;
 }
 
 export function createTools(): AgentTool[] {
@@ -76,12 +117,15 @@ export function createTools(): AgentTool[] {
         const answer = await ctx.port.vision('逐张检查视频关键帧（顺序对应镜头 ' + frames.slice(0, 6).map(f => f.shotId).join(', ') + '）。只输出 JSON：{"pass":true|false,"issues":[{"shotId":"","problem":"","severity":"low|medium|high","suggestion":""}]}。检查文字溢出/遮挡、空白画面、对比度、元素越界、与镜头意图不符。', images, ctx.signal);
         return { content: bound(answer, 4000) };
       } },
-    { name: 'generate_image', risk: 'cost', requires: ['image'], description: '用图片模型生成素材（产生费用，需要用户批准）。完成后用 media_apply 采用。', parameters: object({ expectedRevision: int('当前工程版本'), prompt: str('画面描述'), shotId: str('关联镜头') }, ['expectedRevision', 'prompt']),
+    { name: 'generate_image', risk: 'cost', requires: ['image'], description: '用图片模型生成素材（产生费用，需要用户批准）。传 characterIds 时自动拼接计划中的风格与角色特征锚点。完成后用 media_apply 采用。', parameters: object({ expectedRevision: int('当前工程版本'), prompt: str('画面描述'), shotId: str('关联镜头'), characterIds: { type: 'array', items: { type: 'string' }, description: '出场角色 ID（来自创作计划）' } }, ['expectedRevision', 'prompt']),
       estimate: () => null,
-      async run(args, ctx) { const task = await rpc(ctx, 'media.generate', { expectedRevision: revision(args), operation: 'text-to-image', prompt: need(args, 'prompt'), ...(args.shotId ? { shotId: args.shotId } : {}), clientRequestId: `${ctx.runId}.${String(args.__callId ?? '')}` }) as { id: string }; return { content: json({ taskId: task.id }), waitFor: { kind: 'media', id: task.id } }; } },
-    { name: 'generate_video', risk: 'cost', requires: ['video'], description: '用视频模型生成片段（产生费用，需要用户批准）。', parameters: object({ expectedRevision: int('当前工程版本'), prompt: str('画面与运动描述'), shotId: str('关联镜头'), imageAssetId: str('可选：首帧图片素材 ID') }, ['expectedRevision', 'prompt']),
+      async run(args, ctx) { const task = await rpc(ctx, 'media.generate', { expectedRevision: revision(args), operation: 'text-to-image', prompt: await anchored(ctx, args), ...(args.shotId ? { shotId: args.shotId } : {}), clientRequestId: `${ctx.runId}.${String(args.__callId ?? '')}` }) as { id: string }; return { content: json({ taskId: task.id }), waitFor: { kind: 'media', id: task.id } }; } },
+    { name: 'generate_video', risk: 'cost', requires: ['video'], description: '用视频模型生成片段（产生费用，需要用户批准）。传 characterIds 自动拼接一致性锚点；imageAssetId 为首帧（可来自 frame_handoff）；useReference=true 且未给首帧时用第一个角色的参考图作首帧。', parameters: object({ expectedRevision: int('当前工程版本'), prompt: str('画面与运动描述'), shotId: str('关联镜头'), imageAssetId: str('可选：首帧图片素材 ID'), characterIds: { type: 'array', items: { type: 'string' } }, useReference: { type: 'boolean' } }, ['expectedRevision', 'prompt']),
       estimate: () => null,
-      async run(args, ctx) { const task = await rpc(ctx, 'media.generate', { expectedRevision: revision(args), operation: args.imageAssetId ? 'image-to-video' : 'text-to-video', prompt: need(args, 'prompt'), ...(args.shotId ? { shotId: args.shotId } : {}), ...(args.imageAssetId ? { imageAssetIds: [args.imageAssetId], allowImageUpload: true } : {}), clientRequestId: `${ctx.runId}.${String(args.__callId ?? '')}` }) as { id: string }; return { content: json({ taskId: task.id }), waitFor: { kind: 'media', id: task.id } }; } },
+      async run(args, ctx) {
+        let image = typeof args.imageAssetId === 'string' && args.imageAssetId ? args.imageAssetId : '';
+        if (!image && args.useReference === true) { const story = await ctx.docs.story(); const first = ids(args.characterIds).map(id => story.characters.find(c => c.id === id || c.name === id)).find(c => c?.referenceAssetIds.length); if (first) image = first.referenceAssetIds[0]; }
+        const task = await rpc(ctx, 'media.generate', { expectedRevision: revision(args), operation: image ? 'image-to-video' : 'text-to-video', prompt: await anchored(ctx, args), ...(args.shotId ? { shotId: args.shotId } : {}), ...(image ? { imageAssetIds: [image], allowImageUpload: true } : {}), clientRequestId: `${ctx.runId}.${String(args.__callId ?? '')}` }) as { id: string }; return { content: json({ taskId: task.id, firstFrame: image || undefined }), waitFor: { kind: 'media', id: task.id } }; } },
     { name: 'media_apply', risk: 'write', description: '把已就绪的生成素材采用到工程。', parameters: object({ taskId: str('媒体任务 ID'), expectedRevision: int('当前工程版本') }, ['taskId', 'expectedRevision']),
       async run(args, ctx) { const value = await rpc(ctx, 'media.apply', { taskId: need(args, 'taskId'), expectedRevision: revision(args) }); return { content: json(value) }; } },
     { name: 'generate_voice', risk: 'cost', requires: ['speech'], description: '为镜头生成配音（产生费用，需要用户批准）。', parameters: object({ shotId: str('镜头 ID'), text: str('旁白文字') }, ['shotId', 'text']),
@@ -105,8 +149,93 @@ export function createTools(): AgentTool[] {
     { name: 'run_workflow', risk: 'cost', description: '启动固定协作流程（导演→画面→配音→视觉检查），可能调用生成模型（需要用户批准）。', parameters: object({ expectedRevision: int('当前工程版本'), prompt: str('制作要求') }, ['expectedRevision', 'prompt']),
       estimate: () => null,
       async run(args, ctx) { const record = await rpc(ctx, 'workflows.run', { expectedRevision: revision(args), prompt: need(args, 'prompt') }) as { id: string }; return { content: json({ workflowId: record.id }), waitFor: { kind: 'workflow', id: record.id } }; } },
-    { name: 'export_mp4', risk: 'export', description: '导出当前版本为 MP4（需要用户批准）。', parameters: object({}),
-      async run(_args, ctx) { await rpc(ctx, 'export', {}); return { content: json({ ok: true, message: '已开始导出，可在「任务记录」查看进度' }) }; } },
+    { name: 'export_mp4', risk: 'export', description: '导出当前版本为 MP4（需要用户批准）。导出前自动质检；有严重问题时拒绝导出，确需导出传 force=true。', parameters: object({ force: { type: 'boolean' } }),
+      async run(args, ctx) {
+        const report = await qualityCheck(ctx);
+        if (!report.pass && args.force !== true) return { content: json({ ok: false, blocked: true, message: '导出前质检未通过，先修复下列问题（或确认后用 force=true 强制导出）', issues: report.issues }) };
+        await rpc(ctx, 'export', {}); return { content: json({ ok: true, message: '已开始导出，可在「任务记录」查看进度', qc: { pass: report.pass, issues: report.issues.length } }) };
+      } },
+    { name: 'skill_read', risk: 'read', description: '读取导演技能文档（按主题）：' + skillIndex() + '。写镜头源码前按需查阅。', parameters: object({ topic: { type: 'string', enum: Object.keys(SKILLS) } }, ['topic']),
+      async run(args) { const skill = SKILLS[String(args.topic)]; if (!skill) throw new Error('未知主题；可选：' + Object.keys(SKILLS).join(', ')); return { content: `# ${skill.title}\n${skill.body}` }; } },
+    { name: 'story_get', risk: 'read', description: '读取创作计划（剧本、风格、角色库、分镜表、一致性分数）。', parameters: object({}),
+      async run(_args, ctx) { return { content: json(await ctx.docs.story()) }; } },
+    { name: 'plan_story', risk: 'plan', description: '提交（或整体替换）创作计划的剧本层：标题、梗概、目标时长、风格、角色（可见特征要具体）。需要用户审批，批准后才保存。', parameters: object({
+        title: str('标题'), logline: str('一句话梗概/剧本要点'), targetSeconds: { type: 'number' },
+        style: object({ look: str('画风'), palette: str('配色'), typography: str('字体'), motion: str('运动风格'), negative: str('避免的元素') }),
+        characters: { type: 'array', items: object({ id: str('角色 ID，如 hero'), name: str('名字'), description: str('描述'), features: { type: 'array', items: { type: 'string' } }, voice: str('音色') }, ['name']) },
+      }, ['title', 'logline', 'style']),
+      async run(args, ctx) {
+        const title = need(args, 'title').slice(0, 80), logline = need(args, 'logline').slice(0, 1200), style = normalizeStyle(args.style);
+        const incoming = Array.isArray(args.characters) ? args.characters.slice(0, 20).map(normalizeCharacter) : [];
+        const target = Number(args.targetSeconds);
+        const story = await ctx.docs.updateStory(current => {
+          const characters = incoming.map(c => { const old = current.characters.find(o => o.id === c.id); return old ? { ...c, referenceAssetIds: c.referenceAssetIds.length ? c.referenceAssetIds : old.referenceAssetIds } : c; });
+          const kept = current.characters.filter(c => !characters.some(n => n.id === c.id) && current.shots.some(s => s.characters.includes(c.id)));
+          return { ...current, title, logline, targetSeconds: Number.isFinite(target) && target > 0 ? Math.min(target, 3600) : current.targetSeconds, style, characters: [...characters, ...kept], status: 'approved', approvedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+        });
+        return { content: json({ ok: true, version: story.version, characters: story.characters.map(c => c.id), next: story.shots.length ? '如需调整分镜，用 plan_shots' : '下一步用 plan_shots 提交分镜表' }) };
+      } },
+    { name: 'plan_shots', risk: 'plan', description: '提交（整体替换）分镜表：每镜摘要、景别、运镜、时长、台词、出场角色、是否承接上一镜尾帧、对应工程镜头 shotId（可选）。需要用户审批。', parameters: object({
+        shots: { type: 'array', items: object({ id: str('分镜 ID'), shotId: str('对应工程镜头 ID（已有时）'), summary: str('画面与情节'), shotType: str('景别：远/全/中/近/特写'), camera: str('运镜'), durationSeconds: { type: 'number' }, dialogue: str('台词/旁白'), characters: { type: 'array', items: { type: 'string' } }, continueFromPrevious: { type: 'boolean' } }, ['summary', 'durationSeconds']) },
+      }, ['shots']),
+      async run(args, ctx) {
+        const story = await ctx.docs.updateStory(current => {
+          if (!current.title) throw new Error('先用 plan_story 提交剧本与风格');
+          const shots = normalizeShots(args.shots, current.characters);
+          return { ...current, shots, consistency: Object.fromEntries(Object.entries(current.consistency).filter(([k]) => shots.some(s => (s.shotId ?? s.id) === k))), status: 'approved', approvedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+        });
+        return { content: json({ ok: true, version: story.version, shots: story.shots.length, totalSeconds: story.shots.reduce((s, x) => s + x.durationSeconds, 0) }) };
+      } },
+    { name: 'character_upsert', risk: 'write', description: '新增或更新角色库中的一个角色（可见特征、参考图素材 ID、音色）。参考图须是工程中已有的图片素材。', parameters: object({ id: str('角色 ID'), name: str('名字'), description: str('描述'), features: { type: 'array', items: { type: 'string' } }, referenceAssetIds: { type: 'array', items: { type: 'string' } }, voice: str('音色') }, ['id', 'name']),
+      async run(args, ctx) {
+        const snapshot = await ctx.port.snapshot(ctx.projectId); const character = normalizeCharacter(args, 0);
+        const bad = character.referenceAssetIds.filter(id => !snapshot.project?.assets.some(a => a.id === id && a.kind === 'image')); if (bad.length) throw new Error('参考图不是工程中的图片素材：' + bad.join(', '));
+        const story = await ctx.docs.updateStory(current => ({ ...current, characters: [...current.characters.filter(c => c.id !== character.id), character], updatedAt: new Date().toISOString() }));
+        return { content: json({ ok: true, version: story.version, character }) };
+      } },
+    { name: 'consistency_review', risk: 'read', requires: ['vision'], description: '按分镜截取关键帧，让视觉模型对照计划中的风格与角色特征打 0–100 分，结果写入计划。低于阈值的镜头会给出重生建议（重生仍需用户批准）。', parameters: object({ shotIds: { type: 'array', items: { type: 'string' } }, threshold: { type: 'number' } }),
+      async run(args, ctx) {
+        if (!ctx.port.vision) return { content: json({ skipped: true, reason: '未接入视觉检查模型' }) };
+        const story = await ctx.docs.story(); if (story.status !== 'approved') return { content: json({ skipped: true, reason: '还没有已批准的创作计划；先 plan_story / plan_shots' }) };
+        const project = (await ctx.port.snapshot(ctx.projectId)).project; if (!project) throw new Error('没有打开的工程');
+        const threshold = Number.isFinite(Number(args.threshold)) ? Math.max(1, Math.min(100, Number(args.threshold))) : 75;
+        const wanted = Array.isArray(args.shotIds) ? new Set(args.shotIds.map(String)) : null; const frames = keyframes(project).filter(f => !wanted || wanted.has(f.shotId)).slice(0, 6);
+        if (!frames.length) return { content: json({ skipped: true, reason: '没有可检查的镜头' }) };
+        const images = []; for (const f of frames) { const shot = await ctx.port.capture(ctx.projectId, f.frame, ctx.signal); images.push({ mime: shot.mime, bytes: shot.bytes }); }
+        const expect = frames.map(f => { const planned = story.shots.find(s => s.shotId === f.shotId); return `${f.shotId}：${planned ? planned.summary + '；角色 ' + (planned.characters.map(id => story.characters.find(c => c.id === id)?.name ?? id).join('、') || '无') : '（计划外镜头）'}`; }).join('\n');
+        const answer = await ctx.port.vision(`对照创作计划检查每张关键帧的角色与风格一致性（图片顺序同下列镜头）。\n风格：${JSON.stringify(story.style)}\n角色特征：${story.characters.map(c => `${c.name}=${[c.description, ...c.features].join('，')}`).join('；') || '无'}\n镜头：\n${expect}\n只输出 JSON：{"scores":[{"shotId":"","score":0-100,"notes":"不一致之处"}]}`, images, ctx.signal);
+        let scores: { shotId: string; score: number; notes: string }[] = [];
+        try { const v = JSON.parse(answer.slice(answer.indexOf('{'), answer.lastIndexOf('}') + 1)); scores = (Array.isArray(v.scores) ? v.scores : []).filter((x: { shotId?: unknown }) => frames.some(f => f.shotId === x.shotId)).map((x: { shotId: string; score: unknown; notes?: unknown }) => ({ shotId: x.shotId, score: Math.max(0, Math.min(100, Math.round(Number(x.score) || 0))), notes: String(x.notes ?? '').slice(0, 300) })); }
+        catch { return { content: json({ error: '视觉模型没有返回可解析的分数', raw: bound(answer, 800) }) }; }
+        const at = new Date().toISOString();
+        await ctx.docs.updateStory(current => ({ ...current, consistency: { ...current.consistency, ...Object.fromEntries(scores.map(s => [s.shotId, { ...s, at }])) } }));
+        const low = scores.filter(s => s.score < threshold);
+        return { content: json({ threshold, scores, proposals: low.map(s => ({ shotId: s.shotId, action: '建议重生', how: '用 generate_image/generate_video 并传 characterIds（需用户批准）；或手动修改镜头源码', notes: s.notes })) }) };
+      } },
+    { name: 'frame_handoff', risk: 'write', requires: ['video'], description: '尾帧承接：截取上一个镜头的最后一帧，导入为图片素材，返回 assetId，用作下一镜 generate_video 的 imageAssetId（首帧）。', parameters: object({ shotId: str('要承接的（后一个）镜头 ID') }, ['shotId']),
+      async run(args, ctx) {
+        if (!ctx.port.importImage) throw new Error('当前环境不能导入图片');
+        const project = (await ctx.port.snapshot(ctx.projectId)).project; if (!project) throw new Error('没有打开的工程');
+        const order = project.shotOrder.length ? project.shotOrder : project.shots.map(s => s.id); const index = order.indexOf(need(args, 'shotId'));
+        if (index < 0) throw new Error('镜头不存在'); if (index === 0) throw new Error('第一个镜头没有上一镜可承接');
+        let end = 0; for (let i = 0; i < index; i++) end += project.shots.find(s => s.id === order[i])!.durationFrames;
+        const frame = await ctx.port.capture(ctx.projectId, end - 1, ctx.signal);
+        const asset = await ctx.port.importImage(ctx.projectId, `尾帧承接 · ${order[index - 1]}→${order[index]}`, frame.bytes, frame.mime);
+        return { content: json({ ok: true, assetId: asset.id, fromShot: order[index - 1], frame: end - 1, hint: '把 assetId 作为 generate_video 的 imageAssetId' }) };
+      } },
+    { name: 'align_to_voice', risk: 'write', description: '配音对齐：按每个镜头的配音时长调整镜头时长（配音 + 余量），并把配音片段对齐到镜头开头。一次提交，可撤销。', parameters: object({ expectedRevision: int('当前工程版本'), paddingSeconds: { type: 'number', description: '配音后的余量，默认 0.4 秒' }, shotIds: { type: 'array', items: { type: 'string' } } }, ['expectedRevision']),
+      async run(args, ctx) {
+        const project = structuredClone((await ctx.port.snapshot(ctx.projectId)).project); if (!project) throw new Error('没有打开的工程');
+        const expected = revision(args); if (expected !== project.revision) throw Object.assign(new Error('版本已变化'), { code: 'REVISION_CONFLICT' });
+        const pad = Number.isFinite(Number(args.paddingSeconds)) ? Math.max(0, Math.min(5, Number(args.paddingSeconds))) : 0.4;
+        const wanted = Array.isArray(args.shotIds) ? new Set(args.shotIds.map(String)) : null;
+        const changes = alignToVoice(project, pad, wanted);
+        if (!changes.length) return { content: json({ ok: true, changed: 0, message: '没有需要对齐的配音（镜头需有带时长的配音片段）' }) };
+        const next = await ctx.port.commit(ctx.projectId, expected, project, {}, '智能体：配音对齐');
+        return { content: json({ ok: true, revision: next.project?.revision, changes }), revision: next.project?.revision };
+      } },
+    { name: 'quality_check', risk: 'read', description: '导出前质检：黑帧/纯色帧、静音（缺音轨、音量为 0、有台词无配音字幕）、字幕越界与配音超出镜头、时长偏差、一致性低分。', parameters: object({}),
+      async run(_args, ctx) { return { content: json(await qualityCheck(ctx)) }; } },
   ];
   return tools;
 }

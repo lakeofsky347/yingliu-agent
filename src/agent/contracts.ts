@@ -1,11 +1,20 @@
 import type { StudioSnapshot, SceneSource, VideoProject } from '../shared/types.ts';
+import type { Ledger, QcReport, Story } from './story.ts';
 
 /** Risk tiers: read runs freely; write is revision-checked and undoable; cost/export always need a human by default. */
-export type ToolRisk = 'read' | 'write' | 'cost' | 'export';
+export type ToolRisk = 'read' | 'write' | 'plan' | 'cost' | 'export';
 export type JsonSchema = Record<string, unknown>;
 
 export interface ToolContext {
   runId: string; projectId: string; signal: AbortSignal; port: AgentPort;
+  /** Per-project structured plan (story.json) and spend ledger. */
+  docs: AgentDocs;
+}
+export interface AgentDocs {
+  story(): Promise<Story>;
+  updateStory(change: (story: Story) => Story, expectedVersion?: number): Promise<Story>;
+  ledger(): Promise<Ledger>;
+  saveQc(report: QcReport): Promise<void>;
 }
 export interface ToolResult {
   /** Text returned to the model (redacted, size-bounded). */
@@ -97,5 +106,7 @@ export interface AgentPort {
   importAudio?(projectId: string, name: string, bytes: Uint8Array, mime: string): Promise<{ id: string; name: string }>;
   /** Which generation roles are currently bound (hot: read every step). */
   capabilities?(): Promise<Capabilities>;
+  /** Import image bytes (e.g. a captured tail frame) as a project asset. */
+  importImage?(projectId: string, name: string, bytes: Uint8Array, mime: string): Promise<{ id: string; name: string }>;
   vision?(prompt: string, images: { mime: string; bytes: Uint8Array }[], signal: AbortSignal): Promise<string>;
 }

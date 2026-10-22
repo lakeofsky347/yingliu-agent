@@ -5,13 +5,16 @@ import { backoff, budgetFrom, chargeModel, chargeTool, classify, emptyUsage, nee
 import { bound, capabilityPrompt, compressMessages, summarizeProject, systemPrompt } from './context.ts';
 import { RunStore } from './run-store.ts';
 import { activeTools, createTools } from './tools.ts';
-import type { Capabilities } from './contracts.ts';
+import type { AgentDocs, Capabilities, ToolContext } from './contracts.ts';
+import { join } from 'node:path';
+import { emptyLedger, emptyStory, normalizeCharacter, normalizeStyle, ProjectDocs, storyBrief, type Ledger, type QcReport, type Story } from './story.ts';
+import { qualityCheck } from './tools.ts';
 
 export interface ResolvedAgentModel { config: ChatConfig; parameters: Record<string, unknown>; connectionId?: string; vision: boolean }
 export interface AgentServiceOptions {
   resolveModel(): Promise<ResolvedAgentModel>;
   fetch?: typeof fetch; tools?: AgentTool[]; redact?: (text: string) => Promise<string>;
-  contextChars?: number; pollMs?: number; retryBaseMs?: number; maxRetries?: number; maxReviewRounds?: number;
+  contextChars?: number; pollMs?: number; dataDirectory?: string; retryBaseMs?: number; maxRetries?: number; maxReviewRounds?: number;
 }
 const TERMINAL = new Set(['complete', 'failed', 'cancelled', 'budget_exceeded']);
 const DEFAULT_AUTO: ToolRisk[] = ['read', 'write'];
@@ -26,10 +29,50 @@ export class AgentService {
   private listeners = new Set<(event: AgentEvent) => void>();
   private store: RunStore; private tools: AgentTool[]; private initialized?: Promise<void>; private stopped = false;
   private imageBuffer = new Map<string, AgentContent[]>();
+  private stories: ProjectDocs<Story>; private ledgers: ProjectDocs<Ledger>; private qcs: ProjectDocs<{ version: number; report?: QcReport }>;
   constructor(directory: string, private readonly port: AgentPort, private readonly options: AgentServiceOptions) {
     this.store = new RunStore(directory, options.redact); this.tools = options.tools ?? createTools();
+    const base = options.dataDirectory ?? directory;
+    this.stories = new ProjectDocs(join(base, 'stories'), emptyStory); this.ledgers = new ProjectDocs(join(base, 'ledger'), emptyLedger); this.qcs = new ProjectDocs(join(base, 'qc'), () => ({ version: 0 }));
   }
   get toolList(): readonly AgentTool[] { return this.tools; }
+  docs(projectId: string): AgentDocs {
+    return {
+      story: () => this.stories.get(projectId),
+      updateStory: (change, expected) => this.stories.update(projectId, change, expected),
+      ledger: () => this.ledgers.get(projectId),
+      saveQc: async report => { await this.qcs.update(projectId, current => ({ ...current, report })); },
+    };
+  }
+  story(projectId: string) { return this.stories.get(projectId); }
+  /** User edits from the UI (style, characters, logline). Shots are changed through the agent's plan_shots or here wholesale. */
+  async saveStory(projectId: string, input: Record<string, unknown>, expectedVersion: number): Promise<Story> {
+    return this.stories.update(projectId, current => {
+      const next = { ...current, updatedAt: now() };
+      if (typeof input.title === 'string') next.title = input.title.trim().slice(0, 80);
+      if (typeof input.logline === 'string') next.logline = input.logline.trim().slice(0, 1200);
+      if (input.style !== undefined) next.style = normalizeStyle(input.style);
+      if (Array.isArray(input.characters)) { const list = input.characters.slice(0, 20).map(normalizeCharacter); const used = new Set(next.shots.flatMap(s => s.characters)); const missing = [...used].filter(id => !list.some(c => c.id === id)); if (missing.length) throw new Error('分镜仍在使用这些角色，不能删除：' + missing.join(', ')); next.characters = list; }
+      if (input.status === 'empty') { next.status = 'empty'; delete next.approvedAt; }
+      return next;
+    }, expectedVersion);
+  }
+  ledger(projectId: string) { return this.ledgers.get(projectId); }
+  setProjectBudget(projectId: string, maxCost: number | null, currency?: string): Promise<Ledger> {
+    if (maxCost !== null && (!Number.isFinite(maxCost) || maxCost < 0)) throw new Error('费用上限须为非负数，或留空表示不限');
+    return this.ledgers.update(projectId, current => ({ ...current, maxCost, ...(currency ? { currency: currency.slice(0, 8) } : {}), updatedAt: now() }));
+  }
+  async lastQc(projectId: string) { return (await this.qcs.get(projectId)).report ?? null; }
+  async runQc(projectId: string, signal = new AbortController().signal): Promise<QcReport> { return qualityCheck(this.context('qc', projectId, signal)); }
+  private context(runId: string, projectId: string, signal: AbortSignal): ToolContext { return { runId, projectId, signal, port: this.port, docs: this.docs(projectId) }; }
+  private async spend(projectId: string, tool: string, cost: number | null | undefined, settleUnknown = false) {
+    await this.ledgers.update(projectId, current => {
+      const entry = current.byTool[tool] ?? { calls: 0, cost: 0 };
+      if (!settleUnknown) entry.calls++;
+      if (typeof cost === 'number') { entry.cost += cost; current.spent += cost; if (settleUnknown) current.unknownCostCalls = Math.max(0, current.unknownCostCalls - 1); } else if (!settleUnknown) current.unknownCostCalls++;
+      return { ...current, byTool: { ...current.byTool, [tool]: entry }, updatedAt: now() };
+    });
+  }
   /** Current capability snapshot (hot: re-read before every model step). */
   async capabilities(): Promise<{ capabilities: Capabilities; tools: { name: string; risk: string; description: string }[]; selfMade: string[] }> {
     const capabilities = await this.port.capabilities?.().catch(() => ({ roles: [] })) ?? { roles: this.port.vision ? ['vision' as const] : [] };
@@ -76,7 +119,7 @@ export class AgentService {
     if ([...this.runs.values()].some(run => run.projectId === input.projectId && !TERMINAL.has(run.status) && run.status !== 'paused')) throw new Error('该工程已有进行中的智能体运行，请先完成、暂停或取消');
     const snapshot = await this.port.snapshot(input.projectId);
     if (!snapshot.project || snapshot.project.id !== input.projectId) throw new Error('工程不存在或未打开');
-    const budget = budgetFrom(input.budget), autoApprove = (input.autoApprove ?? DEFAULT_AUTO).filter(risk => ['read', 'write', 'cost', 'export'].includes(risk));
+    const budget = budgetFrom(input.budget), autoApprove = (input.autoApprove ?? DEFAULT_AUTO).filter(risk => ['read', 'write', 'plan', 'cost', 'export'].includes(risk));
     if (!autoApprove.includes('read')) autoApprove.push('read');
     const run: AgentRun = {
       version: 1, id: randomUUID(), projectId: input.projectId, goal, status: 'running', message: '智能体正在规划', createdAt: now(), updatedAt: now(),
@@ -159,10 +202,14 @@ export class AgentService {
       }
       const images = this.imageBuffer.get(run.id); if (images?.length) { run.messages.push({ role: 'user', content: [{ type: 'text', text: '上面工具截取的画面：' }, ...images] }); this.imageBuffer.delete(run.id); }
       const limit = overBudget(run.budget, run.usage);
+      const ledger = await this.ledgers.get(run.projectId);
+      if (!limit && ledger.maxCost !== null && ledger.spent >= ledger.maxCost) { run.status = 'budget_exceeded'; run.message = `已停止：项目累计花费 ${ledger.spent.toFixed(2)} 已达上限 ${ledger.maxCost} ${ledger.currency}`; await this.store.trace(run.id, { event: 'budget', reason: 'project', ledger }); await this.save(run); return; }
       if (limit) { run.status = 'budget_exceeded'; run.message = '已停止：' + limit; await this.store.trace(run.id, { event: 'budget', reason: limit, usage: run.usage }); await this.save(run); return; }
       const compressed = compressMessages(run.messages, this.options.contextChars ?? 120_000);
       if (compressed.compressed) { run.messages = compressed.messages; const s = await this.step(run, { kind: 'compress', status: 'running' }); await this.finishStep(run, s, { status: 'complete', summary: '已压缩较早的上下文' }); }
       const caps = await this.capabilities(), tools = activeTools(this.tools, caps.capabilities), roleText = capabilityPrompt(caps.capabilities.roles);
+      const brief = storyBrief(await this.stories.get(run.projectId)), planRule = brief ? brief : '工程还没有已批准的创作计划：多镜头或有角色的目标，先用 plan_story（剧本/风格/角色）和 plan_shots（分镜表）提交计划，等用户批准后再动手；简单的单镜头修改可以直接做。写镜头源码前可用 skill_read 查阅导演技能文档。';
+      const promptExtra = roleText.text + '\n' + planRule;
       const changed = JSON.stringify(run.active?.tools) !== JSON.stringify(tools.map(t => t.name));
       if (run.active && changed) { run.messages.push({ role: 'user', content: '（系统通知）可用生成能力已变化：' + roleText.text }); await this.store.trace(run.id, { event: 'capabilities', roles: caps.capabilities.roles, tools: tools.map(t => t.name) }); }
       run.active = { roles: caps.capabilities.roles, tools: tools.map(t => t.name), selfMade: roleText.selfMade };
@@ -171,19 +218,19 @@ export class AgentService {
       let turn;
       try {
         turn = await this.withRetry(run, step, async () => {
-          try { return await chatTurn(model.config, systemPrompt(roleText.text), run.messages, tools, signal, this.options.fetch); }
+          try { return await chatTurn(model.config, systemPrompt(promptExtra), run.messages, tools, signal, this.options.fetch); }
           catch (error) {
             if (model.config.supportsTools && looksLikeNoToolSupport(error)) {
               model = { ...model, config: { ...model.config, supportsTools: false } }; run.model.mode = 'plan-json';
               await this.store.trace(run.id, { event: 'fallback', to: 'plan-json', error: errorText(error) });
-              return chatTurn(model.config, systemPrompt(roleText.text), run.messages, tools, signal, this.options.fetch);
+              return chatTurn(model.config, systemPrompt(promptExtra), run.messages, tools, signal, this.options.fetch);
             }
             throw error;
           }
         }, signal);
       } catch (error) { if (signal.aborted) throw error; await this.finishStep(run, step, { status: 'failed', error: errorText(error) }); throw error; }
       run.usage.steps++;
-      const cost = tokenCost(model.parameters, turn.usage.inputTokens, turn.usage.outputTokens); chargeModel(run.usage, turn.usage.inputTokens, turn.usage.outputTokens, cost);
+      const cost = tokenCost(model.parameters, turn.usage.inputTokens, turn.usage.outputTokens); chargeModel(run.usage, turn.usage.inputTokens, turn.usage.outputTokens, cost); if (cost) await this.spend(run.projectId, 'director', cost);
       await this.store.trace(run.id, { event: 'model', mode: turn.mode, finish: turn.finish, usage: turn.usage, cost, content: bound(turn.content, 4000), toolCalls: turn.toolCalls });
       run.messages.push({ role: 'assistant', content: turn.content || null, ...(turn.toolCalls.length ? { tool_calls: turn.toolCalls.map(call => ({ id: call.id, type: 'function' as const, function: { name: call.name, arguments: call.arguments } })) } : {}) });
       await this.finishStep(run, step, { status: 'complete', summary: turn.toolCalls.length ? '计划调用：' + turn.toolCalls.map(call => call.name).join(', ') : bound(turn.content, 200) });
@@ -203,7 +250,7 @@ export class AgentService {
     const name = this.port.vision && (await this.capabilities()).capabilities.roles.includes('vision') ? 'visual_review' : 'render_check', tool = this.tools.find(item => item.name === name); if (!tool) return null;
     const step = await this.step(run, { kind: 'review', status: 'running', tool: name });
     try {
-      const result = await tool.run({}, { runId: run.id, projectId: run.projectId, signal, port: this.port });
+      const result = await tool.run({}, this.context(run.id, run.projectId, signal));
       let pass = true;
       try { const value = JSON.parse(result.content.slice(result.content.indexOf('{'), result.content.lastIndexOf('}') + 1)); pass = value.skipped === true || value.pass === true || (name === 'render_check' && value.status === 'complete' && !value.error); } catch { pass = false; }
       await this.finishStep(run, step, { status: 'complete', summary: (pass ? '自检通过：' : '自检发现问题：') + bound(result.content, 300) });
@@ -223,7 +270,7 @@ export class AgentService {
     catch (error) { respond(JSON.stringify({ error: '参数不是有效 JSON 对象：' + errorText(error) })); await this.save(run); return 'next'; }
     if (!run.approvedCallIds.includes(call.id)) {
       const estimate = tool.estimate?.(args) ?? (tool.risk === 'cost' ? null : 0);
-      const reason = needsApproval(tool.risk, run.policy.autoApprove, run.budget, run.usage, estimate);
+      const reason = needsApproval(tool.risk, run.policy.autoApprove, run.budget, run.usage, estimate, tool.risk === 'cost' ? await this.ledgers.get(run.projectId) : undefined);
       if (reason) {
         run.pending = { callId: call.id, tool: tool.name, risk: tool.risk, arguments: bound(call.arguments, 4000), reason, estimate };
         run.status = 'awaiting_approval'; run.message = `等待批准：${tool.name}（${reason}）`;
@@ -234,7 +281,7 @@ export class AgentService {
     const step = await this.step(run, { kind: 'tool', status: 'running', tool: tool.name, callId: call.id, risk: tool.risk, arguments: bound(call.arguments, 2000) });
     run.message = '执行工具：' + tool.name; await this.save(run);
     let result: ToolResult;
-    try { result = await this.withRetry(run, step, () => tool.run({ ...args, __callId: call.id }, { runId: run.id, projectId: run.projectId, signal, port: this.port }), signal); }
+    try { result = await this.withRetry(run, step, () => tool.run({ ...args, __callId: call.id }, this.context(run.id, run.projectId, signal)), signal); }
     catch (error) {
       if (signal.aborted) throw error;
       const kind = classify(error), message = errorText(error);
@@ -244,7 +291,7 @@ export class AgentService {
       await this.save(run); return 'next';
     }
     signal.throwIfAborted();
-    chargeTool(run.usage, result.cost, tool.risk);
+    chargeTool(run.usage, result.cost, tool.risk); if (tool.risk === 'cost') await this.spend(run.projectId, tool.name, result.waitFor ? null : result.cost);
     if (tool.risk === 'write') meta.dirty = true;
     if (result.images?.length) {
       if (model.vision && meta.allowImages) this.imageBuffer.set(run.id, [...(this.imageBuffer.get(run.id) ?? []), ...result.images.map(image => ({ type: 'image_url' as const, image_url: { url: `data:${image.mime};base64,${Buffer.from(image.bytes).toString('base64')}` } }))]);
@@ -262,7 +309,7 @@ export class AgentService {
       const result = await this.port.route(waiting.kind === 'media' ? 'media.get' : 'workflows.get', waiting.kind === 'media' ? { taskId: waiting.id } : { workflowId: waiting.id });
       const value = (result.value ?? {}) as Record<string, unknown>, state = String(value.phase ?? value.status ?? '');
       if (!result.ok || terminal.has(state) || (waiting.kind === 'workflow' && state !== 'running')) {
-        if (waiting.kind === 'media' && value.usage && typeof (value.usage as { cost?: unknown }).cost === 'number') { run.usage.cost += (value.usage as { cost: number }).cost; run.usage.unknownCostCalls = Math.max(0, run.usage.unknownCostCalls - 1); }
+        if (waiting.kind === 'media' && value.usage && typeof (value.usage as { cost?: unknown }).cost === 'number') { run.usage.cost += (value.usage as { cost: number }).cost; run.usage.unknownCostCalls = Math.max(0, run.usage.unknownCostCalls - 1); await this.spend(run.projectId, 'media', (value.usage as { cost: number }).cost, true); }
         run.messages.push({ role: 'tool', tool_call_id: waiting.callId, content: bound(JSON.stringify(result.ok ? { id: waiting.id, state, message: value.message, error: value.error, hint: state === 'ready' ? '素材已就绪：调用 media_apply 采用' : undefined } : { error: result.error?.message })) });
         delete run.waiting; run.status = 'running'; run.message = '生成任务已结束'; await this.save(run); return;
       }

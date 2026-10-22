@@ -24,7 +24,7 @@ import { randomUUID } from 'node:crypto';
 export const ENDPOINTS=new Set(['catalog','current','create','open','save','import','source','saveSource','restoreSource','preview','generate','export','cancel','environment','reveal','apply','inspect','list','focus','audio','tts','history','undo','redo','rename','duplicate','archive','tasks','retry','packs.list','app.health','app.exportProject','app.importProject','providers.get','providers.save','providers.check','chat.history','chat.send','chat.cancel']);
 for(const endpoint of ['models.list','models.connection.save','models.connection.remove','models.model.save','models.model.remove','models.role.bind','models.check','media.generate','media.list','media.get','media.retry','media.pause','media.cancel','media.apply','video.clip.save','video.clip.remove','video.clip.extract'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['workflows.run','workflows.list','workflows.get','workflows.retry','workflows.pause','workflows.apply'])ENDPOINTS.add(endpoint);
-for(const endpoint of ['agent.start','agent.list','agent.get','agent.trace','agent.approve','agent.reject','agent.resume','agent.pause','agent.cancel','agent.tools','agent.capabilities'])ENDPOINTS.add(endpoint);
+for(const endpoint of ['agent.start','agent.list','agent.get','agent.trace','agent.approve','agent.reject','agent.resume','agent.pause','agent.cancel','agent.tools','agent.capabilities','story.get','story.save','agent.qc','agent.qc.last','agent.ledger','agent.budget.set'])ENDPOINTS.add(endpoint);
 export class MemorySecrets implements SecretStore {
   private values=new Map<string,string>();
   async get(ref:string){return this.values.get(ref);}
@@ -73,6 +73,7 @@ export async function createApplication(options:{dataDirectory:string;credential
       let director:string|undefined;try{director=(await providers.registry.resolve('director')).model.name;}catch{}
       return {roles,models,...(director?{director}:{})};
     },
+    importImage:async(id,name,bytes,mime)=>{if(!/^image\/(png|jpeg|webp)$/.test(mime))throw new Error('不支持的图片格式');const snapshot=await backend.call('import',{projectId:id,name,description:'智能体截取的尾帧',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error('图片导入失败');return {id:asset.id,name:asset.name};},
     importAudio:async(id,name,bytes,mime)=>{const snapshot=await backend.call('import',{projectId:id,name,description:'智能体本地合成',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error('音频导入失败');return {id:asset.id,name:asset.name};},
     generateAudio:async(id,role,prompt,{durationSeconds,signal})=>{
       const resolved=await providers.registry.resolve(role);
@@ -101,7 +102,7 @@ export async function createApplication(options:{dataDirectory:string;credential
     vision:async(prompt,images,signal)=>{await providers.registry.resolve('vision');return workflowPort.text('vision',prompt,signal,{} as WorkflowRequest,images);},
   };
   const agent=new AgentService(join(dataDirectory,'agent-runs'),agentPort,{
-    fetch:options.fetch,
+    fetch:options.fetch,dataDirectory:join(dataDirectory,'agent-data'),
     redact:async text=>{let value=text;for(const key of await knownKeys())value=redactKey(value,key);return value;},
     resolveModel:async()=>{
       const resolved=await providers.registry.resolve('director'),parameters=resolved.model.parameters as Record<string,unknown>;
@@ -133,6 +134,12 @@ export async function createApplication(options:{dataDirectory:string;credential
         case 'agent.cancel':value=await agent.cancel(String(data.runId));break;
         case 'agent.tools':value={tools:agent.toolList.map(tool=>({name:tool.name,risk:tool.risk,description:tool.description}))};break;
         case 'agent.capabilities':value=await agent.capabilities();break;
+        case 'story.get':value=await agent.story(String(data.projectId));break;
+        case 'story.save':value=await agent.saveStory(String(data.projectId),(data.story??{}) as Record<string,unknown>,Number(data.expectedVersion));break;
+        case 'agent.qc':value=await agent.runQc(String(data.projectId));break;
+        case 'agent.qc.last':value={report:await agent.lastQc(String(data.projectId))};break;
+        case 'agent.ledger':value=await agent.ledger(String(data.projectId));break;
+        case 'agent.budget.set':value=await agent.setProjectBudget(String(data.projectId),data.maxCost===null||data.maxCost===undefined||data.maxCost===''?null:Number(data.maxCost),typeof data.currency==='string'?data.currency:undefined);break;
         case 'workflows.run':value=await workflows.run(data as unknown as WorkflowRequest);break;
         case 'workflows.list':value={workflows:await workflows.list(typeof data.projectId==='string'?data.projectId:undefined)};break;
         case 'workflows.get':value=await workflows.get(String(data.workflowId));break;
