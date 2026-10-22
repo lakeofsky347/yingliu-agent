@@ -88,12 +88,12 @@ export function fillPath(path: string, vars: TemplateVars): string {
  * fields whose placeholder is missing (e.g. no image) are dropped.
  */
 export function fillBody(template: string, vars: TemplateVars): unknown {
-  const prepared = template.replace(/(:\s*)\{\{([^}]+)\}\}/g, (_m, colon, expr) => `${colon}"\u0000${expr}\u0000"`);
+  const prepared = template.replace(/(:\s*)\{\{([^}]+)\}\}/g, (_m, colon, expr) => `${colon}"@@tpl:${expr}@@"`);
   let parsed: unknown; try { parsed = JSON.parse(prepared); } catch { throw new Error('请求体模板不是有效 JSON'); }
   const DROP = Symbol('drop');
   const walk = (value: unknown): unknown => {
     if (typeof value === 'string') {
-      const exact = /^(?:\u0000([^\u0000]+)\u0000|\{\{([^}]+)\}\})$/.exec(value);
+      const exact = /^(?:@@tpl:([^@]+)@@|\{\{([^}]+)\}\})$/.exec(value);
       if (exact) { const v = token(vars, exact[1] ?? exact[2]); return v === undefined ? DROP : v; }
       return value.replace(/\{\{([^}]+)\}\}/g, (_m, expr) => String(token(vars, expr) ?? ''));
     }
