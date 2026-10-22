@@ -205,6 +205,7 @@ export class AgentService {
     const tool = this.tools.find(item => item.name === call.name);
     const respond = (content: string) => { run.messages.push({ role: 'tool', tool_call_id: call.id, content }); run.queue.shift(); };
     if (!tool) { respond(JSON.stringify({ error: '未知工具：' + call.name + '。可用：' + this.tools.map(t => t.name).join(', ') })); await this.save(run); return 'next'; }
+    if (call.arguments.length > 2_100_000) { respond(JSON.stringify({ error: '工具参数超过 2MB 上限' })); await this.save(run); return 'next'; }
     let args: Record<string, unknown>;
     try { const parsed = JSON.parse(call.arguments || '{}'); if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('参数须为对象'); args = parsed; }
     catch (error) { respond(JSON.stringify({ error: '参数不是有效 JSON 对象：' + errorText(error) })); await this.save(run); return 'next'; }
