@@ -28,5 +28,5 @@ export function toolGateway(script:(body:Record<string,any>,turn:number)=>Gatewa
     const calls=reply.toolCalls?.map((call,index)=>({id:call.id??`call_${turn}_${index}`,type:'function',function:{name:call.name,arguments:JSON.stringify(call.arguments)}}));
     return new Response(JSON.stringify({choices:[{message:{role:'assistant',content:reply.text??null,...(calls?.length?{tool_calls:calls}:{})},finish_reason:calls?.length?'tool_calls':'stop'}],usage:reply.usage??{prompt_tokens:100,completion_tokens:20}}),{headers:{'content-type':'application/json'}});
   }) as unknown as typeof fetch;
-  return {fetch:gatewayFetch,requests};
+  return {fetch:gatewayFetch,requests,reset(){turn=0;}};
 }

@@ -89,3 +89,32 @@
 - 可灵官方接口用 AccessKey/SecretKey 签发 JWT；本应用暂不签发，请填入有效 JWT 或经自建网关转发。即梦（火山引擎视觉智能）的 AK/SK 签名接口同理，建议用火山方舟 `ark-video` 或网关。
 - 模板模式不支持按 clientRequestId 查单：提交响应丢失时任务标记为「待确认」，不会自动重复提交。
 - 未配置 `cancelPath` 的服务只能停止本地等待。
+
+## 0.5：创作计划、一致性、项目预算与质检
+
+### 创作计划（story.json）
+- 保存在 `<数据目录>/agent-data/stories/<工程 ID>.json`，带 `version`（乐观并发：UI 保存时必须带 `expectedVersion`）。
+- 风险级别 `plan`：`plan_story`（标题、梗概、目标时长、风格、角色）和 `plan_shots`（分镜表）**默认需要审批**；拒绝后不落盘。启动时勾选「创作计划无需审批」即可把 `plan` 加入自动批准。
+- 系统提示：没有已批准的计划时，要求多镜头/有角色的目标先规划；有计划时把计划摘要注入提示。
+
+### 角色与一致性
+- 角色：`{id,name,description,features[],referenceAssetIds[],voice?}`，可在面板「角色库」编辑；智能体用 `character_upsert` 维护（参考图须是工程内的图片素材）。
+- `generate_image` / `generate_video` 的 `characterIds` 会在提示词后追加「【一致性锚点】」（画风、配色、运动、角色特征、避免项）。
+- `consistency_review`（需要 vision 角色）：最多 6 个关键帧，视觉模型返回 `{"scores":[{"shotId","score","notes"}]}`，写入 `story.consistency`；低于阈值（默认 75）只给出建议。
+
+### 项目预算
+- `<数据目录>/agent-data/ledger/<工程 ID>.json`：`spent`、`unknownCostCalls`、`byTool`、`maxCost`。导演模型的 token 费用（如果模型配置了价格）记为 `director`；媒体任务完成后回报的费用记入 `media`。
+- 设置了 `maxCost` 时，收费调用即使在自动批准名单中，也会因为「费用未知」或「将超过项目上限」而要求审批；累计花费达到上限时运行停止（`budget_exceeded`）。
+
+### 质检
+- `quality_check` 工具 / `agent.qc` 端点；结果保存在 `agent-data/qc/`，可用 `agent.qc.last` 读取。
+- `export_mp4` 先质检，有 `high` 级问题时返回 `blocked`；确认后可用 `force: true` 强制导出（仍需导出审批）。
+- 局限：只能分析 PNG 截帧；静音检查基于工程数据，不解码音频波形。
+
+### 其他工具
+- `frame_handoff`（需要 video 角色）：截取上一镜最后一帧，导入为图片素材，作为 `generate_video.imageAssetId`。
+- `align_to_voice`：镜头时长 = 配音时长 + 余量（默认 0.4 秒），配音片段对齐到镜头开头，一次提交，可撤销。
+- `skill_read`：主题包括 scene-structure、deterministic-motion、layout-safe-area、subtitles-voice、self-made-visuals、performance-pitfalls、consistency。
+
+### 新端点
+`story.get`、`story.save`、`agent.qc`、`agent.qc.last`、`agent.ledger`、`agent.budget.set`。
