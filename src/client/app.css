@@ -18,3 +18,17 @@
 .yl-settings-backdrop{z-index:1100}
 .yl-editor .vs-tabs{height:auto;min-height:42px}
 @container(min-width:721px) and (max-width:1000px){.yl-editor .vs-asset-actions{flex-direction:column;align-items:stretch}.yl-editor .vs-asset-actions>button{width:100%}}
+.vs-agent-panel{display:grid;grid-template-columns:minmax(260px,1fr) 2fr;gap:16px;padding:12px;overflow:auto}
+.vs-agent-compose textarea{width:100%}
+.vs-agent-options{display:flex;flex-wrap:wrap;gap:8px 16px;margin:8px 0;font-size:12px}
+.vs-agent-options input[type=number]{width:72px}
+.vs-agent-runs ul{list-style:none;padding:0;margin:0 0 8px;display:flex;flex-wrap:wrap;gap:6px}
+.vs-agent-runs li button.is-active{outline:2px solid currentColor}
+.vs-agent-budget{font-size:12px;opacity:.8;margin:6px 0}
+.vs-agent-approval{border:1px solid #d9a441;border-radius:8px;padding:8px;margin:8px 0}
+.vs-agent-approval pre,.vs-agent-steps pre{max-height:160px;overflow:auto;font-size:11px;white-space:pre-wrap}
+.vs-agent-steps{font-size:12px;padding-left:20px}
+.vs-agent-steps li.is-failed,.vs-agent-steps li.is-rejected{color:#e57373}
+.vs-agent-steps li.is-pending{color:#d9a441}
+.vs-agent-transcript{font-size:13px;max-height:280px;overflow:auto}
+.vs-agent-actions{display:flex;gap:8px;margin:6px 0}

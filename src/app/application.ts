@@ -12,19 +12,24 @@ import type { MediaRequest } from '../jobs/contracts.ts';
 import type { ConnectionInput, ModelInput, ModelRole } from '../models/contracts.ts';
 import { WorkflowService } from '../workflows/service.ts';
 import type { WorkflowRequest, WorkflowPort } from '../workflows/contracts.ts';
+import { AgentService } from '../agent/service.ts';
+import type { AgentPort, AgentStartInput } from '../agent/contracts.ts';
+import { redactKey } from '../agent/model-client.ts';
+import { join } from 'node:path';
 
 export const ENDPOINTS=new Set(['catalog','current','create','open','save','import','source','saveSource','restoreSource','preview','generate','export','cancel','environment','reveal','apply','inspect','list','focus','audio','tts','history','undo','redo','rename','duplicate','archive','tasks','retry','packs.list','app.health','app.exportProject','app.importProject','providers.get','providers.save','providers.check','chat.history','chat.send','chat.cancel']);
 for(const endpoint of ['models.list','models.connection.save','models.connection.remove','models.model.save','models.model.remove','models.role.bind','models.check','media.generate','media.list','media.get','media.retry','media.pause','media.cancel','media.apply','video.clip.save','video.clip.remove','video.clip.extract'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['workflows.run','workflows.list','workflows.get','workflows.retry','workflows.pause','workflows.apply'])ENDPOINTS.add(endpoint);
+for(const endpoint of ['agent.start','agent.list','agent.get','agent.trace','agent.approve','agent.reject','agent.resume','agent.pause','agent.cancel','agent.tools'])ENDPOINTS.add(endpoint);
 export class MemorySecrets implements SecretStore {
   private values=new Map<string,string>();
   async get(ref:string){return this.values.get(ref);}
   async set(ref:string,value:string){this.values.set(ref,value);}
   async delete(ref:string){this.values.delete(ref);}
 }
-export async function createApplication(options:{dataDirectory:string;credentials:SecretStore;reveal?:(path:string)=>Promise<void>}){
+export async function createApplication(options:{dataDirectory:string;credentials:SecretStore;reveal?:(path:string)=>Promise<void>;fetch?:typeof fetch}){
   const dataDirectory=resolve(options.dataDirectory);
-  const providers=new ProviderManager(dataDirectory,options.credentials);await providers.initialize();
+  const providers=new ProviderManager(dataDirectory,options.credentials,options.fetch?{fetch:options.fetch}:{});await providers.initialize();
   const backend=new AppBackend({...options,dataDirectory,providers:providers.host()});
   const conversation=new ConversationService(backend,providers,dataDirectory);
   await backend.call('catalog');
@@ -46,6 +51,28 @@ export async function createApplication(options:{dataDirectory:string;credential
     },
   };
   const workflows=new WorkflowService(dataDirectory,media,workflowPort);
+  async function knownKeys():Promise<string[]>{const keys:string[]=[];for(const connection of providers.registry.snapshot().connections){try{const key=await providers.registry.credential(connection);if(key)keys.push(key);}catch{}}return keys;}
+  const agentPort:AgentPort={
+    snapshot:id=>backend.call('current',{projectId:id}),
+    readSource:(id,shotId)=>backend.call('source',{projectId:id,shotId}),
+    saveSource:(id,shotId,expectedRevision,source)=>backend.call('saveSource',{projectId:id,shotId,expectedRevision,source}),
+    commit:(id,expectedRevision,project,sources,label)=>workflowPort.commit(id,expectedRevision,project,sources,label),
+    route:(endpoint,payload)=>route(endpoint,payload) as ReturnType<AgentPort['route']>,
+    capture:async(id,frame,signal)=>{const shot=await backend.workflowCapture(id,frame,signal) as unknown as {bytes?:Uint8Array;buffer?:Uint8Array;mime?:string;frame?:number;shotId:string};return {bytes:shot.bytes??shot.buffer??new Uint8Array(),mime:shot.mime??'image/png',frame:shot.frame??frame,shotId:shot.shotId??''};},
+    voice:async(id,shotId,text,signal)=>{const asset=await workflowPort.voice(id,shotId,text,signal);return {id:asset.id,name:asset.name};},
+    vision:async(prompt,images,signal)=>{await providers.registry.resolve('vision');return workflowPort.text('vision',prompt,signal,{} as WorkflowRequest,images);},
+  };
+  const agent=new AgentService(join(dataDirectory,'agent-runs'),agentPort,{
+    fetch:options.fetch,
+    redact:async text=>{let value=text;for(const key of await knownKeys())value=redactKey(value,key);return value;},
+    resolveModel:async()=>{
+      const resolved=await providers.registry.resolve('director'),parameters=resolved.model.parameters as Record<string,unknown>;
+      let vision=false;try{await providers.registry.resolve('vision');vision=true;}catch{}
+      return {connectionId:resolved.connection.id,parameters,vision:vision||resolved.model.inputModalities.includes('image'),config:{baseUrl:resolved.connection.baseUrl,model:resolved.model.model,key:await providers.registry.credential(resolved.connection),
+        timeoutMs:Number(resolved.connection.requestTimeoutMs)||120000,maxTokens:Number(parameters.maxTokens)||4096,...(typeof parameters.temperature==='number'?{temperature:parameters.temperature}:{}),supportsTools:parameters.supportsTools!==false}};
+    },
+  });
+  await agent.initialize();
   const requests=new Set<Promise<RpcResult>>();let stopping=false,disposal:Promise<void>|undefined;
   async function dispatch(endpoint:string,payload:unknown={}):Promise<RpcResult>{
     try{
@@ -57,6 +84,16 @@ export async function createApplication(options:{dataDirectory:string;credential
           if(data.archived!==false){const snapshot=await backend.call('current',{projectId:data.projectId});const id=snapshot.project?.id;if(id&&((await workflows.list(id)).some(item=>item.status==='running')||(await media.list(id)).some(item=>item.observation==='active'&&!['ready','complete','failed','cancelled'].includes(item.phase))))throw new Error('工程仍有媒体或协作任务，请先停止本地等待再归档');}
           return backend.route(endpoint,payload);
         }
+        case 'agent.start':value=await agent.start(data as unknown as AgentStartInput);break;
+        case 'agent.list':value={runs:await agent.list(typeof data.projectId==='string'?data.projectId:undefined)};break;
+        case 'agent.get':value=await agent.get(String(data.runId));break;
+        case 'agent.trace':value={events:await agent.trace(String(data.runId))};break;
+        case 'agent.approve':value=await agent.approve(String(data.runId),String(data.callId));break;
+        case 'agent.reject':value=await agent.reject(String(data.runId),String(data.callId),typeof data.reason==='string'?data.reason:'');break;
+        case 'agent.resume':value=await agent.resume(String(data.runId));break;
+        case 'agent.pause':value=await agent.pause(String(data.runId));break;
+        case 'agent.cancel':value=await agent.cancel(String(data.runId));break;
+        case 'agent.tools':value={tools:agent.toolList.map(tool=>({name:tool.name,risk:tool.risk,description:tool.description}))};break;
         case 'workflows.run':value=await workflows.run(data as unknown as WorkflowRequest);break;
         case 'workflows.list':value={workflows:await workflows.list(typeof data.projectId==='string'?data.projectId:undefined)};break;
         case 'workflows.get':value=await workflows.get(String(data.workflowId));break;
@@ -96,6 +133,6 @@ export async function createApplication(options:{dataDirectory:string;credential
     if(stopping)return Promise.resolve({ok:false,error:{code:'APP_SHUTTING_DOWN',message:'应用正在关闭，请重新打开后继续'}});
     const request=dispatch(endpoint,payload);requests.add(request);void request.finally(()=>requests.delete(request));return request;
   }
-  return {backend,providers,conversation,media,workflows,route,dispose(){return disposal??=(async()=>{stopping=true;await conversation.shutdown();await workflows.dispose();await media.dispose();await Promise.allSettled([...requests]);await backend.dispose();})();}};
+  return {backend,providers,conversation,media,workflows,agent,route,dispose(){return disposal??=(async()=>{stopping=true;await agent.dispose();await conversation.shutdown();await workflows.dispose();await media.dispose();await Promise.allSettled([...requests]);await backend.dispose();})();}};
 }
 export type Application=Awaited<ReturnType<typeof createApplication>>;
