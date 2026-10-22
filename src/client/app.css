@@ -37,3 +37,12 @@
 .vs-agent-tools span{border:1px solid currentColor;border-radius:4px;padding:0 4px;opacity:.85}
 .vs-agent-tools span.is-cost,.vs-agent-tools span.is-export{color:#d9a441}
 .vs-agent-active{font-size:11px;opacity:.75}
+.vs-story-panel section{margin-top:12px;padding-top:8px;border-top:1px solid rgba(127,127,127,.25)}
+.vs-story-panel h4,.vs-plan-review h4{margin:0 0 6px}
+.vs-plan-shots{width:100%;border-collapse:collapse;font-size:12px}
+.vs-plan-shots th,.vs-plan-shots td{border-bottom:1px solid rgba(127,127,127,.2);padding:3px 4px;text-align:left;vertical-align:top}
+.vs-plan-shots td.is-low{color:#dc2626;font-weight:600}.vs-plan-shots td.is-ok{color:#16a34a}
+.vs-plan-style{display:grid;grid-template-columns:auto 1fr;gap:2px 8px;margin:6px 0}.vs-plan-style div{display:contents}.vs-plan-style dt{opacity:.7}.vs-plan-style dd{margin:0}
+.vs-character{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px}.vs-character input{min-width:0;flex:1 1 90px}.vs-character select{flex:1 1 140px;max-height:56px}
+.vs-qc{padding-left:16px;margin:4px 0}.vs-qc .is-high{color:#dc2626}.vs-qc .is-medium{color:#d97706}
+.vs-muted{opacity:.7;font-size:12px}
