@@ -61,6 +61,19 @@ export function compressMessages(messages: AgentMessage[], limitChars: number, k
   return { messages: next, compressed: true };
 }
 
+/** Role-aware instructions: the director takes over visual/audio craft for any generation role that is not bound. */
+export function capabilityPrompt(roles: string[]): { text: string; selfMade: string[] } {
+  const has = (role: string) => roles.includes(role), selfMade: string[] = [], lines: string[] = ['当前接入的生成能力：' + (roles.filter(r => r !== 'vision').join('、') || '无（只有导演文本模型）') + '。'];
+  if (!has('image') && !has('video')) { selfMade.push('画面'); lines.push('未接入生图/生视频模型：你同时担任美术和动画师，用 HTML/CSS/SVG/Canvas 2D 在镜头源码里亲手绘制插画、图形、渐变、粒子和转场；不要调用不存在的生成工具，也不要引用外部图片。'); }
+  else { if (!has('image')) { selfMade.push('静态插画'); lines.push('未接入生图模型：静态插画和图形用 SVG/Canvas 自己绘制。'); } else lines.push('已接入生图模型：需要写实或复杂插画时可调用 generate_image（需用户批准），完成后用 media_apply 采用；简单图形仍优先用代码绘制。'); 
+    if (!has('video')) { selfMade.push('动态片段'); lines.push('未接入生视频模型：动态画面用 CSS/Canvas 按帧动画实现。'); } else lines.push('已接入生视频模型：需要实拍感镜头时可调用 generate_video（需用户批准，异步完成后 media_apply）。'); }
+  if (!has('speech')) { selfMade.push('旁白'); lines.push('未接入配音模型：旁白以字幕形式写进画面。'); } else lines.push('已接入配音：可调用 generate_voice（需用户批准）。');
+  if (!has('music')) { selfMade.push('音乐'); lines.push('未接入音乐模型：可不加背景音乐，或用 synthesize_sfx 合成简单的提示音/铺底音。'); } else lines.push('已接入音乐模型：可调用 generate_music（需用户批准），再用 audio_edit 放入音轨。');
+  if (!has('sfx')) { selfMade.push('音效'); lines.push('未接入音效模型：用 synthesize_sfx 在本地合成简单音效（免费），再用 audio_edit 放入音轨。'); } else lines.push('已接入音效模型：可调用 generate_sfx（需用户批准）。');
+  if (!has('vision')) lines.push('未接入视觉检查模型：用 render_check 自检。');
+  return { text: lines.join('\n'), selfMade };
+}
+
 export function systemPrompt(extra = ''): string {
   return [
     '你是「映流 Studio」的视频制作智能体。你通过工具读取和修改当前工程，逐步完成用户目标。',

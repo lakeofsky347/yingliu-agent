@@ -32,3 +32,8 @@
 .vs-agent-steps li.is-pending{color:#d9a441}
 .vs-agent-transcript{font-size:13px;max-height:280px;overflow:auto}
 .vs-agent-actions{display:flex;gap:8px;margin:6px 0}
+.vs-agent-caps{margin-top:12px;font-size:12px}
+.vs-agent-tools{display:flex;flex-wrap:wrap;gap:4px}
+.vs-agent-tools span{border:1px solid currentColor;border-radius:4px;padding:0 4px;opacity:.85}
+.vs-agent-tools span.is-cost,.vs-agent-tools span.is-export{color:#d9a441}
+.vs-agent-active{font-size:11px;opacity:.75}

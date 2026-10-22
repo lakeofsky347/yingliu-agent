@@ -19,12 +19,18 @@ export interface ToolResult {
   revision?: number;
 }
 export interface AgentTool {
+  /** Tool only exposed when all these roles are bound. */
+  requires?: GenRole[];
+  /** Tool only exposed when none of these roles are bound (director fallback). */
+  fallbackFor?: GenRole[];
   name: string; description: string; parameters: JsonSchema; risk: ToolRisk;
   /** Estimated spend before running (used by budget gate); null = unknown. */
   estimate?(args: Record<string, unknown>): number | null;
   run(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult>;
 }
 
+export type GenRole = 'image' | 'video' | 'speech' | 'music' | 'sfx' | 'vision';
+export interface Capabilities { roles: GenRole[]; director?: string; models?: Partial<Record<GenRole, string>> }
 export interface ToolCall { id: string; name: string; arguments: string }
 export type AgentMessage =
   | { role: 'system' | 'user'; content: string | AgentContent[] }
@@ -65,6 +71,8 @@ export interface AgentRun {
   queue: ToolCall[];
   pending?: PendingApproval; waiting?: { kind: 'media' | 'workflow'; id: string; callId: string };
   approvedCallIds: string[]; reviewRounds: number; final?: string; error?: string;
+  /** Capabilities and tool names active at the latest model step. */
+  active?: { roles: GenRole[]; tools: string[]; selfMade: string[] };
 }
 
 export interface AgentStartInput {
@@ -83,5 +91,11 @@ export interface AgentPort {
   route(endpoint: string, payload: Record<string, unknown>): Promise<{ ok: boolean; value?: unknown; error?: { code: string; message: string } }>;
   capture(projectId: string, frame: number, signal: AbortSignal): Promise<{ bytes: Uint8Array; mime: string; frame: number; shotId: string }>;
   voice?(projectId: string, shotId: string, text: string, signal: AbortSignal): Promise<{ id: string; name: string }>;
+  /** Generate audio with a bound role (speech/music/sfx) and import it as a project asset. */
+  generateAudio?(projectId: string, role: 'speech' | 'music' | 'sfx', prompt: string, options: { durationSeconds?: number; signal: AbortSignal }): Promise<{ id: string; name: string; cost?: number | null }>;
+  /** Import locally synthesized audio bytes (WAV) as a project asset. */
+  importAudio?(projectId: string, name: string, bytes: Uint8Array, mime: string): Promise<{ id: string; name: string }>;
+  /** Which generation roles are currently bound (hot: read every step). */
+  capabilities?(): Promise<Capabilities>;
   vision?(prompt: string, images: { mime: string; bytes: Uint8Array }[], signal: AbortSignal): Promise<string>;
 }

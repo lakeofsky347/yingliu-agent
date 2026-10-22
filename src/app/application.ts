@@ -15,12 +15,16 @@ import type { WorkflowRequest, WorkflowPort } from '../workflows/contracts.ts';
 import { AgentService } from '../agent/service.ts';
 import type { AgentPort, AgentStartInput } from '../agent/contracts.ts';
 import { redactKey } from '../agent/model-client.ts';
+import type { GenRole } from '../agent/contracts.ts';
+import { ROLE_OUTPUT, ROLE_PROTOCOLS } from '../models/contracts.ts';
+import { pollTemplate, submitTemplate } from '../models/adapters/template.ts';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 export const ENDPOINTS=new Set(['catalog','current','create','open','save','import','source','saveSource','restoreSource','preview','generate','export','cancel','environment','reveal','apply','inspect','list','focus','audio','tts','history','undo','redo','rename','duplicate','archive','tasks','retry','packs.list','app.health','app.exportProject','app.importProject','providers.get','providers.save','providers.check','chat.history','chat.send','chat.cancel']);
 for(const endpoint of ['models.list','models.connection.save','models.connection.remove','models.model.save','models.model.remove','models.role.bind','models.check','media.generate','media.list','media.get','media.retry','media.pause','media.cancel','media.apply','video.clip.save','video.clip.remove','video.clip.extract'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['workflows.run','workflows.list','workflows.get','workflows.retry','workflows.pause','workflows.apply'])ENDPOINTS.add(endpoint);
-for(const endpoint of ['agent.start','agent.list','agent.get','agent.trace','agent.approve','agent.reject','agent.resume','agent.pause','agent.cancel','agent.tools'])ENDPOINTS.add(endpoint);
+for(const endpoint of ['agent.start','agent.list','agent.get','agent.trace','agent.approve','agent.reject','agent.resume','agent.pause','agent.cancel','agent.tools','agent.capabilities'])ENDPOINTS.add(endpoint);
 export class MemorySecrets implements SecretStore {
   private values=new Map<string,string>();
   async get(ref:string){return this.values.get(ref);}
@@ -60,6 +64,40 @@ export async function createApplication(options:{dataDirectory:string;credential
     route:(endpoint,payload)=>route(endpoint,payload) as ReturnType<AgentPort['route']>,
     capture:async(id,frame,signal)=>{const shot=await backend.workflowCapture(id,frame,signal) as unknown as {bytes?:Uint8Array;buffer?:Uint8Array;mime?:string;frame?:number;shotId:string};return {bytes:shot.bytes??shot.buffer??new Uint8Array(),mime:shot.mime??'image/png',frame:shot.frame??frame,shotId:shot.shotId??''};},
     voice:async(id,shotId,text,signal)=>{const asset=await workflowPort.voice(id,shotId,text,signal);return {id:asset.id,name:asset.name};},
+    capabilities:async()=>{
+      const state=providers.registry.snapshot(),roles:GenRole[]=[],models:Partial<Record<GenRole,string>>={};
+      for(const binding of state.roles){const model=state.models.find(m=>m.id===binding.modelId),connection=state.connections.find(c=>c.id===model?.connectionId);
+        if(!model?.enabled||!connection?.enabled||!ROLE_PROTOCOLS[binding.role].includes(connection.protocol)||!model.outputModalities.includes(ROLE_OUTPUT[binding.role]))continue;
+        if(['image','video','speech','music','sfx','vision'].includes(binding.role)){roles.push(binding.role as GenRole);models[binding.role as GenRole]=model.name;}}
+      if(!roles.includes('speech')){try{const snapshot=await backend.call('current');if(snapshot.ttsConfigured&&snapshot.tts?.enabled){roles.push('speech');models.speech='应用内配音设置';}}catch{}}
+      let director:string|undefined;try{director=(await providers.registry.resolve('director')).model.name;}catch{}
+      return {roles,models,...(director?{director}:{})};
+    },
+    importAudio:async(id,name,bytes,mime)=>{const snapshot=await backend.call('import',{projectId:id,name,description:'智能体本地合成',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error('音频导入失败');return {id:asset.id,name:asset.name};},
+    generateAudio:async(id,role,prompt,{durationSeconds,signal})=>{
+      const resolved=await providers.registry.resolve(role);
+      if(role==='speech'&&resolved.connection.protocol==='speech'){const shot=(await backend.call('current',{projectId:id})).project?.shotOrder[0];if(!shot)throw new Error('工程没有镜头');const asset=await workflowPort.voice(id,shot,prompt,signal);return {id:asset.id,name:asset.name,cost:null};}
+      if(resolved.connection.protocol!=='async-task')throw new Error('该角色的模型协议不支持音频生成');
+      const release=providers.registry.acquire(resolved.connection.id,resolved.model.id);
+      try{
+        const context={connection:resolved.connection,key:await providers.registry.credential(resolved.connection),signal,fetch:options.fetch};
+        let result=await submitTemplate(context,{clientRequestId:randomUUID(),model:resolved.model,prompt,duration:durationSeconds,parameters:{}},'audio');
+        let bytes:Uint8Array,mime:string;let cost:number|null=null;
+        if('kind' in result){bytes=result.bytes;mime=result.mimeType;}
+        else{
+          const deadline=Date.now()+Math.max(60000,resolved.connection.requestTimeoutMs*6);
+          while(result.status==='queued'||result.status==='running'){if(Date.now()>deadline)throw new Error('音频生成等待超时；云端任务可能仍在执行');await new Promise(r=>setTimeout(r,Number(resolved.model.parameters.pollIntervalMs)||2000));signal.throwIfAborted();result=await pollTemplate(context,resolved.model,result.jobId,'audio');}
+          if(result.status!=='succeeded'||!result.artifacts?.length)throw new Error('音频生成失败：'+(result.error??result.status));
+          cost=typeof result.usage?.cost==='number'?result.usage.cost:null;const artifact=result.artifacts[0];
+          if(artifact.base64){bytes=Buffer.from(artifact.base64,'base64');mime=artifact.mimeType;}
+          else{const url=new URL(artifact.url!);if(url.protocol!=='https:'&&!(url.protocol==='http:'&&['127.0.0.1','localhost'].includes(url.hostname)))throw new Error('音频产物地址须为 HTTPS');
+            const response=await (options.fetch??fetch)(url.href,{signal});if(!response.ok)throw new Error('下载音频失败（HTTP '+response.status+'）');const buffer=new Uint8Array(await response.arrayBuffer());if(!buffer.length||buffer.length>64*1024*1024)throw new Error('音频为空或超过 64 MiB');bytes=buffer;mime=(response.headers.get('content-type')?.split(';')[0]||artifact.mimeType);}
+        }
+        if(!mime.startsWith('audio/'))mime='audio/mpeg';
+        const snapshot=await backend.call('import',{projectId:id,name:(role==='music'?'音乐 · ':role==='sfx'?'音效 · ':'配音 · ')+prompt.slice(0,24),description:'由 '+resolved.model.name+' 生成',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});
+        const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error('音频导入失败');return {id:asset.id,name:asset.name,cost};
+      }finally{release();}
+    },
     vision:async(prompt,images,signal)=>{await providers.registry.resolve('vision');return workflowPort.text('vision',prompt,signal,{} as WorkflowRequest,images);},
   };
   const agent=new AgentService(join(dataDirectory,'agent-runs'),agentPort,{
@@ -94,6 +132,7 @@ export async function createApplication(options:{dataDirectory:string;credential
         case 'agent.pause':value=await agent.pause(String(data.runId));break;
         case 'agent.cancel':value=await agent.cancel(String(data.runId));break;
         case 'agent.tools':value={tools:agent.toolList.map(tool=>({name:tool.name,risk:tool.risk,description:tool.description}))};break;
+        case 'agent.capabilities':value=await agent.capabilities();break;
         case 'workflows.run':value=await workflows.run(data as unknown as WorkflowRequest);break;
         case 'workflows.list':value={workflows:await workflows.list(typeof data.projectId==='string'?data.projectId:undefined)};break;
         case 'workflows.get':value=await workflows.get(String(data.workflowId));break;

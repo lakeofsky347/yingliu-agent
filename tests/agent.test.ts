@@ -191,7 +191,7 @@ test('visual self-check loop sends failed reviews back until the vision model pa
 });
 
 test('cost tools wait for media tasks, report spend, and hint to apply', async () => {
-  const d = await dir(); const { port, state } = fakePort();
+  const d = await dir(); const { port, state } = fakePort({ capabilities: async () => ({ roles: ['image'] }) });
   const gw = toolGateway(body => body.messages.length === 2 ? { toolCalls: [{ id: 'g1', name: 'generate_image', arguments: { expectedRevision: 3, prompt: '山' } }] } : done());
   const service = new AgentService(d, port, { resolveModel: model(true, { pricePerMInput: 0, pricePerMOutput: 0 }), fetch: gw.fetch, pollMs: 5, maxReviewRounds: 0 });
   try {

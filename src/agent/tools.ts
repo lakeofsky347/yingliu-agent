@@ -2,6 +2,8 @@ import { compileDirectorPlan } from '../app/conversation.ts';
 import type { ChatInput } from '../app/contracts.ts';
 import type { AgentTool, JsonSchema, ToolContext, ToolResult } from './contracts.ts';
 import { bound, summarizeProject } from './context.ts';
+import { synthesize, type SynthSpec } from './synth.ts';
+import type { Capabilities } from './contracts.ts';
 
 const object = (properties: Record<string, JsonSchema>, required: string[] = []): JsonSchema => ({ type: 'object', properties, required, additionalProperties: false });
 const str = (description: string): JsonSchema => ({ type: 'string', description });
@@ -62,7 +64,7 @@ export function createTools(): AgentTool[] {
       } },
     { name: 'capture_frame', risk: 'read', description: '截取指定帧的画面，用于你自己查看（需要视觉模型）。', parameters: object({ frame: int('帧序号，从 0 开始') }, ['frame']),
       async run(args, ctx) { const frame = Number(args.frame); if (!Number.isSafeInteger(frame) || frame < 0) throw new Error('frame 无效'); const shot = await ctx.port.capture(ctx.projectId, frame, ctx.signal); return { content: json({ frame: shot.frame, shotId: shot.shotId }), images: [{ mime: shot.mime, bytes: shot.bytes }] }; } },
-    { name: 'visual_review', risk: 'read', description: '截取每个镜头的关键帧，交给视觉检查模型，返回结构化问题列表（镜头、帧、问题、严重度、建议）。修改后用它自检。', parameters: object({ shotIds: { type: 'array', items: { type: 'string' } } }),
+    { name: 'visual_review', risk: 'read', requires: ['vision'], description: '截取每个镜头的关键帧，交给视觉检查模型，返回结构化问题列表（镜头、帧、问题、严重度、建议）。修改后用它自检。', parameters: object({ shotIds: { type: 'array', items: { type: 'string' } } }),
       async run(args, ctx) {
         const snapshot = await ctx.port.snapshot(ctx.projectId), project = snapshot.project; if (!project) throw new Error('没有打开的工程');
         if (!ctx.port.vision) return { content: json({ skipped: true, reason: '未配置视觉检查模型（vision 角色）；请改用 render_check' }) };
@@ -74,17 +76,32 @@ export function createTools(): AgentTool[] {
         const answer = await ctx.port.vision('逐张检查视频关键帧（顺序对应镜头 ' + frames.slice(0, 6).map(f => f.shotId).join(', ') + '）。只输出 JSON：{"pass":true|false,"issues":[{"shotId":"","problem":"","severity":"low|medium|high","suggestion":""}]}。检查文字溢出/遮挡、空白画面、对比度、元素越界、与镜头意图不符。', images, ctx.signal);
         return { content: bound(answer, 4000) };
       } },
-    { name: 'generate_image', risk: 'cost', description: '用图片模型生成素材（产生费用，需要用户批准）。完成后用 media_apply 采用。', parameters: object({ expectedRevision: int('当前工程版本'), prompt: str('画面描述'), shotId: str('关联镜头') }, ['expectedRevision', 'prompt']),
+    { name: 'generate_image', risk: 'cost', requires: ['image'], description: '用图片模型生成素材（产生费用，需要用户批准）。完成后用 media_apply 采用。', parameters: object({ expectedRevision: int('当前工程版本'), prompt: str('画面描述'), shotId: str('关联镜头') }, ['expectedRevision', 'prompt']),
       estimate: () => null,
       async run(args, ctx) { const task = await rpc(ctx, 'media.generate', { expectedRevision: revision(args), operation: 'text-to-image', prompt: need(args, 'prompt'), ...(args.shotId ? { shotId: args.shotId } : {}), clientRequestId: `${ctx.runId}.${String(args.__callId ?? '')}` }) as { id: string }; return { content: json({ taskId: task.id }), waitFor: { kind: 'media', id: task.id } }; } },
-    { name: 'generate_video', risk: 'cost', description: '用视频模型生成片段（产生费用，需要用户批准）。', parameters: object({ expectedRevision: int('当前工程版本'), prompt: str('画面与运动描述'), shotId: str('关联镜头'), imageAssetId: str('可选：首帧图片素材 ID') }, ['expectedRevision', 'prompt']),
+    { name: 'generate_video', risk: 'cost', requires: ['video'], description: '用视频模型生成片段（产生费用，需要用户批准）。', parameters: object({ expectedRevision: int('当前工程版本'), prompt: str('画面与运动描述'), shotId: str('关联镜头'), imageAssetId: str('可选：首帧图片素材 ID') }, ['expectedRevision', 'prompt']),
       estimate: () => null,
       async run(args, ctx) { const task = await rpc(ctx, 'media.generate', { expectedRevision: revision(args), operation: args.imageAssetId ? 'image-to-video' : 'text-to-video', prompt: need(args, 'prompt'), ...(args.shotId ? { shotId: args.shotId } : {}), ...(args.imageAssetId ? { imageAssetIds: [args.imageAssetId], allowImageUpload: true } : {}), clientRequestId: `${ctx.runId}.${String(args.__callId ?? '')}` }) as { id: string }; return { content: json({ taskId: task.id }), waitFor: { kind: 'media', id: task.id } }; } },
     { name: 'media_apply', risk: 'write', description: '把已就绪的生成素材采用到工程。', parameters: object({ taskId: str('媒体任务 ID'), expectedRevision: int('当前工程版本') }, ['taskId', 'expectedRevision']),
       async run(args, ctx) { const value = await rpc(ctx, 'media.apply', { taskId: need(args, 'taskId'), expectedRevision: revision(args) }); return { content: json(value) }; } },
-    { name: 'generate_voice', risk: 'cost', description: '为镜头生成配音（产生费用，需要用户批准）。', parameters: object({ shotId: str('镜头 ID'), text: str('旁白文字') }, ['shotId', 'text']),
+    { name: 'generate_voice', risk: 'cost', requires: ['speech'], description: '为镜头生成配音（产生费用，需要用户批准）。', parameters: object({ shotId: str('镜头 ID'), text: str('旁白文字') }, ['shotId', 'text']),
       estimate: () => null,
       async run(args, ctx) { if (!ctx.port.voice) throw new Error('未配置配音'); const asset = await ctx.port.voice(ctx.projectId, need(args, 'shotId'), need(args, 'text'), ctx.signal); return { content: json({ ok: true, assetId: asset.id, name: asset.name }) }; } },
+    { name: 'generate_music', risk: 'cost', requires: ['music'], description: '用已接入的音乐模型生成背景音乐并导入为素材（产生费用，需要用户批准）。之后用 audio_edit 放到音轨。', parameters: object({ prompt: str('风格、情绪、乐器、节奏'), durationSeconds: { type: 'number', description: '时长（秒）' } }, ['prompt']),
+      estimate: () => null,
+      async run(args, ctx) { if (!ctx.port.generateAudio) throw new Error('未配置音乐生成'); const asset = await ctx.port.generateAudio(ctx.projectId, 'music', need(args, 'prompt'), { durationSeconds: Number(args.durationSeconds) || undefined, signal: ctx.signal }); return { content: json({ ok: true, assetId: asset.id, name: asset.name, hint: '用 audio_edit 把它加入音轨' }), cost: asset.cost ?? null }; } },
+    { name: 'generate_sfx', risk: 'cost', requires: ['sfx'], description: '用已接入的音效模型生成音效并导入为素材（产生费用，需要用户批准）。', parameters: object({ prompt: str('音效描述'), durationSeconds: { type: 'number', description: '时长（秒）' } }, ['prompt']),
+      estimate: () => null,
+      async run(args, ctx) { if (!ctx.port.generateAudio) throw new Error('未配置音效生成'); const asset = await ctx.port.generateAudio(ctx.projectId, 'sfx', need(args, 'prompt'), { durationSeconds: Number(args.durationSeconds) || undefined, signal: ctx.signal }); return { content: json({ ok: true, assetId: asset.id, name: asset.name, hint: '用 audio_edit 把它加入音轨' }), cost: asset.cost ?? null }; } },
+    { name: 'synthesize_sfx', risk: 'write', fallbackFor: ['sfx'], description: '未接入音效模型时，在本地合成简单音效（提示音、扫频、风声、点击、钟声、噪声冲击）并导入为音频素材，免费。之后用 audio_edit 放到音轨。',
+      parameters: object({ name: str('素材名称'), kind: { type: 'string', enum: ['tone', 'sweep', 'chime', 'noise', 'whoosh', 'click'] }, durationSeconds: { type: 'number' }, frequency: { type: 'number' }, endFrequency: { type: 'number' }, volume: { type: 'number' } }, ['kind', 'durationSeconds']),
+      async run(args, ctx) {
+        if (!ctx.port.importAudio) throw new Error('当前环境不能导入音频');
+        const kind = String(args.kind); if (!['tone', 'sweep', 'chime', 'noise', 'whoosh', 'click'].includes(kind)) throw new Error('kind 无效');
+        const bytes = synthesize({ ...(args as unknown as SynthSpec), kind: kind as SynthSpec['kind'] });
+        const asset = await ctx.port.importAudio(ctx.projectId, typeof args.name === 'string' && args.name.trim() ? args.name.trim().slice(0, 60) : '合成音效 · ' + kind, bytes, 'audio/wav');
+        return { content: json({ ok: true, assetId: asset.id, name: asset.name, bytes: bytes.length, hint: '用 audio_edit 把它加入音轨' }) };
+      } },
     { name: 'run_workflow', risk: 'cost', description: '启动固定协作流程（导演→画面→配音→视觉检查），可能调用生成模型（需要用户批准）。', parameters: object({ expectedRevision: int('当前工程版本'), prompt: str('制作要求') }, ['expectedRevision', 'prompt']),
       estimate: () => null,
       async run(args, ctx) { const record = await rpc(ctx, 'workflows.run', { expectedRevision: revision(args), prompt: need(args, 'prompt') }) as { id: string }; return { content: json({ workflowId: record.id }), waitFor: { kind: 'workflow', id: record.id } }; } },
@@ -92,4 +109,11 @@ export function createTools(): AgentTool[] {
       async run(_args, ctx) { await rpc(ctx, 'export', {}); return { content: json({ ok: true, message: '已开始导出，可在「任务记录」查看进度' }) }; } },
   ];
   return tools;
+}
+
+/** Select the tools exposed to the model for the currently bound generation roles. */
+export function activeTools(all: AgentTool[], capabilities: Capabilities): AgentTool[] {
+  const roles = new Set(capabilities.roles);
+  return all.filter(tool => (tool.requires ?? []).every(role => roles.has(role)) && !(tool.fallbackFor ?? []).some(role => roles.has(role)))
+    .filter(tool => tool.name !== 'media_apply' || roles.has('image') || roles.has('video'));
 }

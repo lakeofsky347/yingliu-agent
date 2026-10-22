@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto';
 import type { AgentContent, AgentEvent, AgentMessage, AgentPort, AgentRun, AgentStartInput, AgentTool, PublicRun, RunStep, ToolCall, ToolResult, ToolRisk } from './contracts.ts';
 import { chatTurn, looksLikeNoToolSupport, type ChatConfig } from './model-client.ts';
 import { backoff, budgetFrom, chargeModel, chargeTool, classify, emptyUsage, needsApproval, overBudget, tokenCost } from './budget.ts';
-import { bound, compressMessages, summarizeProject, systemPrompt } from './context.ts';
+import { bound, capabilityPrompt, compressMessages, summarizeProject, systemPrompt } from './context.ts';
 import { RunStore } from './run-store.ts';
-import { createTools } from './tools.ts';
+import { activeTools, createTools } from './tools.ts';
+import type { Capabilities } from './contracts.ts';
 
 export interface ResolvedAgentModel { config: ChatConfig; parameters: Record<string, unknown>; connectionId?: string; vision: boolean }
 export interface AgentServiceOptions {
@@ -29,6 +30,12 @@ export class AgentService {
     this.store = new RunStore(directory, options.redact); this.tools = options.tools ?? createTools();
   }
   get toolList(): readonly AgentTool[] { return this.tools; }
+  /** Current capability snapshot (hot: re-read before every model step). */
+  async capabilities(): Promise<{ capabilities: Capabilities; tools: { name: string; risk: string; description: string }[]; selfMade: string[] }> {
+    const capabilities = await this.port.capabilities?.().catch(() => ({ roles: [] })) ?? { roles: this.port.vision ? ['vision' as const] : [] };
+    const tools = activeTools(this.tools, capabilities);
+    return { capabilities, tools: tools.map(tool => ({ name: tool.name, risk: tool.risk, description: tool.description })), selfMade: capabilityPrompt(capabilities.roles).selfMade };
+  }
   initialize(): Promise<void> {
     return this.initialized ??= (async () => {
       for (const run of await this.store.loadAll()) {
@@ -155,17 +162,21 @@ export class AgentService {
       if (limit) { run.status = 'budget_exceeded'; run.message = '已停止：' + limit; await this.store.trace(run.id, { event: 'budget', reason: limit, usage: run.usage }); await this.save(run); return; }
       const compressed = compressMessages(run.messages, this.options.contextChars ?? 120_000);
       if (compressed.compressed) { run.messages = compressed.messages; const s = await this.step(run, { kind: 'compress', status: 'running' }); await this.finishStep(run, s, { status: 'complete', summary: '已压缩较早的上下文' }); }
+      const caps = await this.capabilities(), tools = activeTools(this.tools, caps.capabilities), roleText = capabilityPrompt(caps.capabilities.roles);
+      const changed = JSON.stringify(run.active?.tools) !== JSON.stringify(tools.map(t => t.name));
+      if (run.active && changed) { run.messages.push({ role: 'user', content: '（系统通知）可用生成能力已变化：' + roleText.text }); await this.store.trace(run.id, { event: 'capabilities', roles: caps.capabilities.roles, tools: tools.map(t => t.name) }); }
+      run.active = { roles: caps.capabilities.roles, tools: tools.map(t => t.name), selfMade: roleText.selfMade };
       run.message = '模型思考中'; await this.save(run);
       const step = await this.step(run, { kind: 'model', status: 'running' });
       let turn;
       try {
         turn = await this.withRetry(run, step, async () => {
-          try { return await chatTurn(model.config, systemPrompt(), run.messages, this.tools as AgentTool[], signal, this.options.fetch); }
+          try { return await chatTurn(model.config, systemPrompt(roleText.text), run.messages, tools, signal, this.options.fetch); }
           catch (error) {
             if (model.config.supportsTools && looksLikeNoToolSupport(error)) {
               model = { ...model, config: { ...model.config, supportsTools: false } }; run.model.mode = 'plan-json';
               await this.store.trace(run.id, { event: 'fallback', to: 'plan-json', error: errorText(error) });
-              return chatTurn(model.config, systemPrompt(), run.messages, this.tools as AgentTool[], signal, this.options.fetch);
+              return chatTurn(model.config, systemPrompt(roleText.text), run.messages, tools, signal, this.options.fetch);
             }
             throw error;
           }
@@ -189,7 +200,7 @@ export class AgentService {
   }
 
   private async selfCheck(run: AgentRun, signal: AbortSignal): Promise<{ pass: boolean; text: string } | null> {
-    const name = this.port.vision ? 'visual_review' : 'render_check', tool = this.tools.find(item => item.name === name); if (!tool) return null;
+    const name = this.port.vision && (await this.capabilities()).capabilities.roles.includes('vision') ? 'visual_review' : 'render_check', tool = this.tools.find(item => item.name === name); if (!tool) return null;
     const step = await this.step(run, { kind: 'review', status: 'running', tool: name });
     try {
       const result = await tool.run({}, { runId: run.id, projectId: run.projectId, signal, port: this.port });
@@ -202,9 +213,10 @@ export class AgentService {
 
   private async runCall(run: AgentRun, call: ToolCall, model: ResolvedAgentModel, signal: AbortSignal): Promise<'next' | 'suspend'> {
     const meta = run as AgentRun & { dirty?: boolean; allowImages?: boolean };
-    const tool = this.tools.find(item => item.name === call.name);
+    const active = activeTools(this.tools, (await this.capabilities()).capabilities);
+    const tool = active.find(item => item.name === call.name);
     const respond = (content: string) => { run.messages.push({ role: 'tool', tool_call_id: call.id, content }); run.queue.shift(); };
-    if (!tool) { respond(JSON.stringify({ error: '未知工具：' + call.name + '。可用：' + this.tools.map(t => t.name).join(', ') })); await this.save(run); return 'next'; }
+    if (!tool) { respond(JSON.stringify({ error: (this.tools.some(t => t.name === call.name) ? '该工具当前未激活（对应模型未接入）：' : '未知工具：') + call.name + '。可用：' + active.map(t => t.name).join(', ') })); await this.save(run); return 'next'; }
     if (call.arguments.length > 2_100_000) { respond(JSON.stringify({ error: '工具参数超过 2MB 上限' })); await this.save(run); return 'next'; }
     let args: Record<string, unknown>;
     try { const parsed = JSON.parse(call.arguments || '{}'); if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('参数须为对象'); args = parsed; }
