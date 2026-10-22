@@ -182,7 +182,7 @@ export class SpeechSynthesizer {
     const folder=await projectPath(root,'runtime/tts-http-'+randomUUID()),file=path.join(folder,'response.audio');
     const controller=new AbortController(),cancel=()=>controller.abort(signal?.reason??new Error('配音已取消'));this.controllers.add(controller);signal?.addEventListener('abort',cancel,{once:true});
     if(signal?.aborted)cancel();
-    const timer=setTimeout(()=>controller.abort(new Error('配音请求超时，请查询供应商记录后决定是否重新生成')),timeoutMs);timer.unref();
+    const timer=setTimeout(()=>controller.abort(new Error('配音请求超时，请查询供应商记录后决定是否重新生成')),timeoutMs);
     let response:Response|undefined;
     try{
       controller.signal.throwIfAborted();await fs.mkdir(folder,{recursive:true});
