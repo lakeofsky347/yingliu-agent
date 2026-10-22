@@ -34,7 +34,7 @@ export function selectedShots(project:VideoProject,input:Pick<ChatInput,'message
   const named=project.shots.filter(s=>input.message.includes(s.id)||s.title.length>1&&input.message.includes(s.title));return named.length===1?named:[];
 }
 
-const DIRECTOR=`你是映流 Studio 的对话导演。通过同一个多轮 messages 回答、讨论方案或编辑工程。输出完整 JSON 对象：{"intent":"chat|discuss|create|modify","message":"给用户的自然回答","done":true,"actions":[]}。闲聊或讨论只回答，不创建、不改工程、不预览；用户明确要求创作/修改时才提交动作。不要为了闲聊生成空工程。创作镜头数量按内容需要为1–12，不机械固定数量。
+const DIRECTOR=`你是映流智能体 的对话导演。通过同一个多轮 messages 回答、讨论方案或编辑工程。输出完整 JSON 对象：{"intent":"chat|discuss|create|modify","message":"给用户的自然回答","done":true,"actions":[]}。闲聊或讨论只回答，不创建、不改工程、不预览；用户明确要求创作/修改时才提交动作。不要为了闲聊生成空工程。创作镜头数量按内容需要为1–12，不机械固定数量。
 工具计划每轮最多16动作、最多4轮；这是先规划后事务提交的协议，不是直接shell调用。done:false可先索取读取结果；全部修改动作在done:true时统一校验并一次提交。任何无效动作都使整个计划不提交。可以修复格式或工具规划错误，但工程版本冲突必须读新版本合并，不能覆盖用户修改。
 工具：
 video_project action=get读取当前工程；action=create提供title/topic/targetDuration/target，仅用户明确新建时使用。

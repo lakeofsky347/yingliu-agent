@@ -29,7 +29,7 @@ await rm(join(destination, options.platform === 'darwin' ? 'Contents/Resources/d
 const packageInfo = await copyApplication(root, appRoot);
 if (options.platform !== 'darwin') await rename(join(destination, layout.electronExecutable), join(destination, layout.executableRelative));
 if (options.platform === 'linux') {
-  for (const [name, contents] of [['yingliu-studio.sh', linuxLauncher], ['install-desktop-entry.sh', linuxDesktopInstaller]]) {
+  for (const [name, contents] of [['yingliu-agent.sh', linuxLauncher], ['install-desktop-entry.sh', linuxDesktopInstaller]]) {
     await writeFile(join(destination, name), contents);
     await chmod(join(destination, name), 0o755);
   }
@@ -45,8 +45,8 @@ await assertRelativeSymlinks(destination);
 if (options.platform === 'darwin') {
   const plist = join(destination, 'Contents/Info.plist');
   let text = await readFile(plist, 'utf8');
-  text = text.replace(/(<key>CFBundleDisplayName<\/key>\s*<string>)[^<]*(<\/string>)/, '$1映流 Studio$2')
-    .replace(/(<key>CFBundleIdentifier<\/key>\s*<string>)[^<]*(<\/string>)/, '$1local.yingliu.studio$2')
+  text = text.replace(/(<key>CFBundleDisplayName<\/key>\s*<string>)[^<]*(<\/string>)/, '$1映流智能体$2')
+    .replace(/(<key>CFBundleIdentifier<\/key>\s*<string>)[^<]*(<\/string>)/, '$1local.yingliu.agent$2')
     .replace(/(<key>CFBundleShortVersionString<\/key>\s*<string>)[^<]*(<\/string>)/, (_, start, end) => start + packageInfo.version + end)
     .replace(/(<key>CFBundleVersion<\/key>\s*<string>)[^<]*(<\/string>)/, (_, start, end) => start + packageInfo.version + end);
   await writeFile(plist, text);

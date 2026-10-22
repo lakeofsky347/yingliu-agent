@@ -31,7 +31,7 @@ export class StudioService {
   private audioUrl:string|null=null;
   private tts:TtsSettings;
   constructor(private ctx:HostContext,config:{baseDirectory?:string;restoreRecent?:boolean}={}){
-    this.baseDirectory=resolve(config.baseDirectory??process.env.YINGLIU_PROJECTS??join(homedir(),'Documents','YingliuProjects'));
+    this.baseDirectory=resolve(config.baseDirectory??process.env.YINGLIU_PROJECTS??join(homedir(),'Documents','YingliuAgentProjects'));
     this.restoreRecent=config.restoreRecent!==false;
     this.store=new ProjectStore({baseDirectory:this.baseDirectory});
     const env=detectEnvironment();this.settings={browserPath:env.browserPath,ffmpegPath:env.ffmpegPath,ffprobePath:env.ffprobePath};this.tts=defaultTtsSettings(env);

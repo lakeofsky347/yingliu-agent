@@ -33,12 +33,12 @@ export function parsePackageOptions(args, allowVerification = false) {
 export function packageLayout(root, platform = process.platform, arch = process.arch) {
   if (!platforms.has(platform) || !architectures.has(arch)) throw new Error('不支持此平台或架构');
   const mac = platform === 'darwin';
-  const name = mac ? '映流 Studio.app' : `yingliu-studio-${platform}-${arch}`;
-  const executableRelative = mac ? 'Contents/MacOS/Electron' : platform === 'win32' ? 'yingliu-studio.exe' : 'yingliu-studio';
+  const name = mac ? '映流智能体.app' : `yingliu-agent-${platform}-${arch}`;
+  const executableRelative = mac ? 'Contents/MacOS/Electron' : platform === 'win32' ? 'yingliu-agent.exe' : 'yingliu-agent';
   const appRelative = mac ? 'Contents/Resources/app' : 'resources/app';
   return {
     name, platform, arch, destination: join(root, 'artifacts', name), appRelative, executableRelative,
-    launcherRelative: platform === 'linux' ? 'yingliu-studio.sh' : executableRelative,
+    launcherRelative: platform === 'linux' ? 'yingliu-agent.sh' : executableRelative,
     manifestRelative: mac ? 'Contents/Resources/yingliu-package.json' : 'yingliu-package.json',
     electronExecutable: mac ? 'Electron.app/Contents/MacOS/Electron' : platform === 'win32' ? 'electron.exe' : 'electron',
   };
@@ -86,7 +86,7 @@ export const linuxLauncher = `#!/bin/sh
 set -eu
 APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 unset ELECTRON_RUN_AS_NODE
-exec "$APP_DIR/yingliu-studio" "$@"
+exec "$APP_DIR/yingliu-agent" "$@"
 `;
 
 // Desktop files bind to an installation path. Generate one only when the user
@@ -94,7 +94,7 @@ exec "$APP_DIR/yingliu-studio" "$@"
 export const linuxDesktopInstaller = `#!/bin/sh
 set -eu
 APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-ELECTRON_RUN_AS_NODE=1 exec "$APP_DIR/yingliu-studio" "$APP_DIR/install-desktop-entry.cjs"
+ELECTRON_RUN_AS_NODE=1 exec "$APP_DIR/yingliu-agent" "$APP_DIR/install-desktop-entry.cjs"
 `;
 
 export const linuxDesktopWriter = `const {mkdirSync,writeFileSync}=require('node:fs');
@@ -102,11 +102,11 @@ const {join}=require('node:path');
 const {homedir}=require('node:os');
 const directory=join(process.env.XDG_DATA_HOME||join(homedir(),'.local/share'),'applications');
 // Desktop Entry quoting, then its generic value backslash escaping.
-const executable=join(__dirname,'yingliu-studio.sh');
+const executable=join(__dirname,'yingliu-agent.sh');
 const quoted='"'+executable.replace(/["\x60$\\\\]/g,char=>'\\\\'+char).replace(/%/g,'%%')+'"';
 const exec=quoted.replace(/\\\\/g,'\\\\\\\\');
 mkdirSync(directory,{recursive:true});
-const file=join(directory,'local.yingliu.studio.desktop');
-writeFileSync(file,'[Desktop Entry]\\nType=Application\\nName=映流 Studio\\nComment=本地视频创作应用\\nExec='+exec+'\\nTerminal=false\\nCategories=AudioVideo;Video;\\n',{mode:0o644});
+const file=join(directory,'local.yingliu.agent.desktop');
+writeFileSync(file,'[Desktop Entry]\\nType=Application\\nName=映流智能体\\nComment=本地视频创作应用\\nExec='+exec+'\\nTerminal=false\\nCategories=AudioVideo;Video;\\n',{mode:0o644});
 console.log('已安装桌面入口：'+file+'。移动应用目录后请重新运行安装脚本。');
 `;

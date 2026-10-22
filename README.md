@@ -1,4 +1,22 @@
-# 映流 Studio
+# 映流智能体（Yingliu Agent）
+
+> 本仓库是映流的**智能体版**，源自 [yingliu-studio](https://github.com/lakeofsky347/yingliu-studio)（保留完整 git 历史，从其 `feat/story-consistency` 分支 0.5.0 拆出）。许可证：GPL-3.0-only（见 [LICENSE](LICENSE)）。
+
+## 与「映流 Studio」固定流程工作台的区别
+
+| | 映流 Studio（yingliu-studio） | 映流智能体（本仓库） |
+| --- | --- | --- |
+| 定位 | 固定流程工作台：简报 → 分镜 → 画面 → 配音 → 导出，人手动推进 | 导演智能体在工具循环里规划、执行、自检，人负责审批与把关 |
+| 核心 | 节点图、对话导演、固定协作流程 | 创作计划（story.json）与计划审批、角色库与一致性打分、能力热切换的多模态工具、项目预算、导出前质检 |
+| 固定流程 | 主要工作方式 | 保留为智能体的宏工具 `run_workflow`（需审批），工作台界面仍可用 |
+| 包名 / 应用名 | `yingliu-studio` / 映流 Studio | `yingliu-agent` / 映流智能体 |
+| 数据目录 | 系统 appData 下 `映流 Studio`；工程默认 `~/Documents/YingliuProjects` | 系统 appData 下 `yingliu-agent`；工程默认 `~/Documents/YingliuAgentProjects` |
+| 浏览器开发端口 | 19440 | 19440 |
+
+两个应用可以同时安装，数据、凭据、工程互不共用（两边都可用 `YINGLIU_DATA_DIR` / `YINGLIU_PROJECTS` 显式指定目录，请勿指向同一位置）。
+
+智能体设计见 [docs/AGENT.md](docs/AGENT.md)，0.5 方案见 [docs/ROADMAP-0.5.md](docs/ROADMAP-0.5.md)。以下为沿用自工作台的通用说明。
+
 
 映流是一个本地视频创作应用。先填写影片简报，再与自己的模型讨论、构建初稿；也可以从空白节点图开始，亲手安排镜头、画面和声音。现在还可分别连接文本、生图、生视频和配音模型，在同一工程中混合代码场景与视频片段，随后预览、导出 MP4、备份和继续编辑。
 
@@ -19,9 +37,9 @@ npm start
 
 | 系统 | 输出与启动入口 |
 | --- | --- |
-| macOS | `artifacts/映流 Studio.app`，保留本机 ad-hoc 临时签名流程 |
-| Windows | `artifacts/yingliu-studio-win32-<arch>/yingliu-studio.exe` |
-| Linux | `artifacts/yingliu-studio-linux-<arch>/yingliu-studio.sh` |
+| macOS | `artifacts/映流智能体.app`，保留本机 ad-hoc 临时签名流程 |
+| Windows | `artifacts/yingliu-agent-win32-<arch>/yingliu-agent.exe` |
+| Linux | `artifacts/yingliu-agent-linux-<arch>/yingliu-agent.sh` |
 
 Windows/Linux 请移动或分发完整目录。应用包不包含工作区用户数据、模型密钥或开发依赖，不需要源码目录或系统 Node.js。Linux 需要桌面环境及 Electron 所需系统动态库；以普通用户启动，保留 Chromium sandbox。运行包内 `install-desktop-entry.sh` 可安装当前用户的应用菜单入口，移动目录后请重新运行该脚本。打包不会自行安装菜单入口。
 
@@ -29,7 +47,7 @@ Windows/Linux 请移动或分发完整目录。应用包不包含工作区用户
 
 应用包包含 Electron、界面、工程服务、ZIP 备份模块及浏览器驱动。逐帧捕获需要本机 Chrome/Chromium，编码需要 FFmpeg、ffprobe。首页显示检测结果；工程工作台的「运行环境」可选择或填写可执行文件绝对路径。缺少渲染工具时仍可编排分镜、导入素材和编辑源码。
 
-浏览器开发入口：`npm run dev`，默认 `http://127.0.0.1:19430`。浏览器模式的模型密钥仅存在于服务进程内存，重启后需要重新填写；桌面模式通过 Electron safeStorage 加密保存。
+浏览器开发入口：`npm run dev`，默认 `http://127.0.0.1:19440`。浏览器模式的模型密钥仅存在于服务进程内存，重启后需要重新填写；桌面模式通过 Electron safeStorage 加密保存。
 
 ## 完整制作流程
 

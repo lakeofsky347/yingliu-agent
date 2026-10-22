@@ -19,17 +19,17 @@ test('packaging refuses foreign Electron targets rather than claiming cross comp
 
 test('native package locations retain macOS bundle and identify portable Windows/Linux launchers', () => {
   const mac = packageLayout('/example', 'darwin', 'arm64');
-  assert.equal(mac.name, '映流 Studio.app');
+  assert.equal(mac.name, '映流智能体.app');
   assert.equal(mac.executableRelative, 'Contents/MacOS/Electron');
   assert.equal(mac.appRelative, 'Contents/Resources/app');
   const windows = packageLayout('/example', 'win32', 'x64');
-  assert.equal(windows.executableRelative, 'yingliu-studio.exe');
+  assert.equal(windows.executableRelative, 'yingliu-agent.exe');
   assert.equal(windows.appRelative, 'resources/app');
-  assert.equal(windows.name, 'yingliu-studio-win32-x64');
+  assert.equal(windows.name, 'yingliu-agent-win32-x64');
   const linux = packageLayout('/example', 'linux', 'arm64');
-  assert.equal(linux.launcherRelative, 'yingliu-studio.sh');
-  assert.equal(linux.executableRelative, 'yingliu-studio');
-  assert.equal(linux.name, 'yingliu-studio-linux-arm64');
+  assert.equal(linux.launcherRelative, 'yingliu-agent.sh');
+  assert.equal(linux.executableRelative, 'yingliu-agent');
+  assert.equal(linux.name, 'yingliu-agent-linux-arm64');
 });
 
 test('application copy includes runtime dependencies and licenses while omitting workspace data and development modules', async () => {
@@ -78,9 +78,9 @@ test('portable Linux launcher resolves its moved folder and preserves caller arg
   try {
     const bundle = join(directory, '含 空格的目录'), unrelated = join(directory, 'caller');
     await mkdir(bundle); await mkdir(unrelated);
-    const launcher = join(bundle, 'yingliu-studio.sh');
+    const launcher = join(bundle, 'yingliu-agent.sh');
     await writeFile(launcher, linuxLauncher, { mode: 0o755 });
-    await writeFile(join(bundle, 'yingliu-studio'), '#!/bin/sh\nprintf \'%s\\n\' "$PWD" "${ELECTRON_RUN_AS_NODE-unset}" "$@"\n', { mode: 0o755 });
+    await writeFile(join(bundle, 'yingliu-agent'), '#!/bin/sh\nprintf \'%s\\n\' "$PWD" "${ELECTRON_RUN_AS_NODE-unset}" "$@"\n', { mode: 0o755 });
     const result = spawnSync(launcher, ['--flag', '中文 argument with spaces'], { cwd: unrelated, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(result.stdout.trim().split('\n'), [unrelated, 'unset', '--flag', '中文 argument with spaces']);
@@ -96,12 +96,12 @@ test('optional desktop entry honors isolated user menu and updates its installat
     for (const bundle of [initial, moved]) await writeFile(join(bundle, 'install-desktop-entry.cjs'), linuxDesktopWriter);
     const install = (bundle: string) => spawnSync(process.execPath, [join(bundle, 'install-desktop-entry.cjs')], { env: { ...process.env, XDG_DATA_HOME: menu }, encoding: 'utf8' });
     const first = install(initial); assert.equal(first.status, 0, first.stderr);
-    const file = join(menu, 'applications/local.yingliu.studio.desktop');
+    const file = join(menu, 'applications/local.yingliu.agent.desktop');
     const firstEntry = await readFile(file, 'utf8');
     assert.ok(firstEntry.startsWith('[Desktop Entry]\n')); assert.ok(firstEntry.includes('%%percent')); assert.ok(firstEntry.includes('Terminal=false\n'));
     const second = install(moved); assert.equal(second.status, 0, second.stderr);
     const secondEntry = await readFile(file, 'utf8');
-    assert.ok(secondEntry.includes(join(moved, 'yingliu-studio.sh'))); assert.ok(!secondEntry.includes('%%percent'));
+    assert.ok(secondEntry.includes(join(moved, 'yingliu-agent.sh'))); assert.ok(!secondEntry.includes('%%percent'));
     assert.deepEqual(await readdir(menu), ['applications']);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

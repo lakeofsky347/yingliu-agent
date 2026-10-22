@@ -42,7 +42,7 @@ try{
     phase='desktop entry installation';
     const desktopHome=join(temp,'desktop-menu');
     const desktop=await runChild(join(app,'install-desktop-entry.sh'),[],{...env,XDG_DATA_HOME:desktopHome},temp);
-    assert.match(desktop,/已安装桌面入口/);const entry=await readFile(join(desktopHome,'applications/local.yingliu.studio.desktop'),'utf8');assert.match(entry,/Type=Application/);assert.ok(entry.includes(join(app,'yingliu-studio.sh')));
+    assert.match(desktop,/已安装桌面入口/);const entry=await readFile(join(desktopHome,'applications/local.yingliu.agent.desktop'),'utf8');assert.match(entry,/Type=Application/);assert.ok(entry.includes(join(app,'yingliu-agent.sh')));
     pass('optional Linux desktop entry installs into isolated user menu');
   }
   phase='relocated application services';

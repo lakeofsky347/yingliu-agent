@@ -1,5 +1,9 @@
 # 版本记录
 
+## 0.5.0（映流智能体）— 2026-10-22
+
+从 yingliu-studio 拆分为独立仓库 yingliu-agent：应用名「映流智能体」、包名 `yingliu-agent`、独立数据目录（appData/yingliu-agent、~/Documents/YingliuAgentProjects）、macOS 标识 `local.yingliu.agent`、浏览器开发端口 19440；固定流程保留为 `run_workflow` 宏工具。功能同下方 0.5.0。
+
 ## 0.5.0 — 2026-10-22
 
 结构化创作计划与一致性（方案见 docs/ROADMAP-0.5.md）：

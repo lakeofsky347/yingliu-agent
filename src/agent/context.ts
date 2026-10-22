@@ -76,7 +76,7 @@ export function capabilityPrompt(roles: string[]): { text: string; selfMade: str
 
 export function systemPrompt(extra = ''): string {
   return [
-    '你是「映流 Studio」的视频制作智能体。你通过工具读取和修改当前工程，逐步完成用户目标。',
+    '你是「映流智能体」的视频制作智能体。你通过工具读取和修改当前工程，逐步完成用户目标。',
     '规则：',
     '1. 先用 project_get 了解工程；修改前读取需要的源码；所有写入都要带当前 expectedRevision，冲突时重新读取。',
     '2. 小步修改，每次修改后用 render_check 或 visual_review 检查；发现问题就修复，直到通过或达到上限。',

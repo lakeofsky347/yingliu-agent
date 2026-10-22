@@ -5,9 +5,10 @@ import { createApplication, ENDPOINTS } from '../app/application.ts';
 import { startUiServer } from '../app/ui-server.ts';
 import { NativeSecrets } from './native-secrets.ts';
 
-app.setName('映流 Studio');
+app.setName('映流智能体');
 app.commandLine.appendSwitch('site-per-process');
-if(process.env.YINGLIU_DATA_DIR)app.setPath('userData',resolve(process.env.YINGLIU_DATA_DIR));
+// Separate data from the fixed-workflow 映流 Studio app so the two never share projects, credentials or settings.
+if(process.env.YINGLIU_DATA_DIR)app.setPath('userData',resolve(process.env.YINGLIU_DATA_DIR));else app.setPath('userData',join(app.getPath('appData'),'yingliu-agent'));
 const ownsApplication=app.requestSingleInstanceLock();
 if(!ownsApplication)app.quit();
 app.on('second-instance',()=>{const window=BrowserWindow.getAllWindows()[0];if(window){if(window.isMinimized())window.restore();window.show();window.focus();}});
@@ -20,7 +21,7 @@ if(ownsApplication)void app.whenReady().then(async()=>{
   const editorSession=session.fromPartition('persist:yingliu-editor');
   editorSession.setPermissionRequestHandler((_webContents,_permission,callback)=>callback(false));
   editorSession.setPermissionCheckHandler(()=>false);
-  const window=new BrowserWindow({width:1600,height:1000,minWidth:1100,minHeight:700,title:'映流 Studio',backgroundColor:'#0e1117',
+  const window=new BrowserWindow({width:1600,height:1000,minWidth:1100,minHeight:700,title:'映流智能体',backgroundColor:'#0e1117',
     webPreferences:{preload:join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true,session:editorSession}});
   const trusted=(event:Electron.IpcMainInvokeEvent)=>event.sender===window.webContents&&event.senderFrame!==null&&event.senderFrame.parent===null&&event.senderFrame.frameTreeNodeId===window.webContents.mainFrame.frameTreeNodeId&&new URL(event.senderFrame.url).origin===server.origin;
   ipcMain.handle('yingliu:call',(event,endpoint:unknown,payload:unknown)=>{if(!trusted(event)||typeof endpoint!=='string'||!ENDPOINTS.has(endpoint))throw new Error('此窗口无法调用应用服务');return application.route(endpoint,payload);});
@@ -82,7 +83,7 @@ if(ownsApplication)void app.whenReady().then(async()=>{
   window.webContents.on('will-frame-navigate',event=>{const url=new URL(event.url);if(event.isMainFrame?url.origin!==server.origin:url.hostname!=='localhost'&&url.protocol!=='about:')event.preventDefault();});
   window.webContents.on('render-process-gone',()=>{if(!closing)void window.loadURL(server.origin);});
   await window.loadURL(server.origin);window.setMenuBarVisibility(false);
-  console.log('映流 Studio desktop ready');
+  console.log('映流智能体 desktop ready');
 }).catch(error=>{console.error(error instanceof Error?error.message:'启动失败');closing=true;app.quit();});
 app.on('window-all-closed',()=>{if(!closing)void prepareQuit?.();});
 app.on('before-quit',event=>{if(closing||!ownsApplication)return;event.preventDefault();if(prepareQuit)void prepareQuit();else{closing=true;void (dispose?.()??Promise.resolve()).finally(()=>app.quit());}});

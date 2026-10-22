@@ -32,7 +32,7 @@ export class ProjectHub {
   private providers:ProviderGroup[]=[];
   private tts?:TtsSettings;
   constructor(private ctx:HostContext,config:{baseDirectory?:string}={}){
-    this.baseDirectory=resolve(config.baseDirectory??process.env.YINGLIU_PROJECTS??join(homedir(),'Documents','YingliuProjects'));
+    this.baseDirectory=resolve(config.baseDirectory??process.env.YINGLIU_PROJECTS??join(homedir(),'Documents','YingliuAgentProjects'));
     this.bootstrap=this.makeService();
     this.initialized=this.initialize();
   }
