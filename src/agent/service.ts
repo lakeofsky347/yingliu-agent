@@ -230,6 +230,7 @@ export class AgentService {
       respond(JSON.stringify({ error: message, hint: kind === 'conflict' ? '工程版本已变化：先调用 project_get 获取最新 revision 再重试' : kind === 'retry' ? '临时故障，已重试多次' : '请修正参数或换一种方法' }));
       await this.save(run); return 'next';
     }
+    signal.throwIfAborted();
     chargeTool(run.usage, result.cost, tool.risk);
     if (tool.risk === 'write') meta.dirty = true;
     if (result.images?.length) {
