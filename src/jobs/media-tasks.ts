@@ -2,7 +2,22 @@ import {createHash,randomUUID} from 'node:crypto';
 import {mkdir,readFile,readdir,rename,open,rm,stat,realpath} from 'node:fs/promises';
 import {createReadStream} from 'node:fs';
 import {join,resolve,sep} from 'node:path';
-import {cancelVideo,generateImage,getVideo,lookupVideo,submitVideo,type AdapterContext,type AdapterInput} from '../models/adapters/media.ts';
+import {cancelVideo as gatewayCancel,generateImage as openaiImage,getVideo as gatewayGet,lookupVideo as gatewayLookup,submitVideo as gatewaySubmit,type AdapterContext,type AdapterInput} from '../models/adapters/media.ts';
+import {cancelTemplate,pollTemplate,submitTemplate} from '../models/adapters/template.ts';
+import type {RemoteJob as Job} from './contracts.ts';
+// Protocol dispatch: images / video-gateway keep their native adapters; async-task uses the configurable template adapter.
+const outputOf=(operation:string):'image'|'video'=>operation==='text-to-image'?'image':'video';
+async function generateImage(context:AdapterContext,input:AdapterInput):Promise<Job>{return context.connection.protocol==='async-task'?submitAsync(context,input):openaiImage(context,input);}
+async function submitVideo(context:AdapterContext,input:AdapterInput):Promise<Job>{return context.connection.protocol==='async-task'?submitAsync(context,input):gatewaySubmit(context,input);}
+async function submitAsync(context:AdapterContext,input:AdapterInput):Promise<Job>{
+  const result=await submitTemplate(context,{clientRequestId:input.clientRequestId,model:input.model,prompt:input.prompt,image:input.inputs[0]?.dataUrl,duration:typeof input.parameters.duration==='number'?input.parameters.duration:undefined,parameters:input.parameters},outputOf(input.operation));
+  if('kind' in result)return {jobId:input.clientRequestId,status:'succeeded',artifacts:[{base64:Buffer.from(result.bytes).toString('base64'),mimeType:result.mimeType}]};
+  return result;
+}
+type TaskContext=AdapterContext&{model?:import('../models/contracts.ts').ModelDefinition;operation?:string};
+async function getVideo(context:AdapterContext,jobId:string):Promise<Job>{return context.connection.protocol==='async-task'?pollTemplate(context,(context as TaskContext).model!,jobId,outputOf((context as TaskContext).operation??'text-to-video')):gatewayGet(context,jobId);}
+async function lookupVideo(context:AdapterContext,clientRequestId:string):Promise<Job|null>{return context.connection.protocol==='async-task'?null:gatewayLookup(context,clientRequestId);}
+async function cancelVideo(context:AdapterContext,jobId:string):Promise<Job>{return context.connection.protocol==='async-task'?cancelTemplate(context,(context as TaskContext).model!,jobId):gatewayCancel(context,jobId);}
 import {downloadArtifact,mediaSignature} from './download.ts';
 import type {MediaTask,MediaRequest,MediaRegistryPort,MediaProjectPort,MediaTaskOptions,RemoteJob} from './contracts.ts';
 
@@ -54,7 +69,7 @@ export class MediaTaskService {
     if(input.shotId&&!project.shotIds.includes(input.shotId))throw new Error('生成目标镜头不存在');
     const resolved=await this.registry.resolve({role:input.operation==='text-to-image'?'image':'video',...(input.modelId?{modelId:input.modelId}:{}),...(input.connectionId?{connectionId:input.connectionId}:{})});
     const release=this.registry.acquire?.(resolved.connection.id,resolved.model.id);try {
-    const output=input.operation==='text-to-image'?'image':'video';if(resolved.connection.protocol!==(output==='image'?'images':'video-gateway')||!resolved.model.outputModalities.includes(output))throw new Error('所选模型不支持此生成操作');
+    const output=input.operation==='text-to-image'?'image':'video';if(![output==='image'?'images':'video-gateway','async-task'].includes(resolved.connection.protocol)||!resolved.model.outputModalities.includes(output))throw new Error('所选模型不支持此生成操作');
     if(!resolved.model.inputModalities.includes('text'))throw new Error('所选模型不支持文字提示输入');
     if(input.operation==='image-to-video'&&!resolved.model.inputModalities.includes('image'))throw new Error('所选模型不支持图片输入');
     // Resolve now to reject unavailable credentials before registering work. Resolve again per HTTP operation.
@@ -85,7 +100,7 @@ export class MediaTaskService {
     const active=[...this.running.keys()].filter(id=>this.tasks.get(id)?.connection.id===task.connection.id).length;if(active>=Math.max(1,task.connection.concurrency??2))continue;
     const controller=new AbortController();const promise=Promise.resolve().then(()=>this.run(task,controller.signal)).finally(()=>{this.running.delete(task.id);this.schedule();});this.running.set(task.id,{controller,promise});void promise.catch(()=>{});
   }}
-  private async context(task:MediaTask,signal:AbortSignal):Promise<AdapterContext>{return {connection:task.connection,key:await this.registry.credential(task.connection),signal,fetch:this.options.fetch};}
+  private async context(task:MediaTask,signal:AbortSignal):Promise<AdapterContext>{const context:TaskContext={connection:task.connection,key:await this.registry.credential(task.connection),signal,fetch:this.options.fetch,model:task.model,operation:task.operation};return context;}
   private applyRemote(task:MediaTask,remote:RemoteJob):void {task.remoteJobId=remote.jobId;task.remoteStatus=remote.status;task.progress=remote.progress??task.progress;task.usage=remote.usage??task.usage;task.artifacts=remote.artifacts??task.artifacts;
     if(remote.status==='failed'){task.phase='failed';task.message='远程生成失败';task.error='远程生成失败，请检查服务端任务记录';}
     else if(remote.status==='cancelled'){task.phase='cancelled';task.message='云端已确认取消';}
@@ -99,7 +114,7 @@ export class MediaTaskService {
       const input:AdapterInput={clientRequestId:task.clientRequestId,model:task.model,operation:task.operation,prompt:task.prompt,inputs,parameters:task.parameters};
       remote=task.operation==='text-to-image'?await generateImage(context,input):await submitVideo(context,input);
       this.applyRemote(task,remote);await this.persist(task);
-    }else if(task.operation!=='text-to-image'){
+    }else if(task.operation!=='text-to-image'||task.connection.protocol==='async-task'&&task.remoteJobId){
       remote=task.remoteJobId?await getVideo(await this.context(task,signal),task.remoteJobId):await lookupVideo(await this.context(task,signal),task.clientRequestId);
       if(!remote){task.phase='unknown';task.observation='paused';task.message='未查到提交结果；没有重新发起计费请求';await this.persist(task);return;}this.applyRemote(task,remote);await this.persist(task);
     }else if(!task.artifacts?.length){task.phase='unknown';task.observation='paused';task.message='生图提交结果未确认，兼容接口不支持查单；请核对服务记录';await this.persist(task);return;}
@@ -124,7 +139,7 @@ export class MediaTaskService {
   async retry(taskId:string):Promise<MediaTask>{const task=await this.required(taskId);if(this.stopped)throw new Error('媒体任务服务正在关闭');const finishing=this.running.get(taskId);if(finishing){if(task.observation==='active')return this.public(task);await finishing.promise;}if(terminal.has(task.phase))throw new Error('已结束的生成不能重投；如需新结果请明确新建生成任务');if(task.phase==='ready')return this.public(task);task.observation='active';task.resumeOnStart=true;if(task.phase==='unknown')task.phase='submitting';delete task.error;task.message='恢复查询或素材获取';await this.persist(task);this.schedule();return this.public(task);}
   async pause(taskId:string):Promise<MediaTask>{const task=await this.required(taskId);task.observation='paused';task.resumeOnStart=false;const running=this.running.get(taskId);running?.controller.abort(new Error('用户已停止本地等待'));await running?.promise;task.message=terminal.has(task.phase)||task.phase==='ready'?task.message:'已停止本地等待，云端任务可能仍在执行';await this.persist(task);return this.public(task);}
   async cancel(taskId:string):Promise<MediaTask>{const task=await this.required(taskId);await this.pause(taskId);if(task.remoteStatus==='succeeded'||terminal.has(task.phase)||task.phase==='ready')return this.public(task);
-    task.cancelRequested=true;if(task.phase==='pending'&&!task.remoteJobId){task.phase='cancelled';task.message='已取消尚未提交的本地任务';await this.persist(task);return this.public(task);}if(task.operation==='text-to-image'||!task.remoteJobId||task.model.parameters.supportsCancel===false){task.message='已停止等待；此任务尚不能确认云端取消';await this.persist(task);return this.public(task);}
+    task.cancelRequested=true;if(task.phase==='pending'&&!task.remoteJobId){task.phase='cancelled';task.message='已取消尚未提交的本地任务';await this.persist(task);return this.public(task);}if(task.operation==='text-to-image'&&task.connection.protocol!=='async-task'||!task.remoteJobId||task.model.parameters.supportsCancel===false){task.message='已停止等待；此任务尚不能确认云端取消';await this.persist(task);return this.public(task);}
     try{const remote=await cancelVideo(await this.context(task,new AbortController().signal),task.remoteJobId);this.applyRemote(task,remote);task.message=remote.status==='cancelled'?'云端已确认取消':remote.status==='succeeded'?'云端已完成，可恢复获取素材':'已请求云端取消，尚未确认';}
     catch(error){task.error=await this.redact(task,errorText(error));task.message='云端取消未确认；可恢复查询';}await this.persist(task);return this.public(task);
   }
