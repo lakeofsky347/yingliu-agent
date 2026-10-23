@@ -183,7 +183,7 @@ test('visual self-check loop sends failed reviews back until the vision model pa
   });
   const service = new AgentService(d, port, { resolveModel: model(), fetch: gw.fetch });
   try {
-    const s = await service.start({ projectId: 'proj-1', goal: '改标题' });
+    const s = await service.start({ projectId: 'proj-1', goal: '改标题', allowImages: true });
     const run = await settle(service, s.id, ['complete', 'failed']);
     assert.equal(run.status, 'complete', run.message + JSON.stringify(run.steps.filter(x => x.error)));
     assert.equal(reviews, 2); assert.equal(run.reviewRounds, 2);

@@ -70,8 +70,17 @@ export class AgentService {
     return this.ledgers.update(projectId, current => ({ ...current, maxCost, ...(currency ? { currency: currency.slice(0, 8) } : {}), updatedAt: now() }));
   }
   async lastQc(projectId: string) { return (await this.qcs.get(projectId)).report ?? null; }
-  async runQc(projectId: string, signal = new AbortController().signal): Promise<QcReport> { return qualityCheck(this.context('qc', projectId, signal)); }
-  private context(runId: string, projectId: string, signal: AbortSignal, _allowImages = true): ToolContext { return { runId, projectId, signal, port: this.port, docs: this.docs(projectId) }; }
+  async runQc(projectId: string, signal = new AbortController().signal): Promise<QcReport> { return qualityCheck(this.context('qc', projectId, signal, false)); }
+  /** F02 single image-send gate: without the run's consent the tool context has no vision port, so no tool can upload frames. */
+  private context(runId: string, projectId: string, signal: AbortSignal, allowImages = true): ToolContext {
+    const port: AgentPort = allowImages ? this.port : Object.create(this.port, { vision: { value: undefined, enumerable: true } });
+    return { runId, projectId, signal, port, docs: this.docs(projectId) };
+  }
+  /** Tools exposed to one run: image-upload tools are withheld unless the user allowed sending frames. */
+  private runTools(run: AgentRun, capabilities: Capabilities): AgentTool[] {
+    const tools = activeTools(this.tools, capabilities);
+    return (run as AgentRun & { allowImages?: boolean }).allowImages === true ? tools : tools.filter(tool => !(tool.requires ?? []).includes('vision'));
+  }
   private async spend(projectId: string, tool: string, cost: number | null | undefined, settleUnknown = false) {
     await this.ledgers.update(projectId, current => {
       const entry = current.byTool[tool] ?? { calls: 0, cost: 0 };
@@ -220,7 +229,7 @@ export class AgentService {
       if (limit) { run.status = 'budget_exceeded'; run.message = '已停止：' + limit; await this.store.trace(run.id, { event: 'budget', reason: limit, usage: run.usage }); await this.save(run); return; }
       const compressed = compressMessages(run.messages, this.options.contextChars ?? 120_000);
       if (compressed.compressed) { run.messages = compressed.messages; const s = await this.step(run, { kind: 'compress', status: 'running' }); await this.finishStep(run, s, { status: 'complete', summary: '已压缩较早的上下文' }); }
-      const caps = await this.capabilities(), tools = activeTools(this.tools, caps.capabilities), roleText = capabilityPrompt(caps.capabilities.roles);
+      const caps = await this.capabilities(), tools = this.runTools(run, caps.capabilities), roleText = capabilityPrompt(caps.capabilities.roles);
       const brief = storyBrief(await this.stories.get(run.projectId)), planRule = brief ? brief : '工程还没有已批准的创作计划：多镜头或有角色的目标，先用 plan_story（剧本/风格/角色）和 plan_shots（分镜表）提交计划，等用户批准后再动手；简单的单镜头修改可以直接做。写镜头源码前可用 skill_read 查阅导演技能文档。';
       const promptExtra = roleText.text + '\n' + planRule;
       const changed = JSON.stringify(run.active?.tools) !== JSON.stringify(tools.map(t => t.name));
@@ -260,10 +269,11 @@ export class AgentService {
   }
 
   private async selfCheck(run: AgentRun, signal: AbortSignal): Promise<{ pass: boolean; text: string } | null> {
-    const name = this.port.vision && (await this.capabilities()).capabilities.roles.includes('vision') ? 'visual_review' : 'render_check', tool = this.tools.find(item => item.name === name); if (!tool) return null;
+    const allowImages = (run as AgentRun & { allowImages?: boolean }).allowImages === true;
+    const name = allowImages && this.port.vision && (await this.capabilities()).capabilities.roles.includes('vision') ? 'visual_review' : 'render_check', tool = this.tools.find(item => item.name === name); if (!tool) return null;
     const step = await this.step(run, { kind: 'review', status: 'running', tool: name });
     try {
-      const result = await tool.run({}, this.context(run.id, run.projectId, signal));
+      const result = await tool.run({}, this.context(run.id, run.projectId, signal, allowImages));
       let pass = true;
       try { const value = JSON.parse(result.content.slice(result.content.indexOf('{'), result.content.lastIndexOf('}') + 1)); pass = value.skipped === true || value.pass === true || (name === 'render_check' && value.status === 'complete' && !value.error); } catch { pass = false; }
       await this.finishStep(run, step, { status: 'complete', summary: (pass ? '自检通过：' : '自检发现问题：') + bound(result.content, 300) });
@@ -273,10 +283,10 @@ export class AgentService {
 
   private async runCall(run: AgentRun, call: ToolCall, model: ResolvedAgentModel, signal: AbortSignal): Promise<'next' | 'suspend'> {
     const meta = run as AgentRun & { dirty?: boolean; allowImages?: boolean };
-    const active = activeTools(this.tools, (await this.capabilities()).capabilities);
+    const active = this.runTools(run, (await this.capabilities()).capabilities);
     const tool = active.find(item => item.name === call.name);
     const respond = (content: string) => { run.messages.push({ role: 'tool', tool_call_id: call.id, content }); run.queue.shift(); };
-    if (!tool) { respond(JSON.stringify({ error: (this.tools.some(t => t.name === call.name) ? '该工具当前未激活（对应模型未接入）：' : '未知工具：') + call.name + '。可用：' + active.map(t => t.name).join(', ') })); await this.save(run); return 'next'; }
+    if (!tool) { respond(JSON.stringify({ error: (this.tools.some(t => t.name === call.name) ? ((this.tools.find(t => t.name === call.name)?.requires ?? []).includes('vision') && !meta.allowImages ? '用户未允许向视觉模型发送画面，该工具已停用；请改用 render_check / quality_check：' : '该工具当前未激活（对应模型未接入）：') : '未知工具：') + call.name + '。可用：' + active.map(t => t.name).join(', ') })); await this.save(run); return 'next'; }
     if (call.arguments.length > 2_100_000) { respond(JSON.stringify({ error: '工具参数超过 2MB 上限' })); await this.save(run); return 'next'; }
     let args: Record<string, unknown>;
     try { const parsed = JSON.parse(call.arguments || '{}'); if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('参数须为对象'); args = parsed; }

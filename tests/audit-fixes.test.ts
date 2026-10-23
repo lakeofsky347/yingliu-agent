@@ -106,3 +106,25 @@ test('F04: a paid voice call that fails after submission is not auto-retried; th
     assert.equal(submissions, 1);
   } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
 });
+
+test('F02: with allowImages=false no frame reaches the vision model (explicit visual_review, consistency_review, auto self-check)', async () => {
+  for (const allowImages of [false, true]) {
+    const d = await dir(); let sent = 0;
+    const { port, state } = fakePort({ capabilities: async () => ({ roles: ['vision'] }), vision: async (_p, images) => { sent += images.length; return '{"pass":true,"issues":[],"scores":[]}'; } });
+    const gw = toolGateway((_b, turn) => turn === 0 ? { toolCalls: [{ name: 'visual_review', arguments: {} }, { name: 'consistency_review', arguments: {} }] }
+      : turn === 1 ? { toolCalls: [{ name: 'shot_write_source', arguments: { expectedRevision: 3, shotId: 'a', source: { html: '<p/>', css: '', js: 'export function render(){}' } } }] } : done());
+    const service = new AgentService(d, port, { resolveModel: model(true), fetch: gw.fetch, retryBaseMs: 1 });
+    try {
+      const started = await service.start({ projectId: 'proj-1', goal: '自检', allowImages });
+      const run = await settle(service, started.id, ['complete', 'failed']);
+      assert.equal(run.status, 'complete');
+      const offered = gw.requests[0].tools.map((t: any) => t.function.name);
+      if (!allowImages) {
+        assert.equal(sent, 0, 'no image sent without consent');
+        assert.ok(!offered.includes('visual_review'), 'image tools withheld from the model');
+        assert.ok(state.calls.includes('preview'), 'self-check fell back to local render_check');
+        assert.ok(run.steps.some(s => s.kind === 'review' && s.tool === 'render_check'));
+      } else { assert.ok(sent > 0); assert.ok(offered.includes('visual_review')); }
+    } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
+  }
+});

@@ -115,7 +115,7 @@ test('consistency review scores shots and only proposes regeneration; frame hand
   const service = new AgentService(d, p, { resolveModel: model, fetch: gw.fetch, maxReviewRounds: 0, pollMs: 5 });
   try {
     await service.docs('p').updateStory(s => ({ ...s, ...plan, style: { ...plan.style, typography: '' }, characters: [{ ...plan.characters[0], referenceAssetIds: [] }], status: 'approved', shots: normalizeShots(shots.shots, [{ id: 'fox', name: '', description: '', features: [], referenceAssetIds: [] }]) }));
-    const s = await service.start({ projectId: 'p', goal: '检查一致性' });
+    const s = await service.start({ projectId: 'p', goal: '检查一致性', allowImages: true });
     const run = await settle(service, s.id, ['awaiting_approval', 'failed', 'complete']);
     assert.equal(run.status, 'awaiting_approval'); assert.equal(run.pending?.tool, 'generate_video');
     const story = await service.story('p'); assert.equal(story.consistency.b.score, 40); assert.equal(story.consistency.a.score, 92);
