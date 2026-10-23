@@ -103,7 +103,7 @@ node scripts/verify-package.mjs --layout-only
 
 `verify-package` 将本机包复制到源码目录之外，检查平台入口、相对软链接、许可证和完整依赖，再用包内 Electron 的 Node 模式启动独立服务，验证界面文件、工程创建及 ZIP 备份恢复。有图形环境时继续验证真实桌面界面与渲染；`--layout-only` 或 Linux 缺少显示服务时明确记为 `SKIP`，报告为 `PARTIAL`，不会视作桌面验收。结果保存在 `artifacts/acceptance-v03/package-verification-<platform>-<arch>.json`；临时目录和测试数据验证后清理。
 
-已有 macOS arm64 本机原生验收，签名仍为临时签名、尚未公证。本轮增加 Windows/Linux 可携带目录打包，尚未签名或制作安装器；Linux 包已完成布局和包外服务验证，三个系统的新改动仍需原生及跨机器验收。三系统 CI 已配置，尚未远端运行。Chrome/FFmpeg 由用户提供。Linux 无安全钥匙环时不保存新密钥，仍可手动制作和清除旧密钥。本轮多模型和视频素材功能的本地协议／媒体测试不等同真实供应商质量验收，也不延伸历史记录中的平台验收结论。没有云端成片渲染、多人实时编辑或通用节点市场。
+已有 macOS arm64 本机原生验收，签名仍为临时签名、尚未公证。本轮增加 Windows/Linux 可携带目录打包，尚未签名或制作安装器；Linux 包已完成布局和包外服务验证，三个系统的新改动仍需原生及跨机器验收。三系统 CI 已在 GitHub Actions 远端运行（Platform checks）：2026-10-22 的 main 提交上 Linux、Windows 通过，macOS 因测试按字面比较临时目录路径（`/var` 与 `/private/var`）失败；测试已改为比较真实路径，以最新一次运行结果为准。Chrome/FFmpeg 由用户提供。Linux 无安全钥匙环时不保存新密钥，仍可手动制作和清除旧密钥。本轮多模型和视频素材功能的本地协议／媒体测试不等同真实供应商质量验收，也不延伸历史记录中的平台验收结论。没有云端成片渲染、多人实时编辑或通用节点市场。
 
 本仓库自有代码及随仓提供的用户自有工作包数据采用 [GNU GPL 第 3 版](LICENSE)，仅限第 3 版（SPDX：`GPL-3.0-only`）。版权和来源说明见 [NOTICE](NOTICE)；历史 Apache-2.0 与 MIT 许可全文分别保留在 [licenses/Legacy-Apache-2.0.txt](licenses/Legacy-Apache-2.0.txt) 和 [licenses/Legacy-MIT.txt](licenses/Legacy-MIT.txt)。第三方组件继续适用各自的许可，详见[第三方声明](THIRD_PARTY_NOTICES.md)。
 
