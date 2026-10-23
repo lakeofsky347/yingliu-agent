@@ -88,3 +88,21 @@ test('F03: a reused provider call ID with different arguments needs a fresh appr
     assert.equal((run.approvals ?? []).length, 0, 'approval consumed');
   } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
 });
+
+test('F04: a paid voice call that fails after submission is not auto-retried; the run pauses and resubmission needs approval', async () => {
+  const d = await dir(); let submissions = 0;
+  const { port } = fakePort({ capabilities: async () => ({ roles: ['speech'] }), voice: async () => { submissions++; throw new TypeError('fetch failed'); } });
+  const gw = toolGateway((_b, turn) => turn < 2 ? { toolCalls: [{ name: 'generate_voice', arguments: { shotId: 'a', text: '旁白' } }] } : done());
+  const service = new AgentService(d, port, { resolveModel: model(), fetch: gw.fetch, retryBaseMs: 1 });
+  try {
+    const started = await service.start({ projectId: 'proj-1', goal: '配音', autoApprove: ['read', 'write', 'cost'] });
+    let run = await settle(service, started.id, ['paused', 'complete', 'failed']);
+    assert.equal(run.status, 'paused'); assert.equal(submissions, 1, 'exactly one submission');
+    assert.equal(run.uncertainSubmissions?.length, 1);
+    assert.equal(run.steps.find(s => s.tool === 'generate_voice' && s.kind === 'tool')?.attempts, 1);
+    await service.resume(started.id);
+    run = await settle(service, started.id, ['awaiting_approval', 'complete', 'failed']);
+    assert.equal(run.status, 'awaiting_approval', 'even with cost auto-approve, a resubmission after an uncertain one needs a human');
+    assert.equal(submissions, 1);
+  } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
+});

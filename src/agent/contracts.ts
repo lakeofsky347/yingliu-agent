@@ -84,7 +84,9 @@ export interface AgentRun {
   approvedCallIds: string[];
   /** One-shot approvals bound to a server execution ID + tool + canonical argument hash; consumed on use. */
   approvals?: { execId: string; tool: string; argsHash: string }[];
-  reviewRounds: number; final?: string; error?: string;
+  reviewRounds: number;
+  /** Paid/side-effect submissions whose outcome is unknown (accepted-then-lost response). Never auto-resubmitted. */
+  uncertainSubmissions?: { execId: string; tool: string; at: string; error: string; attempts: number }[]; final?: string; error?: string;
   /** Capabilities and tool names active at the latest model step. */
   active?: { roles: GenRole[]; tools: string[]; selfMade: string[] };
 }

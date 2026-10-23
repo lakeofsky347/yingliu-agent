@@ -71,7 +71,7 @@ export class AgentService {
   }
   async lastQc(projectId: string) { return (await this.qcs.get(projectId)).report ?? null; }
   async runQc(projectId: string, signal = new AbortController().signal): Promise<QcReport> { return qualityCheck(this.context('qc', projectId, signal)); }
-  private context(runId: string, projectId: string, signal: AbortSignal): ToolContext { return { runId, projectId, signal, port: this.port, docs: this.docs(projectId) }; }
+  private context(runId: string, projectId: string, signal: AbortSignal, _allowImages = true): ToolContext { return { runId, projectId, signal, port: this.port, docs: this.docs(projectId) }; }
   private async spend(projectId: string, tool: string, cost: number | null | undefined, settleUnknown = false) {
     await this.ledgers.update(projectId, current => {
       const entry = current.byTool[tool] ?? { calls: 0, cost: 0 };
@@ -287,7 +287,8 @@ export class AgentService {
     if (grant >= 0) run.approvals!.splice(grant, 1); // single use: consumed before execution
     else {
       const estimate = tool.estimate?.(args) ?? (tool.risk === 'cost' ? null : 0);
-      const reason = needsApproval(tool.risk, run.policy.autoApprove, run.budget, run.usage, estimate, tool.risk === 'cost' ? await this.ledgers.get(run.projectId) : undefined);
+      const uncertain = tool.risk === 'cost' && run.uncertainSubmissions?.length ? '此前有收费请求结果未知（可能已受理并扣费），再次提交需要你确认' : null;
+      const reason = uncertain ?? needsApproval(tool.risk, run.policy.autoApprove, run.budget, run.usage, estimate, tool.risk === 'cost' ? await this.ledgers.get(run.projectId) : undefined);
       if (reason) {
         run.pending = { callId: call.id, execId: call.execId, argsHash: hash, tool: tool.name, risk: tool.risk, arguments: bound(call.arguments, 4000), reason, estimate };
         run.status = 'awaiting_approval'; run.message = `等待批准：${tool.name}（${reason}）`;
@@ -298,9 +299,23 @@ export class AgentService {
     const step = await this.step(run, { kind: 'tool', status: 'running', tool: tool.name, callId: call.id, risk: tool.risk, arguments: bound(call.arguments, 2000) });
     run.message = '执行工具：' + tool.name; await this.save(run);
     let result: ToolResult;
-    try { result = await this.withRetry(run, step, () => tool.run({ ...args, __callId: call.execId }, this.context(run.id, run.projectId, signal)), signal); }
+    // F04: paid / export tools have side effects that cannot be proven idempotent, so they are submitted exactly once.
+    const sideEffect = tool.risk === 'cost' || tool.risk === 'export';
+    const work = () => tool.run({ ...args, __callId: call.execId }, this.context(run.id, run.projectId, signal, meta.allowImages === true));
+    try { result = sideEffect ? await (async () => { step.attempts = 1; return work(); })() : await this.withRetry(run, step, work, signal); }
     catch (error) {
       if (signal.aborted) throw error;
+      const flagged = (error as { submissionUncertain?: unknown })?.submissionUncertain;
+      if (sideEffect && (flagged === true || (flagged !== false && classify(error) === 'retry'))) {
+        const message = errorText(error), entry = { execId: call.execId!, tool: tool.name, at: now(), error: message.slice(0, 500), attempts: 1 };
+        (run.uncertainSubmissions ??= []).push(entry);
+        await this.store.trace(run.id, { event: 'submission.uncertain', ...entry });
+        await this.finishStep(run, step, { status: 'failed', error: '提交结果未知，未自动重试：' + message });
+        chargeTool(run.usage, null, tool.risk);
+        respond(JSON.stringify({ error: message, submissionUncertain: true, hint: '请求可能已被供应商受理并计费，系统没有自动重新提交。不要自行重复调用；等待用户确认。' }));
+        run.status = 'paused'; run.message = `${tool.name} 的收费请求结果未知（可能已受理），没有自动重试。请到供应商控制台确认后再点「继续」；再次提交需要重新批准`;
+        await this.save(run); return 'suspend';
+      }
       const kind = classify(error), message = errorText(error);
       await this.finishStep(run, step, { status: 'failed', error: message });
       chargeTool(run.usage, 0, 'read');
