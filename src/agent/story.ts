@@ -1,5 +1,5 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
 import type { VideoProject } from '../shared/types.ts';
@@ -62,7 +62,7 @@ export class ProjectDocs<T extends { version: number }> {
   private queue: Promise<unknown> = Promise.resolve();
   constructor(private readonly directory: string, private readonly empty: (projectId: string) => T) {}
   private file(projectId: string) { if (!SAFE.test(projectId)) throw new Error('工程 ID 无效'); return join(this.directory, projectId + '.json'); }
-  async get(projectId: string): Promise<T> { await this.queue.catch(() => {}); try { return JSON.parse(await readFile(this.file(projectId), 'utf8')) as T; } catch { return this.empty(projectId); } }
+  async get(projectId: string): Promise<T> { await this.queue.catch(() => {}); return this.read(projectId); }
   update(projectId: string, change: (current: T) => T, expectedVersion?: number): Promise<T> {
     const work = async () => {
       const current = await this.read(projectId);
@@ -75,7 +75,16 @@ export class ProjectDocs<T extends { version: number }> {
     };
     const next = this.queue.then(work, work); this.queue = next.catch(() => {}); return next;
   }
-  private async read(projectId: string): Promise<T> { try { return JSON.parse(await readFile(this.file(projectId), 'utf8')) as T; } catch { return this.empty(projectId); } }
+  /** Only a missing file starts empty. Corrupt JSON or permission errors keep the original file untouched and surface an error,
+   *  so a damaged ledger can never silently reset spend to zero. */
+  private async read(projectId: string): Promise<T> {
+    const file = this.file(projectId); let text: string;
+    try { text = await readFile(file, 'utf8'); }
+    catch (error) { if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return this.empty(projectId); throw Object.assign(new Error(`智能体资料无法读取（${basename(this.directory)}/${projectId}.json：${(error as NodeJS.ErrnoException)?.code ?? '未知错误'}）；原文件已保留，请检查权限后重试`), { code: 'AGENT_DOC_UNREADABLE' }); }
+    let value: unknown; try { value = JSON.parse(text); } catch { value = undefined; }
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !Number.isSafeInteger((value as { version?: unknown }).version)) throw Object.assign(new Error(`智能体资料已损坏（${basename(this.directory)}/${projectId}.json）；原文件已保留，不会按空记录继续（避免账本被清零）。请从备份恢复或手动修复`), { code: 'AGENT_DOC_CORRUPT' });
+    return value as T;
+  }
 }
 export const emptyLedger = (projectId: string): Ledger => ({ version: 0, projectId, maxCost: null, currency: 'CNY', spent: 0, unknownCostCalls: 0, byTool: {}, updatedAt: new Date(0).toISOString() });
 
