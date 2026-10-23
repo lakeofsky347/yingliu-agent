@@ -142,3 +142,39 @@ test('F10: all keyframe captures failing yields PARTIAL, not PASS, and export is
   const forced = JSON.parse((await exportTool.run({ force: true }, ctx)).content);
   assert.equal(forced.ok, true); assert.equal(forced.qc.forced, true); assert.ok(state.calls.includes('export'));
 });
+
+test('F08: run_workflow macro starts and completes a real WorkflowService run through the app route (mock gateway)', async () => {
+  const { createServer } = await import('node:http');
+  const { createApplication, MemorySecrets } = await import('../src/app/application.ts');
+  let agentTurn = 0, workflowCalls = 0, revision = -1;
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = []; for await (const c of req) chunks.push(c as Buffer); const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url !== '/v1/chat/completions') { res.writeHead(404); res.end('{}'); return; }
+    const reply = (message: Record<string, unknown>, finish = 'stop') => res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', ...message }, finish_reason: finish }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+    if (body.tools) {
+      const turn = agentTurn++;
+      if (turn === 0) return reply({ content: null, tool_calls: [{ id: 'c0', type: 'function', function: { name: 'project_get', arguments: '{}' } }] }, 'tool_calls');
+      if (turn === 1) { revision = JSON.parse(body.messages.at(-1).content).revision; return reply({ content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'run_workflow', arguments: JSON.stringify({ expectedRevision: revision, prompt: '三个清楚的镜头' }) } }] }, 'tool_calls'); }
+      return reply({ content: '流程已完成' });
+    }
+    workflowCalls++; const prompt = body.messages.at(-1).content; const context = JSON.parse(typeof prompt === 'string' ? prompt : prompt[0].text);
+    reply({ content: JSON.stringify(body.messages[0].content.includes('director') ? { shots: context.shots.map((s: { id: string }) => ({ shotId: s.id, prompt: '画面', narration: '旁白' })) } : defaultSceneSource()) });
+  });
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r)); const port = (server.address() as { port: number }).port;
+  const directory = await dir(); const app = await createApplication({ dataDirectory: directory, credentials: new MemorySecrets() });
+  const call = async <T,>(endpoint: string, payload: unknown = {}) => { const r = await app.route(endpoint, payload); if (!r.ok) throw new Error(endpoint + ': ' + r.error.message); return r.value as T; };
+  try {
+    const connection = await call<{ id: string }>('models.connection.save', { name: 'mock', protocol: 'chat-completions', baseUrl: `http://127.0.0.1:${port}/v1`, auth: 'none' });
+    const m = await call<{ id: string }>('models.model.save', { connectionId: connection.id, model: 'director-test', inputModalities: ['text'], outputModalities: ['text'], parameters: {} });
+    for (const role of ['director', 'scene']) await call('models.role.bind', { role, modelId: m.id });
+    const created = await call<StudioSnapshot>('create', { title: '宏测试' }); const projectId = created.project!.id;
+    const run = await call<PublicRun>('agent.start', { projectId, goal: '用固定流程做一版', maxReviewRounds: 0, autoApprove: ['read', 'write', 'cost'] });
+    let current = run; for (let i = 0; i < 750 && !['complete', 'failed', 'budget_exceeded', 'paused'].includes(current.status); i++) { await new Promise(r => setTimeout(r, 20)); current = await call<PublicRun>('agent.get', { runId: run.id }); }
+    assert.equal(current.status, 'complete', current.message);
+    const workflows = await call<{ workflows: { status: string; request: { visual: string } }[] }>('workflows.list', { projectId });
+    assert.equal(workflows.workflows.length, 1); assert.equal(workflows.workflows[0]!.request.visual, 'code'); assert.equal(workflows.workflows[0]!.status, 'complete');
+    assert.ok(workflowCalls > 0, 'workflow director/scene roles were actually called');
+    assert.ok((await call<StudioSnapshot>('current', { projectId })).project!.revision > revision);
+  } finally { await app.dispose(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); await rm(directory, { recursive: true, force: true }); }
+});

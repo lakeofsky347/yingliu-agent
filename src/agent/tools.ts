@@ -147,9 +147,18 @@ export function createTools(): AgentTool[] {
         const asset = await ctx.port.importAudio(ctx.projectId, typeof args.name === 'string' && args.name.trim() ? args.name.trim().slice(0, 60) : '合成音效 · ' + kind, bytes, 'audio/wav');
         return { content: json({ ok: true, assetId: asset.id, name: asset.name, bytes: bytes.length, hint: '用 audio_edit 把它加入音轨' }) };
       } },
-    { name: 'run_workflow', risk: 'cost', description: '宏工具：一次运行工作台的固定协作流程（导演→画面→配音→视觉检查），可能调用生成模型（需要用户批准）。', parameters: object({ expectedRevision: int('当前工程版本'), prompt: str('制作要求') }, ['expectedRevision', 'prompt']),
+    { name: 'run_workflow', risk: 'cost', description: '宏工具：一次运行工作台的固定协作流程（导演→画面→配音），可能调用生成模型（需要用户批准）。visual 选画面类型：code=代码动画（免费），image=生图，video=生视频；不填时按已接入能力选择（有视频模型→video，有图片模型→image，否则 code）。', parameters: object({ expectedRevision: int('当前工程版本'), prompt: str('制作要求'), visual: { type: 'string', enum: ['code', 'image', 'video'], description: '画面类型' }, narration: { type: 'boolean', description: '是否配音（需已接入配音）' } }, ['expectedRevision', 'prompt']),
       estimate: () => null,
-      async run(args, ctx) { const record = await rpc(ctx, 'workflows.run', { expectedRevision: revision(args), prompt: need(args, 'prompt') }) as { id: string }; return { content: json({ workflowId: record.id }), waitFor: { kind: 'workflow', id: record.id } }; } },
+      async run(args, ctx) {
+        const roles = (await ctx.port.capabilities?.().catch(() => null))?.roles ?? [];
+        const visual = args.visual === undefined ? (roles.includes('video') ? 'video' : roles.includes('image') ? 'image' : 'code') : String(args.visual);
+        if (!['code', 'image', 'video'].includes(visual)) throw new Error('visual 须为 code / image / video');
+        if (visual !== 'code' && !roles.includes(visual as 'image' | 'video')) throw new Error(`未接入${visual === 'image' ? '图片' : '视频'}生成模型，不能用 visual=${visual}；改用 code`);
+        const narration = args.narration === true; if (narration && !roles.includes('speech')) throw new Error('未接入配音，不能 narration=true');
+        // Visual review uploads keyframes; the macro never opts in on the user's behalf.
+        const record = await rpc(ctx, 'workflows.run', { expectedRevision: revision(args), prompt: need(args, 'prompt'), visual, narration, review: false, allowImageUpload: false }) as { id: string };
+        return { content: json({ workflowId: record.id, visual, narration }), waitFor: { kind: 'workflow', id: record.id } };
+      } },
     { name: 'export_mp4', risk: 'export', description: '导出当前版本为 MP4（需要用户批准）。导出前自动质检；有严重问题时拒绝导出，确需导出传 force=true。', parameters: object({ force: { type: 'boolean' } }),
       async run(args, ctx) {
         const report = await qualityCheck(ctx);
