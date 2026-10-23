@@ -5,7 +5,7 @@ import { bound, summarizeProject } from './context.ts';
 import { synthesize, type SynthSpec } from './synth.ts';
 import type { Capabilities } from './contracts.ts';
 import type { VideoProject } from '../shared/types.ts';
-import { anchorPrompt, dataChecks, frameIssue, normalizeCharacter, normalizeShots, normalizeStyle, pngLuma, type QcReport, type Story } from './story.ts';
+import { anchorPrompt, dataChecks, frameIssue, normalizeCharacter, normalizeShots, normalizeStyle, pngLuma, qcStatus, type QcReport, type Story } from './story.ts';
 import { SKILLS, skillIndex } from './skills.ts';
 
 const object = (properties: Record<string, JsonSchema>, required: string[] = []): JsonSchema => ({ type: 'object', properties, required, additionalProperties: false });
@@ -68,7 +68,8 @@ export async function qualityCheck(ctx: ToolContext): Promise<QcReport> {
     try { const shot = await ctx.port.capture(ctx.projectId, f.frame, ctx.signal); const luma = shot.mime === 'image/png' ? pngLuma(shot.bytes) : null; if (!luma) { unchecked.push(`${f.shotId}：画面格式无法分析`); continue; } const issue = frameIssue(f.shotId, luma); if (issue) issues.push(issue); }
     catch (error) { if (ctx.signal.aborted) throw error; unchecked.push(`${f.shotId}：截帧失败（${error instanceof Error ? error.message : String(error)}）`); }
   }
-  const report: QcReport = { pass: !issues.some(i => i.severity === 'high'), checkedAt: new Date().toISOString(), issues, unchecked };
+  const status = qcStatus(issues, unchecked);
+  const report: QcReport = { status, pass: status === 'pass', checkedAt: new Date().toISOString(), issues, unchecked };
   await ctx.docs.saveQc(report); return report;
 }
 
@@ -152,8 +153,8 @@ export function createTools(): AgentTool[] {
     { name: 'export_mp4', risk: 'export', description: '导出当前版本为 MP4（需要用户批准）。导出前自动质检；有严重问题时拒绝导出，确需导出传 force=true。', parameters: object({ force: { type: 'boolean' } }),
       async run(args, ctx) {
         const report = await qualityCheck(ctx);
-        if (!report.pass && args.force !== true) return { content: json({ ok: false, blocked: true, message: '导出前质检未通过，先修复下列问题（或确认后用 force=true 强制导出）', issues: report.issues }) };
-        await rpc(ctx, 'export', {}); return { content: json({ ok: true, message: '已开始导出，可在「任务记录」查看进度', qc: { pass: report.pass, issues: report.issues.length } }) };
+        if (!report.pass && args.force !== true) return { content: json({ ok: false, blocked: true, status: report.status, message: report.status === 'partial' ? '导出前质检未完成：部分关键帧没有检查（见 unchecked），不能视为通过。修复后重试，或确认后用 force=true 强制导出' : '导出前质检未通过，先修复下列问题（或确认后用 force=true 强制导出）', issues: report.issues, unchecked: report.unchecked }) };
+        await rpc(ctx, 'export', {}); return { content: json({ ok: true, message: '已开始导出，可在「任务记录」查看进度', qc: { status: report.status, pass: report.pass, issues: report.issues.length, unchecked: report.unchecked.length, forced: !report.pass } }) };
       } },
     { name: 'skill_read', risk: 'read', description: '读取导演技能文档（按主题）：' + skillIndex() + '。写镜头源码前按需查阅。', parameters: object({ topic: { type: 'string', enum: Object.keys(SKILLS) } }, ['topic']),
       async run(args) { const skill = SKILLS[String(args.topic)]; if (!skill) throw new Error('未知主题；可选：' + Object.keys(SKILLS).join(', ')); return { content: `# ${skill.title}\n${skill.body}` }; } },

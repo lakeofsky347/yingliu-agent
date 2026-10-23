@@ -128,3 +128,17 @@ test('F02: with allowImages=false no frame reaches the vision model (explicit vi
     } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
   }
 });
+
+test('F10: all keyframe captures failing yields PARTIAL, not PASS, and export is blocked unless forced', async () => {
+  const { createTools, qualityCheck } = await import('../src/agent/tools.ts');
+  const { port, state } = fakePort({ capture: async () => { throw new Error('截帧失败'); } });
+  let saved: any;
+  const ctx = { runId: 'r', projectId: 'proj-1', signal: new AbortController().signal, port, docs: { story: async () => ({ status: 'empty', shots: [], characters: [], consistency: {} }) as any, updateStory: async () => ({}) as any, ledger: async () => emptyLedger('proj-1'), saveQc: async (r: any) => { saved = r; } } };
+  const report = await qualityCheck(ctx);
+  assert.equal(report.status, 'partial'); assert.equal(report.pass, false); assert.equal(report.unchecked.length, 3); assert.equal(saved.status, 'partial');
+  const exportTool = createTools().find(t => t.name === 'export_mp4')!;
+  const blocked = JSON.parse((await exportTool.run({}, ctx)).content);
+  assert.equal(blocked.blocked, true); assert.ok(!state.calls.includes('export'));
+  const forced = JSON.parse((await exportTool.run({ force: true }, ctx)).content);
+  assert.equal(forced.ok, true); assert.equal(forced.qc.forced, true); assert.ok(state.calls.includes('export'));
+});

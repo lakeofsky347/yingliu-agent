@@ -13,6 +13,15 @@ import { parsePlanJson } from '../src/agent/model-client.ts';
 import { classify, needsApproval, budgetFrom, emptyUsage, tokenCost } from '../src/agent/budget.ts';
 import { parseSse } from '../src/client/AgentPanel.tsx';
 
+import { deflateSync } from 'node:zlib';
+/** Minimal valid non-uniform 2×2 RGB PNG so pre-export QC can actually analyse frames (QC no longer treats unanalysed frames as passing). */
+function samplePng(): Uint8Array {
+  const crc = (buf: Buffer) => { let c = ~0; for (const b of buf) { c ^= b; for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1)); } return (~c) >>> 0; };
+  const chunk = (type: string, data: Buffer) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const td = Buffer.concat([Buffer.from(type), data]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(td)); return Buffer.concat([len, td, c]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(2, 0); ihdr.writeUInt32BE(2, 4); ihdr[8] = 8; ihdr[9] = 2;
+  const raw = Buffer.from([0, 0, 0, 0, 255, 255, 255, 0, 200, 50, 10, 10, 50, 200]);
+  return new Uint8Array(Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]));
+}
 function project(): VideoProject {
   const p = createProject('智能体测试', '测试主题');
   const shots = ['a', 'b'].map(id => ({ id, title: '镜头' + id, intent: '意图', composition: '构图', action: '动作', durationFrames: 90, assetIds: [], referenceIds: [], params: {} }));
@@ -35,7 +44,7 @@ function fakePort(overrides: Partial<AgentPort> = {}) {
       if (endpoint === 'media.get') return { ok: true, value: { id: 'task-1', phase: 'ready', usage: { cost: 0.5 } } };
       return { ok: true, value: {} };
     },
-    capture: async (_p, frame) => ({ bytes: new Uint8Array([137, 80, 78, 71]), mime: 'image/png', frame, shotId: 'a' }),
+    capture: async (_p, frame) => ({ bytes: samplePng(), mime: 'image/png', frame, shotId: 'a' }),
     ...overrides,
   };
   return { port, state };
