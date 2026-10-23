@@ -4,6 +4,7 @@ import { cp, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, writeFile
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { assertHostTarget, assertRelativeSymlinks, copyApplication, linuxDesktopWriter, linuxLauncher, packageLayout, parsePackageOptions } from '../scripts/package-layout.mjs';
 
 test('packaging refuses foreign Electron targets rather than claiming cross compilation', () => {
@@ -83,7 +84,10 @@ test('portable Linux launcher resolves its moved folder and preserves caller arg
     await writeFile(join(bundle, 'yingliu-agent'), '#!/bin/sh\nprintf \'%s\\n\' "$PWD" "${ELECTRON_RUN_AS_NODE-unset}" "$@"\n', { mode: 0o755 });
     const result = spawnSync(launcher, ['--flag', '中文 argument with spaces'], { cwd: unrelated, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(result.stdout.trim().split('\n'), [unrelated, 'unset', '--flag', '中文 argument with spaces']);
+    // macOS tmpdir is /var/... while the shell's $PWD is the realpath /private/var/...; compare the same directory, not raw spellings.
+    const [cwd, ...rest] = result.stdout.trim().split('\n');
+    assert.equal(realpathSync(cwd!), realpathSync(unrelated));
+    assert.deepEqual(rest, ['unset', '--flag', '中文 argument with spaces']);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
