@@ -5,6 +5,39 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ProjectDocs, emptyLedger, type Ledger } from '../src/agent/story.ts';
+import { createProject, defaultSceneSource } from '../src/core/index.ts';
+import { AgentService, type ResolvedAgentModel } from '../src/agent/service.ts';
+import type { AgentPort, PublicRun } from '../src/agent/contracts.ts';
+import type { StudioSnapshot, VideoProject } from '../src/shared/types.ts';
+import { toolGateway, type GatewayReply } from './model-gateway.ts';
+
+function project(): VideoProject {
+  const p = createProject('审计回归', '测试');
+  const shots = ['a', 'b', 'c'].map(id => ({ id, title: '镜头' + id, intent: '意图', composition: '构图', action: '动作', durationFrames: 90, assetIds: [], referenceIds: [], params: {} }));
+  return { ...p, id: 'proj-1', revision: 3, shots, shotOrder: ['a', 'b', 'c'] } as unknown as VideoProject;
+}
+function fakePort(overrides: Partial<AgentPort> = {}) {
+  const state = { project: project(), calls: [] as string[], visionImages: 0, voices: [] as string[] };
+  const snap = () => ({ project: structuredClone(state.project), root: '/secret', task: null, environment: { browserAvailable: true, ffmpegAvailable: true, ffprobeAvailable: true } } as unknown as StudioSnapshot);
+  const port: AgentPort = {
+    snapshot: async () => snap(), readSource: async () => defaultSceneSource(),
+    saveSource: async () => { state.project.revision++; return snap(); },
+    commit: async (_p, _r, next) => { state.project = { ...next, revision: state.project.revision + 1 }; return snap(); },
+    route: async (endpoint, payload) => { state.calls.push(endpoint); if (endpoint === 'preview') return { ok: true, value: {} }; return { ok: true, value: { id: 'x', payload } }; },
+    capture: async (_p, frame) => ({ bytes: new Uint8Array([137, 80, 78, 71]), mime: 'image/png', frame, shotId: 'a' }),
+    ...overrides,
+  };
+  return { port, state };
+}
+function model(vision = false): () => Promise<ResolvedAgentModel> {
+  return async () => ({ connectionId: 'gw', parameters: {}, vision, config: { baseUrl: 'http://gateway.test/v1', model: 'm', key: 'k', timeoutMs: 5000, maxTokens: 2048, supportsTools: true } });
+}
+async function settle(service: AgentService, id: string, until: PublicRun['status'][], ms = 5000): Promise<PublicRun> {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { const run = await service.get(id); if (until.includes(run.status)) return run; await new Promise(r => setTimeout(r, 10)); }
+  throw new Error('timeout; status=' + (await service.get(id)).status);
+}
+const done = (text = '完成'): GatewayReply => ({ text });
 
 async function dir() { return mkdtemp(join(tmpdir(), 'yingliu-audit-')); }
 
@@ -21,4 +54,16 @@ test('supplementary: corrupt ledger is preserved and surfaced, never reset to ze
     await mkdir(join(d, 'ledger', 'proj-2.json'));
     await assert.rejects(docs.get('proj-2'), /无法读取/);
   } finally { await rm(d, { recursive: true, force: true }); }
+});
+
+test('F06: maxToolCalls is enforced before each tool in a multi-call batch', async () => {
+  const d = await dir(); const { port } = fakePort(); let reads = 0;
+  const counting = { ...port, snapshot: async (id: string) => { reads++; return port.snapshot(id); } };
+  const gw = toolGateway(turn => ({ toolCalls: [1, 2, 3].map(() => ({ name: 'project_get', arguments: {} })) }));
+  const service = new AgentService(d, counting, { resolveModel: model(), fetch: gw.fetch, retryBaseMs: 1 });
+  try {
+    const started = await service.start({ projectId: 'proj-1', goal: '读', budget: { maxToolCalls: 1 } }); const before = reads;
+    const run = await settle(service, started.id, ['budget_exceeded', 'complete', 'failed']);
+    assert.equal(run.status, 'budget_exceeded'); assert.equal(run.usage.toolCalls, 1); assert.equal(reads - before, 1);
+  } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
 });
