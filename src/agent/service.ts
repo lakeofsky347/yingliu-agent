@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { AgentContent, AgentEvent, AgentMessage, AgentPort, AgentRun, AgentStartInput, AgentTool, PublicRun, RunStep, ToolCall, ToolResult, ToolRisk } from './contracts.ts';
 import { chatTurn, looksLikeNoToolSupport, type ChatConfig } from './model-client.ts';
 import { backoff, budgetFrom, chargeModel, chargeTool, classify, emptyUsage, needsApproval, overBudget, tokenCost } from './budget.ts';
@@ -20,6 +20,13 @@ const TERMINAL = new Set(['complete', 'failed', 'cancelled', 'budget_exceeded'])
 const DEFAULT_AUTO: ToolRisk[] = ['read', 'write'];
 const now = () => new Date().toISOString();
 function errorText(error: unknown) { return error instanceof Error ? error.message : String(error); }
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+  if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonical((value as Record<string, unknown>)[key])).join(',') + '}';
+  return JSON.stringify(value) ?? 'null';
+}
+/** Approval binding: run + tool + canonical arguments. */
+export function argsHash(runId: string, tool: string, args: Record<string, unknown>): string { return createHash('sha256').update(runId + '\0' + tool + '\0' + canonical(args)).digest('hex'); }
 function sleep(ms: number, signal: AbortSignal) { return new Promise<void>((resolve, reject) => { const timer = setTimeout(() => { signal.removeEventListener('abort', stop); resolve(); }, ms); const stop = () => { clearTimeout(timer); reject(signal.reason); }; signal.addEventListener('abort', stop, { once: true }); }); }
 
 /** Plan → act → observe → reflect loop over registered tools, with approval gates, budgets, durable resume and traces. */
@@ -82,6 +89,8 @@ export class AgentService {
   initialize(): Promise<void> {
     return this.initialized ??= (async () => {
       for (const run of await this.store.loadAll()) {
+        for (const call of run.queue) call.execId ??= randomUUID();
+        if (run.pending && !run.pending.execId) { const call = run.queue.find(item => item.id === run.pending!.callId); if (call) { run.pending.execId = call.execId; try { run.pending.argsHash = argsHash(run.id, call.name, JSON.parse(call.arguments || '{}')); } catch { /* re-asked on resume */ } } }
         if (run.status === 'running' || run.status === 'waiting_task') { run.status = 'paused'; run.message = '应用重启时运行被中断，可点击「继续」从断点恢复'; await this.store.save(run); }
         this.runs.set(run.id, run);
       }
@@ -143,7 +152,8 @@ export class AgentService {
   }
   async approve(id: string, callId: string): Promise<PublicRun> {
     const run = await this.required(id); if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
-    run.approvedCallIds.push(callId); await this.store.trace(run.id, { event: 'approval', callId, decision: 'approved', tool: run.pending.tool });
+    if (run.pending.execId && run.pending.argsHash) (run.approvals ??= []).push({ execId: run.pending.execId, tool: run.pending.tool, argsHash: run.pending.argsHash });
+    await this.store.trace(run.id, { event: 'approval', callId, execId: run.pending.execId, decision: 'approved', tool: run.pending.tool });
     const step = [...run.steps].reverse().find((s: RunStep) => s.kind === 'approval' && s.callId === callId); if (step) await this.finishStep(run, step, { status: 'complete', summary: '用户已批准' });
     delete run.pending; run.status = 'running'; run.message = '已批准，继续执行'; await this.save(run); this.launch(run); return this.public(run);
   }
@@ -151,7 +161,7 @@ export class AgentService {
     const run = await this.required(id); if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
     const tool = run.pending.tool; await this.store.trace(run.id, { event: 'approval', callId, decision: 'rejected', tool, reason });
     const step = [...run.steps].reverse().find((s: RunStep) => s.kind === 'approval' && s.callId === callId); if (step) await this.finishStep(run, step, { status: 'rejected', summary: '用户拒绝' + (reason ? '：' + reason : '') });
-    run.queue = run.queue.filter(call => call.id !== callId);
+    const execId = run.pending.execId; run.queue = execId ? run.queue.filter(call => call.execId !== execId) : run.queue.filter(call => call.id !== callId);
     run.messages.push({ role: 'tool', tool_call_id: callId, content: JSON.stringify({ rejected: true, reason: reason.slice(0, 500) || '用户拒绝执行此操作，请换一种方式或说明原因' }) });
     delete run.pending; run.status = 'running'; run.message = '已拒绝，智能体调整方案'; await this.save(run); this.launch(run); return this.public(run);
   }
@@ -237,7 +247,7 @@ export class AgentService {
       await this.store.trace(run.id, { event: 'model', mode: turn.mode, finish: turn.finish, usage: turn.usage, cost, content: bound(turn.content, 4000), toolCalls: turn.toolCalls });
       run.messages.push({ role: 'assistant', content: turn.content || null, ...(turn.toolCalls.length ? { tool_calls: turn.toolCalls.map(call => ({ id: call.id, type: 'function' as const, function: { name: call.name, arguments: call.arguments } })) } : {}) });
       await this.finishStep(run, step, { status: 'complete', summary: turn.toolCalls.length ? '计划调用：' + turn.toolCalls.map(call => call.name).join(', ') : bound(turn.content, 200) });
-      if (turn.toolCalls.length) { run.queue = [...turn.toolCalls]; await this.save(run); continue; }
+      if (turn.toolCalls.length) { run.queue = turn.toolCalls.map(call => ({ ...call, execId: randomUUID() })); await this.save(run); continue; }
       if (turn.finish === 'length') { run.messages.push({ role: 'user', content: '上一条输出被截断，请更简短地继续。' }); continue; }
       // Reflection: verify writes visually before accepting "done".
       if (meta.dirty && run.reviewRounds < (meta.maxReviewRounds ?? 2)) {
@@ -271,11 +281,15 @@ export class AgentService {
     let args: Record<string, unknown>;
     try { const parsed = JSON.parse(call.arguments || '{}'); if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('参数须为对象'); args = parsed; }
     catch (error) { respond(JSON.stringify({ error: '参数不是有效 JSON 对象：' + errorText(error) })); await this.save(run); return 'next'; }
-    if (!run.approvedCallIds.includes(call.id)) {
+    call.execId ??= randomUUID();
+    const hash = argsHash(run.id, tool.name, args);
+    const grant = (run.approvals ?? []).findIndex(item => item.execId === call.execId && item.tool === tool.name && item.argsHash === hash);
+    if (grant >= 0) run.approvals!.splice(grant, 1); // single use: consumed before execution
+    else {
       const estimate = tool.estimate?.(args) ?? (tool.risk === 'cost' ? null : 0);
       const reason = needsApproval(tool.risk, run.policy.autoApprove, run.budget, run.usage, estimate, tool.risk === 'cost' ? await this.ledgers.get(run.projectId) : undefined);
       if (reason) {
-        run.pending = { callId: call.id, tool: tool.name, risk: tool.risk, arguments: bound(call.arguments, 4000), reason, estimate };
+        run.pending = { callId: call.id, execId: call.execId, argsHash: hash, tool: tool.name, risk: tool.risk, arguments: bound(call.arguments, 4000), reason, estimate };
         run.status = 'awaiting_approval'; run.message = `等待批准：${tool.name}（${reason}）`;
         await this.step(run, { kind: 'approval', status: 'pending', tool: tool.name, callId: call.id, risk: tool.risk, arguments: bound(call.arguments, 2000), summary: reason });
         await this.save(run); return 'suspend';
@@ -284,7 +298,7 @@ export class AgentService {
     const step = await this.step(run, { kind: 'tool', status: 'running', tool: tool.name, callId: call.id, risk: tool.risk, arguments: bound(call.arguments, 2000) });
     run.message = '执行工具：' + tool.name; await this.save(run);
     let result: ToolResult;
-    try { result = await this.withRetry(run, step, () => tool.run({ ...args, __callId: call.id }, this.context(run.id, run.projectId, signal)), signal); }
+    try { result = await this.withRetry(run, step, () => tool.run({ ...args, __callId: call.execId }, this.context(run.id, run.projectId, signal)), signal); }
     catch (error) {
       if (signal.aborted) throw error;
       const kind = classify(error), message = errorText(error);

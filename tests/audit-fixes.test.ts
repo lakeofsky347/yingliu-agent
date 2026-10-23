@@ -67,3 +67,24 @@ test('F06: maxToolCalls is enforced before each tool in a multi-call batch', asy
     assert.equal(run.status, 'budget_exceeded'); assert.equal(run.usage.toolCalls, 1); assert.equal(reads - before, 1);
   } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
 });
+
+test('F03: a reused provider call ID with different arguments needs a fresh approval; approvals are single-use', async () => {
+  const d = await dir(); const voices: string[] = [];
+  const { port } = fakePort({ capabilities: async () => ({ roles: ['speech'] }), voice: async (_p, _s, text) => { voices.push(text); return { id: 'v' + voices.length, name: 'v' }; } });
+  const gw = toolGateway((_b, turn) => turn === 0 ? { toolCalls: [{ id: 'dup', name: 'generate_voice', arguments: { shotId: 'a', text: '第一段' } }] }
+    : turn === 1 ? { toolCalls: [{ id: 'dup', name: 'generate_voice', arguments: { shotId: 'a', text: '第二段' } }] } : done());
+  const service = new AgentService(d, port, { resolveModel: model(), fetch: gw.fetch, retryBaseMs: 1 });
+  try {
+    const started = await service.start({ projectId: 'proj-1', goal: '配音' });
+    let run = await settle(service, started.id, ['awaiting_approval']);
+    await service.approve(started.id, 'dup');
+    run = await settle(service, started.id, ['awaiting_approval', 'complete', 'failed']);
+    assert.equal(run.status, 'awaiting_approval', 'second call with same provider ID must be approved again');
+    assert.deepEqual(voices, ['第一段']);
+    assert.ok(run.pending?.arguments.includes('第二段'));
+    await service.reject(started.id, 'dup');
+    run = await settle(service, started.id, ['complete', 'failed']);
+    assert.deepEqual(voices, ['第一段']);
+    assert.equal((run.approvals ?? []).length, 0, 'approval consumed');
+  } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
+});

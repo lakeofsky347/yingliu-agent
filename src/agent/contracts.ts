@@ -40,7 +40,8 @@ export interface AgentTool {
 
 export type GenRole = 'image' | 'video' | 'speech' | 'music' | 'sfx' | 'vision';
 export interface Capabilities { roles: GenRole[]; director?: string; models?: Partial<Record<GenRole, string>> }
-export interface ToolCall { id: string; name: string; arguments: string }
+/** `id` is the provider's tool_call_id (only used to thread tool messages); `execId` is server-generated and single-use. */
+export interface ToolCall { id: string; name: string; arguments: string; execId?: string }
 export type AgentMessage =
   | { role: 'system' | 'user'; content: string | AgentContent[] }
   | { role: 'assistant'; content: string | null; tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[] }
@@ -68,7 +69,7 @@ export interface RunStep {
   startedAt: string; finishedAt?: string; durationMs?: number;
   tool?: string; callId?: string; risk?: ToolRisk; arguments?: string; summary?: string; error?: string; attempts?: number;
 }
-export interface PendingApproval { callId: string; tool: string; risk: ToolRisk; arguments: string; reason: string; estimate: number | null }
+export interface PendingApproval { callId: string; tool: string; risk: ToolRisk; arguments: string; reason: string; estimate: number | null; execId?: string; argsHash?: string }
 
 export interface AgentRun {
   version: 1; id: string; projectId: string; goal: string; status: RunStatus; message: string;
@@ -79,7 +80,11 @@ export interface AgentRun {
   /** Tool calls from the last assistant turn not yet executed (resumable). */
   queue: ToolCall[];
   pending?: PendingApproval; waiting?: { kind: 'media' | 'workflow'; id: string; callId: string };
-  approvedCallIds: string[]; reviewRounds: number; final?: string; error?: string;
+  /** Legacy (≤0.5.0) field; never trusted for skipping approval. */
+  approvedCallIds: string[];
+  /** One-shot approvals bound to a server execution ID + tool + canonical argument hash; consumed on use. */
+  approvals?: { execId: string; tool: string; argsHash: string }[];
+  reviewRounds: number; final?: string; error?: string;
   /** Capabilities and tool names active at the latest model step. */
   active?: { roles: GenRole[]; tools: string[]; selfMade: string[] };
 }
