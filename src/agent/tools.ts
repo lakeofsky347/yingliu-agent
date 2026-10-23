@@ -129,9 +129,19 @@ export function createTools(): AgentTool[] {
         const task = await rpc(ctx, 'media.generate', { expectedRevision: revision(args), operation: image ? 'image-to-video' : 'text-to-video', prompt: await anchored(ctx, args), ...(args.shotId ? { shotId: args.shotId } : {}), ...(image ? { imageAssetIds: [image], allowImageUpload: true } : {}), clientRequestId: `${ctx.runId}.${String(args.__callId ?? '')}` }) as { id: string }; return { content: json({ taskId: task.id, firstFrame: image || undefined }), waitFor: { kind: 'media', id: task.id } }; } },
     { name: 'media_apply', risk: 'write', description: '把已就绪的生成素材采用到工程。', parameters: object({ taskId: str('媒体任务 ID'), expectedRevision: int('当前工程版本') }, ['taskId', 'expectedRevision']),
       async run(args, ctx) { const value = await rpc(ctx, 'media.apply', { taskId: need(args, 'taskId'), expectedRevision: revision(args) }); return { content: json(value) }; } },
-    { name: 'generate_voice', risk: 'cost', requires: ['speech'], description: '为镜头生成配音（产生费用，需要用户批准）。', parameters: object({ shotId: str('镜头 ID'), text: str('旁白文字') }, ['shotId', 'text']),
+    { name: 'generate_voice', risk: 'cost', requires: ['speech'], description: '为镜头生成配音并登记为工程素材（产生费用，需要用户批准）。单镜头传 shotId+text；多个镜头一次批准传 lines=[{shotId,text}]。之后用 audio_edit 放到音轨或 align_to_voice 对齐。', parameters: object({ expectedRevision: int('当前工程版本'), shotId: str('镜头 ID'), text: str('旁白文字'), lines: { type: 'array', items: object({ shotId: str('镜头 ID'), text: str('旁白文字') }, ['shotId', 'text']) } }),
       estimate: () => null,
-      async run(args, ctx) { if (!ctx.port.voice) throw new Error('未配置配音'); const asset = await ctx.port.voice(ctx.projectId, need(args, 'shotId'), need(args, 'text'), ctx.signal); return { content: json({ ok: true, assetId: asset.id, name: asset.name }) }; } },
+      async run(args, ctx) {
+        if (!ctx.port.voice) throw new Error('未配置配音');
+        const lines = Array.isArray(args.lines) && args.lines.length ? (args.lines as Record<string, unknown>[]).slice(0, 50).map(line => ({ shotId: need(line, 'shotId'), text: need(line, 'text') })) : [{ shotId: need(args, 'shotId'), text: need(args, 'text') }];
+        const expected = Number.isSafeInteger(args.expectedRevision) ? args.expectedRevision as number : undefined; const results = [];
+        for (const [index, line] of lines.entries()) {
+          const asset = await ctx.port.voice(ctx.projectId, line.shotId, line.text, ctx.signal, { ...(index === 0 && expected !== undefined ? { expectedRevision: expected } : {}), requestId: `${ctx.runId}.${String(args.__callId ?? '')}.${index}` });
+          results.push({ shotId: line.shotId, assetId: asset.id, name: asset.name, revision: asset.revision });
+        }
+        const last = results.at(-1)!;
+        return { content: json({ ok: true, ...(results.length === 1 ? { assetId: last.assetId, name: last.name } : { voices: results }), revision: last.revision, hint: '素材已登记进工程；用 audio_edit 加入音轨或 align_to_voice 对齐' }), revision: last.revision };
+      } },
     { name: 'generate_music', risk: 'cost', requires: ['music'], description: '用已接入的音乐模型生成背景音乐并导入为素材（产生费用，需要用户批准）。之后用 audio_edit 放到音轨。', parameters: object({ prompt: str('风格、情绪、乐器、节奏'), durationSeconds: { type: 'number', description: '时长（秒）' } }, ['prompt']),
       estimate: () => null,
       async run(args, ctx) { if (!ctx.port.generateAudio) throw new Error('未配置音乐生成'); const asset = await ctx.port.generateAudio(ctx.projectId, 'music', need(args, 'prompt'), { durationSeconds: Number(args.durationSeconds) || undefined, signal: ctx.signal }); return { content: json({ ok: true, assetId: asset.id, name: asset.name, hint: '用 audio_edit 把它加入音轨' }), cost: asset.cost ?? null }; } },

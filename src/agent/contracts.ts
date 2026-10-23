@@ -106,9 +106,10 @@ export interface AgentPort {
   commit(projectId: string, expectedRevision: number, project: VideoProject, sources: Record<string, SceneSource>, label: string): Promise<StudioSnapshot>;
   route(endpoint: string, payload: Record<string, unknown>): Promise<{ ok: boolean; value?: unknown; error?: { code: string; message: string } }>;
   capture(projectId: string, frame: number, signal: AbortSignal): Promise<{ bytes: Uint8Array; mime: string; frame: number; shotId: string }>;
-  voice?(projectId: string, shotId: string, text: string, signal: AbortSignal): Promise<{ id: string; name: string }>;
+  /** Synthesize narration and register it as a project asset (idempotent per requestId). */
+  voice?(projectId: string, shotId: string, text: string, signal: AbortSignal, options?: { expectedRevision?: number; requestId?: string }): Promise<{ id: string; name: string; revision?: number }>;
   /** Generate audio with a bound role (speech/music/sfx) and import it as a project asset. */
-  generateAudio?(projectId: string, role: 'speech' | 'music' | 'sfx', prompt: string, options: { durationSeconds?: number; signal: AbortSignal }): Promise<{ id: string; name: string; cost?: number | null }>;
+  generateAudio?(projectId: string, role: 'speech' | 'music' | 'sfx', prompt: string, options: { durationSeconds?: number; signal: AbortSignal; shotId?: string }): Promise<{ id: string; name: string; cost?: number | null }>;
   /** Import locally synthesized audio bytes (WAV) as a project asset. */
   importAudio?(projectId: string, name: string, bytes: Uint8Array, mime: string): Promise<{ id: string; name: string }>;
   /** Which generation roles are currently bound (hot: read every step). */

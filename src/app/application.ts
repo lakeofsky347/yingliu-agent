@@ -56,6 +56,23 @@ export async function createApplication(options:{dataDirectory:string;credential
   };
   const workflows=new WorkflowService(dataDirectory,media,workflowPort);
   async function knownKeys():Promise<string[]>{const keys:string[]=[];for(const connection of providers.registry.snapshot().connections){try{const key=await providers.registry.credential(connection);if(key)keys.push(key);}catch{}}return keys;}
+  /** F05: synthesize, then register the asset in the project (CAS commit) so the returned assetId is usable. Idempotent per requestId. */
+  async function agentVoice(id:string,shotId:string,text:string,signal:AbortSignal,options:{expectedRevision?:number;requestId?:string}={}):Promise<{id:string;name:string;revision?:number}>{
+    const ledgerKey='agentVoice';
+    const before=(await backend.call('current',{projectId:id})).project;if(!before)throw new Error('工程不存在或未打开');
+    const done=options.requestId?((before.extensions[ledgerKey]??{}) as Record<string,{assetId:string}>)[options.requestId]:undefined;
+    if(done){const asset=before.assets.find(item=>item.id===done.assetId);if(asset)return {id:asset.id,name:asset.name,revision:before.revision};}
+    if(options.expectedRevision!==undefined&&options.expectedRevision!==before.revision)throw Object.assign(new Error('工程版本已变化（当前 '+before.revision+'），没有提交配音'),{code:'REVISION_CONFLICT',submissionUncertain:false});
+    if(!before.shots.some(item=>item.id===shotId))throw Object.assign(new Error('配音目标镜头不存在'),{submissionUncertain:false});
+    const asset=await workflowPort.voice(id,shotId,text,signal);
+    for(let attempt=0;;attempt++){
+      const latest=(await backend.call('current',{projectId:id})).project!;const next=structuredClone(latest);
+      if(!next.assets.some(item=>item.id===asset.id))next.assets.push(asset);
+      if(options.requestId)next.extensions={...next.extensions,[ledgerKey]:{...((next.extensions[ledgerKey]??{}) as object),[options.requestId]:{assetId:asset.id}}};
+      try{const committed=await workflowPort.commit(id,latest.revision,next,{},'智能体：登记配音素材');return {id:asset.id,name:asset.name,revision:committed.project?.revision};}
+      catch(error){if(attempt>=2||!/版本|revision/i.test(error instanceof Error?error.message:''))throw Object.assign(error instanceof Error?error:new Error(String(error)),{submissionUncertain:false,message:'配音已生成但登记进工程失败：'+(error instanceof Error?error.message:String(error))});}
+    }
+  }
   const agentPort:AgentPort={
     snapshot:id=>backend.call('current',{projectId:id}),
     readSource:(id,shotId)=>backend.call('source',{projectId:id,shotId}),
@@ -63,7 +80,7 @@ export async function createApplication(options:{dataDirectory:string;credential
     commit:(id,expectedRevision,project,sources,label)=>workflowPort.commit(id,expectedRevision,project,sources,label),
     route:(endpoint,payload)=>route(endpoint,payload) as ReturnType<AgentPort['route']>,
     capture:async(id,frame,signal)=>{const shot=await backend.workflowCapture(id,frame,signal) as unknown as {bytes?:Uint8Array;buffer?:Uint8Array;mime?:string;frame?:number;shotId:string};return {bytes:shot.bytes??shot.buffer??new Uint8Array(),mime:shot.mime??'image/png',frame:shot.frame??frame,shotId:shot.shotId??''};},
-    voice:async(id,shotId,text,signal)=>{const asset=await workflowPort.voice(id,shotId,text,signal);return {id:asset.id,name:asset.name};},
+    voice:(id,shotId,text,signal,options)=>agentVoice(id,shotId,text,signal,options),
     capabilities:async()=>{
       const state=providers.registry.snapshot(),roles:GenRole[]=[],models:Partial<Record<GenRole,string>>={};
       for(const binding of state.roles){const model=state.models.find(m=>m.id===binding.modelId),connection=state.connections.find(c=>c.id===model?.connectionId);
@@ -75,9 +92,9 @@ export async function createApplication(options:{dataDirectory:string;credential
     },
     importImage:async(id,name,bytes,mime)=>{if(!/^image\/(png|jpeg|webp)$/.test(mime))throw new Error('不支持的图片格式');const snapshot=await backend.call('import',{projectId:id,name,description:'智能体截取的尾帧',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error('图片导入失败');return {id:asset.id,name:asset.name};},
     importAudio:async(id,name,bytes,mime)=>{const snapshot=await backend.call('import',{projectId:id,name,description:'智能体本地合成',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error('音频导入失败');return {id:asset.id,name:asset.name};},
-    generateAudio:async(id,role,prompt,{durationSeconds,signal})=>{
+    generateAudio:async(id,role,prompt,{durationSeconds,signal,shotId})=>{
       const resolved=await providers.registry.resolve(role);
-      if(role==='speech'&&resolved.connection.protocol==='speech'){const shot=(await backend.call('current',{projectId:id})).project?.shotOrder[0];if(!shot)throw new Error('工程没有镜头');const asset=await workflowPort.voice(id,shot,prompt,signal);return {id:asset.id,name:asset.name,cost:null};}
+      if(role==='speech'&&resolved.connection.protocol==='speech'){const project=(await backend.call('current',{projectId:id})).project;const shot=shotId??project?.shotOrder[0];if(!shot||!project?.shots.some(item=>item.id===shot))throw new Error('配音目标镜头不存在');const asset=await agentVoice(id,shot,prompt,signal,{});return {id:asset.id,name:asset.name,cost:null};}
       if(resolved.connection.protocol!=='async-task')throw new Error('该角色的模型协议不支持音频生成');
       const release=providers.registry.acquire(resolved.connection.id,resolved.model.id);
       try{

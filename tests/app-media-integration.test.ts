@@ -99,3 +99,18 @@ test('application speech lease protects model connection until the request and m
     await f.call('models.model.remove',{id:voice.id});await f.call('models.connection.remove',{id:speech.id});assert.equal(f.speechCalls,1);
   }finally{await f.close();}
 });
+
+test('F05: agent voice registers the asset in the project, is idempotent per request, and honours expectedRevision',{skip:spawnSync('ffprobe',['-version']).status!==0},async()=>{
+  const f=await fixture();try{
+    const speech=await f.call<ProviderConnection>('models.connection.save',{protocol:'speech',baseUrl:f.baseUrl,auth:'none'}),voice=await f.call<ModelDefinition>('models.model.save',{connectionId:speech.id,model:'speech-test',parameters:{voice:'fixture'}});await f.call('models.role.bind',{role:'speech',modelId:voice.id});
+    const project=(await f.call<StudioSnapshot>('create',{title:'智能体配音登记'})).project!;const port=(f.app.agent as unknown as {port:import('../src/agent/contracts.ts').AgentPort}).port;
+    await assert.rejects(port.voice!(project.id,project.shots[0]!.id,'旁白',new AbortController().signal,{expectedRevision:project.revision+5,requestId:'r.0'}),/版本/);assert.equal(f.speechCalls,0,'stale revision rejected before paying');
+    const first=await port.voice!(project.id,project.shots[1]!.id,'第二镜旁白',new AbortController().signal,{expectedRevision:project.revision,requestId:'r.1'});
+    let current=(await f.call<StudioSnapshot>('current',{projectId:project.id})).project!;
+    assert.ok(current.assets.some(asset=>asset.id===first.id&&asset.kind==='audio'),'assetId is a real project asset');assert.equal(current.revision,project.revision+1);assert.equal(first.revision,current.revision);
+    const again=await port.voice!(project.id,project.shots[1]!.id,'第二镜旁白',new AbortController().signal,{requestId:'r.1'});
+    assert.equal(again.id,first.id);assert.equal(f.speechCalls,1,'repeat with the same request ID does not synthesize again');
+    const viaAudio=await port.generateAudio!(project.id,'speech','第三镜',{signal:new AbortController().signal,shotId:project.shots[2]!.id});
+    current=(await f.call<StudioSnapshot>('current',{projectId:project.id})).project!;assert.ok(current.assets.some(asset=>asset.id===viaAudio.id),'generateAudio speech branch also registers');
+  }finally{await f.close();}
+});
