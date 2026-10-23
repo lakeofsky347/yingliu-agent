@@ -178,3 +178,16 @@ test('F08: run_workflow macro starts and completes a real WorkflowService run th
     assert.ok((await call<StudioSnapshot>('current', { projectId })).project!.revision > revision);
   } finally { await app.dispose(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); await rm(directory, { recursive: true, force: true }); }
 });
+
+test('F07: template cancel trusts the reported status instead of assuming cancelled', async () => {
+  const { cancelTemplate } = await import('../src/models/adapters/template.ts');
+  const model = { id: 'm', connectionId: 'c', model: 'owner/name', parameters: { preset: 'replicate' } } as never;
+  const connection = { id: 'c', protocol: 'async-task', baseUrl: 'http://127.0.0.1:1/v1', auth: 'none', requestTimeoutMs: 5000 } as never;
+  const reply = (body: unknown) => (async () => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+  const ctx = (body: unknown) => ({ connection, signal: new AbortController().signal, fetch: reply(body) });
+  assert.equal((await cancelTemplate(ctx({ status: 'processing' }), model, 'j1')).status, 'running');
+  assert.equal((await cancelTemplate(ctx({}), model, 'j1')).status, 'running', 'no status is not a confirmation');
+  assert.equal((await cancelTemplate(ctx({ status: 'canceled' }), model, 'j1')).status, 'cancelled');
+  const done = await cancelTemplate(ctx({ status: 'succeeded', output: 'https://example.invalid/a.mp4' }), model, 'j1');
+  assert.equal(done.status, 'succeeded'); assert.equal(done.artifacts?.length, 1);
+});

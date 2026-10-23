@@ -185,8 +185,12 @@ export async function cancelTemplate(context: TemplateContext, model: ModelDefin
   const template = resolveTemplate(model.parameters);
   if (!template.cancelPath) throw new Error('此服务模板未配置云端取消；已停止本地等待，请到服务控制台确认');
   const response = await (context.fetch ?? fetch)(url(context.connection, fillPath(template.cancelPath, { prompt: '', model: model.model, clientRequestId: jobId, id: jobId, parameters: model.parameters })), { method: 'POST', redirect: 'error', headers: headers(context, template, true), body: '{}', signal: AbortSignal.any([context.signal, AbortSignal.timeout(context.connection.requestTimeoutMs)]) });
-  await readJson(response, context.key);
-  return { jobId, status: 'cancelled' };
+  const data = await readJson(response, context.key);
+  // F07: an HTTP 2xx only means the cancel request was accepted. Trust the reported status when the template maps one;
+  // otherwise report it as still running so the caller keeps polling for the real terminal state.
+  const reported = template.statusPath ? mapStatus(pick(data, template.statusPath)[0], template.statusMap) : undefined;
+  if (reported === 'succeeded') { try { return { ...parseTemplateJob(data, { ...template, idPath: '' }, jobId, 'video'), jobId }; } catch { return { jobId, status: 'running' }; } }
+  return { jobId, status: reported ?? 'running' };
 }
 /** Non-billable reachability check: GET checkPath (or base URL). Any HTTP answer means reachable; 401/403 flags credentials. */
 export async function checkTemplate(context: TemplateContext, model?: ModelDefinition): Promise<{ ok: boolean; message: string }> {
