@@ -75,6 +75,10 @@ export class ProjectDocs<T extends { version: number }> {
     };
     const next = this.queue.then(work, work); this.queue = next.catch(() => {}); return next;
   }
+  /** Raw stored document, or undefined when this project has none yet (used by project backups). */
+  async raw(projectId: string): Promise<T | undefined> { await this.queue.catch(() => {}); try { await readFile(this.file(projectId)); } catch (error) { if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return undefined; } return this.read(projectId); }
+  /** Replace the whole document (restore from backup); serialized with updates, version continues from the current file. */
+  put(projectId: string, value: T): Promise<T> { return this.update(projectId, () => structuredClone(value)); }
   /** Only a missing file starts empty. Corrupt JSON or permission errors keep the original file untouched and surface an error,
    *  so a damaged ledger can never silently reset spend to zero. */
   private async read(projectId: string): Promise<T> {

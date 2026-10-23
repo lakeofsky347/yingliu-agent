@@ -118,6 +118,7 @@ export async function createApplication(options:{dataDirectory:string;credential
     },
     vision:async(prompt,images,signal)=>{await providers.registry.resolve('vision');return workflowPort.text('vision',prompt,signal,{} as WorkflowRequest,images);},
   };
+  const agentArchive={export:(projectId:string)=>agent.exportDocs(projectId),import:(projectId:string,docs:Partial<Record<'story'|'ledger'|'qc',unknown>>)=>agent.importDocs(projectId,docs)};
   const agent=new AgentService(join(dataDirectory,'agent-runs'),agentPort,{
     fetch:options.fetch,dataDirectory:join(dataDirectory,'agent-data'),
     redact:async text=>{let value=text;for(const key of await knownKeys())value=redactKey(value,key);return value;},
@@ -178,8 +179,8 @@ export async function createApplication(options:{dataDirectory:string;credential
         case 'media.cancel':value=await media.cancel(String(data.taskId));break;
         case 'media.apply':value=await media.apply(String(data.taskId),Number(data.expectedRevision));break;
         case 'app.health':{const snapshot=await backend.call('current');value=await applicationHealth(snapshot.environment,await providers.settings(),dataDirectory);break;}
-        case 'app.exportProject':value=await exportProjectArchive(backend,data);break;
-        case 'app.importProject':value=await importProjectArchive(backend,data);break;
+        case 'app.exportProject':value=await exportProjectArchive(backend,data,agentArchive);break;
+        case 'app.importProject':value=await importProjectArchive(backend,data,agentArchive);break;
         case 'packs.list':value=foundationPacks;break;
         case 'providers.get':value=await providers.settings();break;
         case 'providers.save':value=await providers.save(data);await backend.call('catalog');break;

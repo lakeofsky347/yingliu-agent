@@ -52,6 +52,19 @@ export class AgentService {
     };
   }
   story(projectId: string) { return this.stories.get(projectId); }
+  /** Agent-side project data for backups: story, budget ledger and last QC report. Missing documents are omitted. */
+  async exportDocs(projectId: string): Promise<Record<'story' | 'ledger' | 'qc', unknown>> {
+    const [story, ledger, qc] = await Promise.all([this.stories.raw(projectId), this.ledgers.raw(projectId), this.qcs.raw(projectId)]);
+    return Object.fromEntries(Object.entries({ story, ledger, qc }).filter(([, value]) => value !== undefined)) as Record<'story' | 'ledger' | 'qc', unknown>;
+  }
+  /** Restore agent data into a (new) project ID. Values are validated as objects with an integer version; projectId is rewritten. */
+  async importDocs(projectId: string, docs: Partial<Record<'story' | 'ledger' | 'qc', unknown>>): Promise<void> {
+    const valid = (value: unknown): value is { version: number } & Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value) && Number.isSafeInteger((value as { version?: unknown }).version);
+    for (const [name, value] of Object.entries(docs)) if (value !== undefined && !valid(value)) throw new Error('工程包中的智能体资料损坏：' + name);
+    if (docs.story) await this.stories.put(projectId, { ...(docs.story as Story), projectId } as Story);
+    if (docs.ledger) await this.ledgers.put(projectId, { ...emptyLedger(projectId), ...(docs.ledger as Ledger), projectId });
+    if (docs.qc) await this.qcs.put(projectId, docs.qc as { version: number; report?: QcReport });
+  }
   /** User edits from the UI (style, characters, logline). Shots are changed through the agent's plan_shots or here wholesale. */
   async saveStory(projectId: string, input: Record<string, unknown>, expectedVersion: number): Promise<Story> {
     return this.stories.update(projectId, current => {

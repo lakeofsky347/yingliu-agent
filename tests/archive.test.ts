@@ -121,3 +121,20 @@ test('archive limits are validated and enforced during stream output, compressed
     assert.equal((await f.backend.call<{projects:unknown[]}>('list')).projects.length,2);
   }finally{await f.close();}
 });
+
+test('backup carries agent story, budget ledger and QC, restored under the new project ID',async()=>{
+  const {AgentService}=await import('../src/agent/service.ts');
+  const f=await fixture();try{
+    const agent=new AgentService(join(f.directory,'agent-runs'),{} as never,{dataDirectory:join(f.directory,'agent-data'),resolveModel:async()=>{throw new Error('unused');}} as never);
+    const hooks={export:(id:string)=>agent.exportDocs(id),import:(id:string,docs:Record<string,unknown>)=>agent.importDocs(id,docs)};
+    const project=createProject('带智能体资料','主题');await f.backend.call('create',{project,sources:project.shots.map(shot=>({shotId:shot.id,source:defaultSceneSource()}))});
+    await agent.saveStory(project.id,{logline:'保留的故事'},0);
+    await (agent as unknown as {ledgers:{update(id:string,c:(l:Record<string,unknown>)=>Record<string,unknown>):Promise<unknown>}}).ledgers.update(project.id,l=>({...l,maxCost:50,spent:12.5}));
+    const exported=await exportProjectArchive(f.backend,{projectId:project.id},hooks);
+    const names=Object.keys(unzipSync(Buffer.from(exported.dataBase64!,'base64')));assert.ok(names.includes('agent/story.json')&&names.includes('agent/ledger.json'));assert.ok(!names.includes('agent/qc.json'),'missing docs are omitted');
+    const restored=await importProjectArchive(f.backend,{dataBase64:exported.dataBase64},hooks);const id=restored.project!.id;assert.notEqual(id,project.id);
+    const story=await agent.story(id);assert.equal(story.logline,'保留的故事');assert.equal((story as unknown as {projectId?:string}).projectId??id,id);
+    const ledger=(await agent.exportDocs(id)).ledger as {spent:number;maxCost:number;projectId:string};assert.equal(ledger.spent,12.5);assert.equal(ledger.maxCost,50);assert.equal(ledger.projectId,id);
+    const plain=await importProjectArchive(f.backend,{dataBase64:exported.dataBase64});assert.ok(plain.project,'archives with agent data still import without hooks');
+  }finally{await f.close();}
+});
