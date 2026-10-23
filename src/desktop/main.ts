@@ -7,6 +7,9 @@ import { NativeSecrets } from './native-secrets.ts';
 
 app.setName('映流智能体');
 app.commandLine.appendSwitch('site-per-process');
+// F01: scene previews run untrusted code; never let WebRTC open non-proxied UDP (no proxy → no UDP) from the editor.
+app.commandLine.appendSwitch('force-webrtc-ip-handling-policy','disable_non_proxied_udp');
+app.commandLine.appendSwitch('webrtc-ip-handling-policy','disable_non_proxied_udp');
 // Separate data from the fixed-workflow 映流 Studio app so the two never share projects, credentials or settings.
 if(process.env.YINGLIU_DATA_DIR)app.setPath('userData',resolve(process.env.YINGLIU_DATA_DIR));else app.setPath('userData',join(app.getPath('appData'),'yingliu-agent'));
 const ownsApplication=app.requestSingleInstanceLock();
@@ -23,6 +26,7 @@ if(ownsApplication)void app.whenReady().then(async()=>{
   editorSession.setPermissionCheckHandler(()=>false);
   const window=new BrowserWindow({width:1600,height:1000,minWidth:1100,minHeight:700,title:'映流智能体',backgroundColor:'#0e1117',
     webPreferences:{preload:join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true,session:editorSession}});
+  window.webContents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
   const trusted=(event:Electron.IpcMainInvokeEvent)=>event.sender===window.webContents&&event.senderFrame!==null&&event.senderFrame.parent===null&&event.senderFrame.frameTreeNodeId===window.webContents.mainFrame.frameTreeNodeId&&new URL(event.senderFrame.url).origin===server.origin;
   ipcMain.handle('yingliu:call',(event,endpoint:unknown,payload:unknown)=>{if(!trusted(event)||typeof endpoint!=='string'||!ENDPOINTS.has(endpoint))throw new Error('此窗口无法调用应用服务');return application.route(endpoint,payload);});
   ipcMain.handle('yingliu:pick-project',async event=>{if(!trusted(event))throw new Error('此窗口无法打开文件');const result=await dialog.showOpenDialog(window,{title:'打开影片工程目录',properties:['openDirectory'],defaultPath:join(dataDirectory,'projects')});return result.canceled?null:result.filePaths[0]??null;});
