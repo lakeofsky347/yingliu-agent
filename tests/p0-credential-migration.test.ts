@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { migrateCredentials, rollbackCredentialMigration, migrationPaths, type Keyring } from '../src/migration/credentials.ts';
+import { migrateCredentials, rollbackCredentialMigration, migrationPaths, type Keyring } from '../src/migration/credential-migration.ts';
 
 const SYNTH = { 'provider:a': 'synthetic-secret-AAAA-1111', 'provider:b': 'synthetic-secret-BBBB-2222', 'provider:c': 'synthetic-secret-CCCC-3333' };
 const enc = (s: string) => Buffer.from([...Buffer.from(s)].map(b => b ^ 0x5a)).toString('base64');
