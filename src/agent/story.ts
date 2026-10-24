@@ -1,8 +1,8 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
 import type { VideoProject } from '../shared/types.ts';
+import { writeDurableFile } from './durable-file.ts';
 
 export interface StoryStyle { look: string; palette: string; typography: string; motion: string; negative: string }
 export interface StoryCharacter { id: string; name: string; description: string; features: string[]; referenceAssetIds: string[]; voice?: string }
@@ -13,7 +13,7 @@ export interface Story {
   style: StoryStyle; characters: StoryCharacter[]; shots: StoryShot[]; approvedAt?: string; updatedAt: string;
   consistency: Record<string, ConsistencyScore>;
 }
-export interface Ledger { version: number; projectId: string; maxCost: number | null; currency: string; spent: number; unknownCostCalls: number; byTool: Record<string, { calls: number; cost: number }>; updatedAt: string }
+export interface Ledger { version: number; projectId: string; maxCost: number | null; currency: string; spent: number; unknownCostCalls: number; byTool: Record<string, { calls: number; cost: number }>; settledExecutions?: Record<string, true>; updatedAt: string }
 
 const SAFE = /^[a-zA-Z0-9_-]{1,120}$/;
 const text = (value: unknown, max: number) => typeof value === 'string' ? value.trim().slice(0, max) : '';
@@ -69,8 +69,7 @@ export class ProjectDocs<T extends { version: number }> {
       if (expectedVersion !== undefined && expectedVersion !== current.version) throw Object.assign(new Error(`版本已变化（当前 ${current.version}），请重新读取`), { code: 'REVISION_CONFLICT' });
       const next = { ...change(structuredClone(current)), version: current.version + 1 };
       await mkdir(this.directory, { recursive: true });
-      const file = this.file(projectId), temporary = file + '.tmp-' + randomUUID();
-      try { await writeFile(temporary, JSON.stringify(next, null, 1)); await rename(temporary, file); } finally { await rm(temporary, { force: true }); }
+      await writeDurableFile(this.file(projectId), JSON.stringify(next, null, 1));
       return next;
     };
     const next = this.queue.then(work, work); this.queue = next.catch(() => {}); return next;

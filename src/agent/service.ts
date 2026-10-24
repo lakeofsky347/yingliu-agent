@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { AgentContent, AgentEvent, AgentMessage, AgentPort, AgentRun, AgentStartInput, AgentTool, PublicRun, RunStep, ToolCall, ToolResult, ToolRisk } from './contracts.ts';
+import type { AgentContent, AgentEvent, AgentMessage, AgentPort, AgentRun, AgentStartInput, AgentTool, PublicRun, RunStep, ToolCall, ToolResult, ToolRisk, ToolSuccessReceipt } from './contracts.ts';
 import { chatTurn, looksLikeNoToolSupport, type ChatConfig } from './model-client.ts';
 import { backoff, budgetFrom, chargeModel, chargeTool, classify, emptyUsage, needsApproval, overBudget, tokenCost } from './budget.ts';
 import { bound, capabilityPrompt, compressMessages, summarizeProject, systemPrompt } from './context.ts';
@@ -15,7 +15,9 @@ export interface ResolvedAgentModel { config: ChatConfig; parameters: Record<str
 export interface AgentServiceOptions {
   resolveModel(): Promise<ResolvedAgentModel>;
   fetch?: typeof fetch; tools?: AgentTool[]; redact?: (text: string) => Promise<string>;
-  contextChars?: number; pollMs?: number; dataDirectory?: string; retryBaseMs?: number; maxRetries?: number; maxReviewRounds?: number;
+  contextChars?: number; pollMs?: number;
+  /** C01: false opens the store read-only (no settling of in-flight receipts, no status rewrite). Default true. */
+  recover?: boolean; dataDirectory?: string; retryBaseMs?: number; maxRetries?: number; maxReviewRounds?: number;
 }
 const TERMINAL = new Set(['complete', 'failed', 'cancelled', 'budget_exceeded']);
 const DEFAULT_AUTO: ToolRisk[] = ['read', 'write'];
@@ -26,7 +28,6 @@ function canonical(value: unknown): string {
   if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonical((value as Record<string, unknown>)[key])).join(',') + '}';
   return JSON.stringify(value) ?? 'null';
 }
-/** Approval binding: run + tool + canonical arguments. */
 /** PR1-R06: Story import contract shared by validation and import.
  *  Required (absent or mistyped -> reject): version; character id/name/features/referenceAssetIds; shot id/summary/durationSeconds/characters
  *  (each referencing a defined character). Defaultable fields of older documents (status, title, logline, targetSeconds, style.*,
@@ -66,6 +67,7 @@ export function migrateStory(v: Record<string, unknown>): Story | null {
   try { storyBrief({ ...story, status: 'approved' }); anchorPrompt(story, characters.map(c => c.id)); } catch { return null; }
   return story;
 }
+/** Approval binding: run + tool + canonical arguments. */
 export function argsHash(runId: string, tool: string, args: Record<string, unknown>): string { return createHash('sha256').update(runId + '\0' + tool + '\0' + canonical(args)).digest('hex'); }
 function sleep(ms: number, signal: AbortSignal) { return new Promise<void>((resolve, reject) => { const timer = setTimeout(() => { signal.removeEventListener('abort', stop); resolve(); }, ms); const stop = () => { clearTimeout(timer); reject(signal.reason); }; signal.addEventListener('abort', stop, { once: true }); }); }
 
@@ -108,6 +110,7 @@ export class AgentService {
       story: v => migrateStory(v) !== null,
       ledger: v => (v.spent === undefined || num(v.spent)) && (v.unknownCostCalls === undefined || Number.isSafeInteger(v.unknownCostCalls) && (v.unknownCostCalls as number) >= 0)
         && (v.maxCost === undefined || v.maxCost === null || num(v.maxCost)) && optStr(v.currency)
+        && (v.settledExecutions === undefined || obj(v.settledExecutions) && Object.values(v.settledExecutions).every(value => value === true))
         && (v.byTool === undefined || obj(v.byTool) && Object.values(v.byTool).every(t => obj(t) && Number.isSafeInteger(t.calls) && (t.calls as number) >= 0 && num(t.cost))),
       qc: v => v.report === undefined || obj(v.report) && typeof v.report.pass === 'boolean' && Array.isArray(v.report.issues) && v.report.issues.every(i => obj(i) && str(i.message) && str(i.check) && str(i.severity)) && strs(v.report.unchecked),
     };
@@ -152,12 +155,13 @@ export class AgentService {
     const tools = activeTools(this.tools, capabilities);
     return (run as AgentRun & { allowImages?: boolean }).allowImages === true ? tools : tools.filter(tool => !(tool.requires ?? []).includes('vision'));
   }
-  private async spend(projectId: string, tool: string, cost: number | null | undefined, settleUnknown = false) {
+  private async spend(projectId: string, tool: string, cost: number | null | undefined, settleUnknown = false, executionId?: string) {
     await this.ledgers.update(projectId, current => {
+      if (executionId && current.settledExecutions?.[executionId]) return current;
       const entry = current.byTool[tool] ?? { calls: 0, cost: 0 };
       if (!settleUnknown) entry.calls++;
       if (typeof cost === 'number') { entry.cost += cost; current.spent += cost; if (settleUnknown) current.unknownCostCalls = Math.max(0, current.unknownCostCalls - 1); } else if (!settleUnknown) current.unknownCostCalls++;
-      return { ...current, byTool: { ...current.byTool, [tool]: entry }, updatedAt: now() };
+      return { ...current, byTool: { ...current.byTool, [tool]: entry }, ...(executionId ? { settledExecutions: { ...current.settledExecutions, [executionId]: true as const } } : {}), updatedAt: now() };
     });
   }
   /** Current capability snapshot (hot: re-read before every model step). */
@@ -169,9 +173,11 @@ export class AgentService {
   initialize(): Promise<void> {
     return this.initialized ??= (async () => {
       for (const run of await this.store.loadAll()) {
+        if (this.options.recover === false) { this.runs.set(run.id, run); continue; }
         for (const call of run.queue) call.execId ??= randomUUID();
         if (run.pending && !run.pending.execId) { const call = run.queue.find(item => item.id === run.pending!.callId); if (call) { run.pending.execId = call.execId; try { run.pending.argsHash = argsHash(run.id, call.name, JSON.parse(call.arguments || '{}')); } catch { /* re-asked on resume */ } } }
-        if (run.inFlight) { this.runs.set(run.id, run); await this.settleInFlight(run); if (run.status === 'awaiting_approval') run.status = 'paused'; }
+        const successes = await this.store.toolSuccesses(run.id);
+        if (run.inFlight && !successes.some(receipt => receipt.execId === run.inFlight!.execId)) { this.runs.set(run.id, run); await this.settleInFlight(run); if (run.status === 'awaiting_approval') run.status = 'paused'; }
         if (run.status === 'running' || run.status === 'waiting_task') { run.status = 'paused'; run.message = '应用重启时运行被中断，可点击「继续」从断点恢复'; await this.store.save(run); }
         this.runs.set(run.id, run);
       }
@@ -236,6 +242,8 @@ export class AgentService {
    *  later paid calls then require explicit approval (uncertainSubmissions). */
   private async settleInFlight(run: AgentRun): Promise<boolean> {
     const flight = run.inFlight; if (!flight) return false;
+    // A known result belongs to the success journal even when bookkeeping is still failing.
+    if ((await this.store.toolSuccesses(run.id)).some(receipt => receipt.execId === flight.execId)) return false;
     const entry = { execId: flight.execId, tool: flight.tool, at: now(), error: '运行中断时收费请求已发出，结果未知（可能已受理并计费）', attempts: 1 };
     (run.uncertainSubmissions ??= []).push(entry); delete run.inFlight;
     const call = run.queue.find(item => item.execId === flight.execId);
@@ -288,8 +296,14 @@ export class AgentService {
   async cancel(id: string): Promise<PublicRun> {
     const run = await this.required(id); const active = this.active.get(id);
     active?.controller.abort(new Error('用户取消')); await active?.promise.catch(() => {});
+    // Cancelling cannot discard an already successful paid effect that still needs local settlement.
+    try { for (const receipt of await this.store.toolSuccesses(run.id)) await this.settleToolSuccess(run, receipt); }
+    catch (error) {
+      run.status = 'failed'; run.error = errorText(error); run.message = '工具已成功，但本地结算尚未完成；回执已保留，修复后可继续结算或再次取消';
+      await this.save(run); return this.public(run);
+    }
     await this.settleInFlight(run);
-    if (!TERMINAL.has(run.status)) { run.status = 'cancelled'; run.message = '已取消'; delete run.pending; run.queue = []; await this.store.trace(run.id, { event: 'run.cancel' }); await this.save(run); }
+    if (run.status === 'failed' || !TERMINAL.has(run.status)) { run.status = 'cancelled'; run.message = '已取消'; delete run.pending; run.queue = []; await this.store.trace(run.id, { event: 'run.cancel' }); await this.save(run); }
     return this.public(run);
   }
   async dispose() { this.stopped = true; for (const { controller } of this.active.values()) controller.abort(new Error('应用正在关闭')); await Promise.allSettled([...this.active.values()].map(item => item.promise)); }
@@ -307,6 +321,8 @@ export class AgentService {
   }
 
   private async loop(run: AgentRun, signal: AbortSignal): Promise<void> {
+    // Complete recorded effects before credentials, changed capabilities, approvals or budgets can cause a new submission.
+    for (const receipt of await this.store.toolSuccesses(run.id)) await this.settleToolSuccess(run, receipt);
     let model = await this.options.resolveModel();
     if (run.model.mode === 'plan-json') model = { ...model, config: { ...model.config, supportsTools: false } };
     run.model = { connectionId: model.connectionId, model: model.config.model, mode: model.config.supportsTools ? 'tools' : 'plan-json' };
@@ -438,18 +454,40 @@ export class AgentService {
       respond(JSON.stringify({ error: message, hint: kind === 'conflict' ? '工程版本已变化：先调用 project_get 获取最新 revision 再重试' : kind === 'retry' ? '临时故障，已重试多次' : '请修正参数或换一种方法' }));
       await this.save(run); return 'next';
     }
-    // PR1-R03 single durable commit point: a known success (even one that arrives after pause/cancel aborted the signal) is
-    // charged, answered and dequeued in the same save that clears inFlight; only then is the stop request honoured.
-    delete run.inFlight;
-    chargeTool(run.usage, result.cost, tool.risk); if (tool.risk === 'cost') await this.spend(run.projectId, tool.name, result.waitFor ? null : result.cost);
-    if (tool.risk === 'write') meta.dirty = true;
+    const receipt: ToolSuccessReceipt = { execId: call.execId!, tool: tool.name, argsHash: hash, risk: tool.risk, stepIndex: step.index, at: now(), result };
+    // Keep inFlight until the known outcome has its own durable journal. Any later failure only retries settlement.
+    if (sideEffect) await this.store.saveToolSuccess(run.id, receipt);
+    await this.settleToolSuccess(run, receipt, model);
+    signal.throwIfAborted(); return 'next';
+  }
+
+  private async settleToolSuccess(run: AgentRun, receipt: ToolSuccessReceipt, model?: ResolvedAgentModel): Promise<void> {
+    const key = run.id + '.' + receipt.execId;
+    const call = run.queue.find(item => item.execId === receipt.execId);
+    if (!call) {
+      if (!(run.settledToolExecIds ?? []).includes(key)) throw new Error('工具成功回执无法匹配运行队列；未重新提交');
+      await this.store.removeToolSuccess(run.id, receipt.execId); return;
+    }
+    if (call.name !== receipt.tool || argsHash(run.id, call.name, JSON.parse(call.arguments || '{}')) !== receipt.argsHash) throw new Error('工具成功回执与执行参数不符；未重新提交');
+    const meta = run as AgentRun & { dirty?: boolean; allowImages?: boolean };
+    let result = receipt.result;
+    if (!(run.settledToolExecIds ?? []).includes(key)) {
+      chargeTool(run.usage, result.cost, receipt.risk); (run.settledToolExecIds ??= []).push(key);
+    }
+    if (receipt.risk === 'cost') await this.spend(run.projectId, receipt.tool, result.waitFor ? null : result.cost, false, key);
+    if (receipt.risk === 'write') meta.dirty = true;
     if (result.images?.length) {
-      if (model.vision && meta.allowImages) this.imageBuffer.set(run.id, [...(this.imageBuffer.get(run.id) ?? []), ...result.images.map(image => ({ type: 'image_url' as const, image_url: { url: `data:${image.mime};base64,${Buffer.from(image.bytes).toString('base64')}` } }))]);
+      if ((model?.vision ?? true) && meta.allowImages) this.imageBuffer.set(run.id, [...(this.imageBuffer.get(run.id) ?? []), ...result.images.map(image => ({ type: 'image_url' as const, image_url: { url: `data:${image.mime};base64,${Buffer.from(image.bytes).toString('base64')}` } }))]);
       else result = { ...result, content: result.content + '（画面已截取；当前模型或设置不允许发送图片，请用 visual_review 或 render_check 检查）' };
     }
-    await this.finishStep(run, step, { status: 'complete', summary: bound(result.content, 300) });
-    if (result.waitFor) { run.waiting = { ...result.waitFor, callId: call.id }; run.queue.shift(); run.status = 'waiting_task'; run.message = '等待生成任务完成'; await this.save(run); signal.throwIfAborted(); return 'next'; }
-    respond(result.content); await this.save(run); signal.throwIfAborted(); return 'next';
+    const step = run.steps[receipt.stepIndex]; if (step) await this.finishStep(run, step, { status: 'complete', summary: bound(result.content, 300) });
+    if (result.projectTask && !run.taskRefs?.some(task => task.id === result.projectTask!.id)) (run.taskRefs ??= []).push({ ...result.projectTask, callId: call.id, execId: call.execId });
+    if (result.waitFor) { run.waiting = { ...result.waitFor, callId: call.id, execId: call.execId }; run.status = 'waiting_task'; run.message = '等待生成任务完成'; }
+    else run.messages.push({ role: 'tool', tool_call_id: call.id, content: result.content });
+    run.queue = run.queue.filter(item => item !== call);
+    if (run.inFlight?.execId === receipt.execId) delete run.inFlight;
+    await this.save(run);
+    await this.store.removeToolSuccess(run.id, receipt.execId);
   }
 
   private async awaitTask(run: AgentRun, signal: AbortSignal): Promise<void> {
@@ -459,7 +497,11 @@ export class AgentService {
       const result = await this.port.route(waiting.kind === 'media' ? 'media.get' : 'workflows.get', waiting.kind === 'media' ? { taskId: waiting.id } : { workflowId: waiting.id });
       const value = (result.value ?? {}) as Record<string, unknown>, state = String(value.phase ?? value.status ?? '');
       if (!result.ok || terminal.has(state) || (waiting.kind === 'workflow' && state !== 'running')) {
-        if (waiting.kind === 'media' && value.usage && typeof (value.usage as { cost?: unknown }).cost === 'number') { run.usage.cost += (value.usage as { cost: number }).cost; run.usage.unknownCostCalls = Math.max(0, run.usage.unknownCostCalls - 1); await this.spend(run.projectId, 'media', (value.usage as { cost: number }).cost, true); }
+        if (waiting.kind === 'media' && value.usage && typeof (value.usage as { cost?: unknown }).cost === 'number') {
+          const key = run.id + '.' + (waiting.execId ?? waiting.id) + '.settled';
+          if (!run.settledToolExecIds?.includes(key)) { run.usage.cost += (value.usage as { cost: number }).cost; run.usage.unknownCostCalls = Math.max(0, run.usage.unknownCostCalls - 1); (run.settledToolExecIds ??= []).push(key); }
+          await this.spend(run.projectId, 'media', (value.usage as { cost: number }).cost, true, key);
+        }
         run.messages.push({ role: 'tool', tool_call_id: waiting.callId, content: bound(JSON.stringify(result.ok ? { id: waiting.id, state, message: value.message, error: value.error, hint: state === 'ready' ? '素材已就绪：调用 media_apply 采用' : undefined } : { error: result.error?.message })) });
         delete run.waiting; run.status = 'running'; run.message = '生成任务已结束'; await this.save(run); return;
       }
