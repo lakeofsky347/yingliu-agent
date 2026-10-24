@@ -58,10 +58,31 @@ export class AgentService {
     const [story, ledger, qc] = await Promise.all([this.stories.raw(projectId), this.ledgers.raw(projectId), this.qcs.raw(projectId)]);
     return Object.fromEntries(Object.entries({ story, ledger, qc }).filter(([, value]) => value !== undefined)) as Record<'story' | 'ledger' | 'qc', unknown>;
   }
-  /** Restore agent data into a (new) project ID. Values are validated as objects with an integer version; projectId is rewritten. */
+  /** R06: structural validation of imported agent documents (types of every field the services read). Throws before anything is written. */
+  validateDocs(docs: Partial<Record<'story' | 'ledger' | 'qc', unknown>>): void {
+    const obj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+    const num = (v: unknown, min = 0) => typeof v === 'number' && Number.isFinite(v) && v >= min;
+    const str = (v: unknown) => typeof v === 'string';
+    const optStr = (v: unknown) => v === undefined || str(v);
+    const strs = (v: unknown) => v === undefined || Array.isArray(v) && v.every(str);
+    const checks: Record<'story' | 'ledger' | 'qc', (v: Record<string, unknown>) => boolean> = {
+      story: v => (v.shots === undefined || Array.isArray(v.shots) && v.shots.every(s => obj(s) && str(s.id) && (s.durationSeconds === undefined || num(s.durationSeconds)) && strs(s.characters) && optStr(s.summary) && optStr(s.dialogue) && optStr(s.shotType) && optStr(s.camera) && optStr(s.shotId)))
+        && (v.characters === undefined || Array.isArray(v.characters) && v.characters.every(c => obj(c) && str(c.id) && str(c.name) && strs(c.features) && strs(c.referenceAssetIds) && optStr(c.description) && optStr(c.voice)))
+        && (v.style === undefined || obj(v.style)) && (v.consistency === undefined || obj(v.consistency) && Object.values(v.consistency).every(c => obj(c) && num(c.score)))
+        && optStr(v.title) && optStr(v.logline) && (v.targetSeconds === undefined || num(v.targetSeconds)) && (v.status === undefined || v.status === 'empty' || v.status === 'approved'),
+      ledger: v => (v.spent === undefined || num(v.spent)) && (v.unknownCostCalls === undefined || Number.isSafeInteger(v.unknownCostCalls) && (v.unknownCostCalls as number) >= 0)
+        && (v.maxCost === undefined || v.maxCost === null || num(v.maxCost)) && optStr(v.currency)
+        && (v.byTool === undefined || obj(v.byTool) && Object.values(v.byTool).every(t => obj(t) && Number.isSafeInteger(t.calls) && (t.calls as number) >= 0 && num(t.cost))),
+      qc: v => v.report === undefined || obj(v.report) && typeof v.report.pass === 'boolean' && Array.isArray(v.report.issues) && v.report.issues.every(i => obj(i) && str(i.message) && str(i.check) && str(i.severity)) && strs(v.report.unchecked),
+    };
+    for (const [name, value] of Object.entries(docs) as ['story' | 'ledger' | 'qc', unknown][]) {
+      if (value === undefined) continue;
+      if (!checks[name] || !obj(value) || !Number.isSafeInteger(value.version) || !checks[name](value)) throw new Error('工程包中的智能体资料损坏：' + name);
+    }
+  }
+  /** Restore agent data into a (new) project ID. All documents are validated first (nothing is written if any is invalid); projectId is rewritten. */
   async importDocs(projectId: string, docs: Partial<Record<'story' | 'ledger' | 'qc', unknown>>): Promise<void> {
-    const valid = (value: unknown): value is { version: number } & Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value) && Number.isSafeInteger((value as { version?: unknown }).version);
-    for (const [name, value] of Object.entries(docs)) if (value !== undefined && !valid(value)) throw new Error('工程包中的智能体资料损坏：' + name);
+    this.validateDocs(docs);
     if (docs.story) await this.stories.put(projectId, { ...(docs.story as Story), projectId } as Story);
     if (docs.ledger) await this.ledgers.put(projectId, { ...emptyLedger(projectId), ...(docs.ledger as Ledger), projectId });
     if (docs.qc) await this.qcs.put(projectId, docs.qc as { version: number; report?: QcReport });

@@ -138,3 +138,19 @@ test('backup carries agent story, budget ledger and QC, restored under the new p
     const plain=await importProjectArchive(f.backend,{dataBase64:exported.dataBase64});assert.ok(plain.project,'archives with agent data still import without hooks');
   }finally{await f.close();}
 });
+test('R06: importDocs rejects structurally invalid story/ledger/QC documents and writes nothing',async()=>{
+  const {AgentService}=await import('../src/agent/service.ts');const f=await fixture();
+  try{
+    const agent=new AgentService(join(f.directory,'agent-runs'),{} as never,{dataDirectory:join(f.directory,'agent-data'),resolveModel:async()=>{throw new Error('unused');}} as never);
+    const bad:Record<string,unknown>[]=[
+      {story:{version:1,shots:'not-an-array',characters:[]}},
+      {story:{version:1,shots:[{id:'s1',durationSeconds:'long'}],characters:[]}},
+      {story:{version:1,shots:[],characters:[{id:'c1',name:'A',features:'x'}]}},
+      {ledger:{version:1,spent:'12',byTool:{}}},
+      {ledger:{version:1,spent:1,byTool:{gen:{calls:'1',cost:0}}}},
+      {qc:{version:1,report:{pass:true,checkedAt:'x',issues:'none',unchecked:[]}}},
+      {story:{version:1,shots:[],characters:[]},ledger:{version:1,spent:-5,byTool:{}}},
+    ];
+    for(const docs of bad){await assert.rejects(agent.importDocs('p-'+bad.indexOf(docs),docs),/智能体资料损坏/,JSON.stringify(docs));assert.deepEqual(await agent.exportDocs('p-'+bad.indexOf(docs)),{},'nothing written for '+JSON.stringify(docs));}
+  }finally{await f.close();}
+});
