@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { createApplication, ENDPOINTS } from '../app/application.ts';
 import { startUiServer } from '../app/ui-server.ts';
 import { NativeSecrets } from './native-secrets.ts';
+import { editorWebPreferences } from './web-preferences.ts';
 
 app.setName('映流智能体');
 app.commandLine.appendSwitch('site-per-process');
@@ -25,7 +26,7 @@ if(ownsApplication)void app.whenReady().then(async()=>{
   editorSession.setPermissionRequestHandler((_webContents,_permission,callback)=>callback(false));
   editorSession.setPermissionCheckHandler(()=>false);
   const window=new BrowserWindow({width:1600,height:1000,minWidth:1100,minHeight:700,title:'映流智能体',backgroundColor:'#0e1117',
-    webPreferences:{preload:join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true,session:editorSession}});
+    webPreferences:editorWebPreferences(join(__dirname,'preload.cjs'),editorSession)});
   window.webContents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
   const trusted=(event:Electron.IpcMainInvokeEvent)=>event.sender===window.webContents&&event.senderFrame!==null&&event.senderFrame.parent===null&&event.senderFrame.frameTreeNodeId===window.webContents.mainFrame.frameTreeNodeId&&new URL(event.senderFrame.url).origin===server.origin;
   ipcMain.handle('yingliu:call',(event,endpoint:unknown,payload:unknown)=>{if(!trusted(event)||typeof endpoint!=='string'||!ENDPOINTS.has(endpoint))throw new Error('此窗口无法调用应用服务');return application.route(endpoint,payload);});

@@ -91,7 +91,8 @@ async function closeServer(server:Server):Promise<void> {
  * UDP at all) and remove the WebRTC constructors from every frame before scene code runs.
  */
 export const WEBRTC_LOCKDOWN_ARGS=['--force-webrtc-ip-handling-policy=disable_non_proxied_udp','--webrtc-ip-handling-policy=disable_non_proxied_udp'];
-export const WEBRTC_LOCKDOWN_SCRIPT=`(()=>{for(const name of ['RTCPeerConnection','webkitRTCPeerConnection','RTCDataChannel','RTCIceCandidate','RTCSessionDescription','RTCRtpSender','RTCRtpReceiver','RTCRtpTransceiver']){try{Object.defineProperty(globalThis,name,{value:undefined,configurable:false,writable:false});}catch{}}})();`;
+import { WEBRTC_LOCKDOWN_SCRIPT } from '../shared/webrtc-lockdown.ts';
+export { WEBRTC_LOCKDOWN_SCRIPT };
 export class VideoRenderer {
   private servers=new Map<string,ProjectServer>();
   private pendingServers=new Map<string,Promise<ProjectServer>>();
