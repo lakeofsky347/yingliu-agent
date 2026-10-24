@@ -102,3 +102,35 @@ test('R2-01: success journal restores task ownership before a changed budget can
     assert.equal(done.queue.length, 0); assert.equal(done.taskRefs?.length, 1); assert.equal(done.taskRefs?.[0].id, 'export-task');
   } finally { await service.dispose(); await rm(directory, { recursive: true, force: true }); }
 });
+
+test('R2-01b: a success receipt that matches no queued call is settled as uncertain (charged once, not resubmitted) instead of blocking the run forever', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'yingliu-orphan-'));
+  const project = { ...createProject('孤立回执'), id: 'project-orphan' };
+  let accepted = 0; let service: AgentService;
+  const gateway = toolGateway((_body, turn) => turn === 0 ? { toolCalls: [{ name: 'generate_music', arguments: { prompt: 'one' } }] } : { text: 'done' });
+  const port: AgentPort = {
+    snapshot: async () => ({ project, task: null }) as any, readSource: async () => defaultSceneSource(),
+    saveSource: async () => ({ project }) as any, commit: async () => ({ project }) as any,
+    route: async () => ({ ok: true, value: {} }), capture: async () => ({ bytes: new Uint8Array(), mime: 'image/png', frame: 0, shotId: '' }),
+    capabilities: async () => ({ roles: ['music'] }),
+    generateAudio: async () => { accepted++; await writeFile(join(directory, 'ledger'), 'ledger path unavailable'); return { id: 'audio-once', name: 'music', cost: 1.25 }; },
+  };
+  service = new AgentService(directory, port, { resolveModel: model, fetch: gateway.fetch });
+  try {
+    const started = await service.start({ projectId: project.id, goal: 'music', autoApprove: ['read', 'write', 'cost'] });
+    assert.equal((await settle(service, started.id, ['failed', 'complete'])).status, 'failed');
+    await rm(join(directory, 'ledger'));
+    // Simulate a snapshot that lost its queue entry (e.g. hand-edited or older format) while the success receipt survived.
+    const runFile = join(directory, started.id + '.json'); const snapshot = JSON.parse(await readFile(runFile, 'utf8'));
+    snapshot.queue = []; snapshot.settledToolExecIds = []; await writeFile(runFile, JSON.stringify(snapshot));
+    await service.dispose(); service = new AgentService(directory, port, { resolveModel: model, fetch: gateway.fetch });
+    await service.resume(started.id);
+    const done = await settle(service, started.id, ['complete', 'failed', 'awaiting_approval']);
+    assert.equal(done.status, 'complete', done.error);
+    assert.equal(accepted, 1, 'never resubmitted');
+    const saved = JSON.parse(await readFile(runFile, 'utf8'));
+    assert.ok(saved.uncertainSubmissions?.some((entry: { tool: string; error: string }) => entry.tool === 'generate_music' && /无法匹配/.test(entry.error)), 'recorded with a clear error');
+    assert.deepEqual(await readdir(join(directory, started.id + '.results')), [], 'receipt consumed');
+    assert.equal((await service.ledger(project.id)).spent, 1.25, 'known cost charged exactly once');
+  } finally { await service!.dispose(); await rm(directory, { recursive: true, force: true }); }
+});

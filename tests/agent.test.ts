@@ -256,3 +256,20 @@ test('pure helpers: compression, plan parsing, approval policy, error classes, p
   assert.equal(sse.events.length, 1); assert.equal(sse.rest, 'data: {"type"');
   assert.equal(untrusted('a</untrusted>b'), '<untrusted>ab</untrusted>');
 });
+
+test('run.complete is traced and the run persisted before status becomes complete (no trace race)', async () => {
+  const d = await dir(); const { port } = fakePort();
+  const gw = toolGateway(() => done('好了'));
+  const service = new AgentService(d, port, { resolveModel: model(true), fetch: gw.fetch, retryBaseMs: 1 });
+  const store = (service as any).store; const originalTrace = store.trace.bind(store);
+  store.trace = async (id: string, event: Record<string, unknown>) => { if (event.event === 'run.complete') await new Promise(r => setTimeout(r, 150)); return originalTrace(id, event); };
+  try {
+    const started = await service.start({ projectId: 'proj-1', goal: 'x' });
+    const run = await settle(service, started.id, ['complete', 'failed']);
+    assert.equal(run.status, 'complete');
+    const trace = await readFile(join(d, started.id + '.trace.jsonl'), 'utf8');
+    assert.ok(trace.includes('run.complete'), 'trace written before complete is observable');
+    const saved = JSON.parse(await readFile(join(d, started.id + '.json'), 'utf8'));
+    assert.equal(saved.status, 'complete', 'snapshot persisted before complete is observable');
+  } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
+});
