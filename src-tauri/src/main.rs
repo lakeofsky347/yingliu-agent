@@ -82,6 +82,8 @@ fn main() {
                 // Navigation escape guard: the main WebView may only show the editor origin.
                 .on_navigation(move |u| u.origin().ascii_serialization() == allowed)
                 .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+                // Measurement hook for docs/p0/MEASUREMENT.md (cold start = process spawn → editor page load finished).
+                .on_page_load(|w, p| if matches!(p.event(), tauri::webview::PageLoadEvent::Finished) { eprintln!("[p0-shell] page-load-finished url={} pid={}", p.url().origin().ascii_serialization(), std::process::id()); let _ = w; })
                 .build()?;
             app.manage(Sidecar { child: Mutex::new(Some(child)), stdin: Mutex::new(Some(stdin)), origin });
             if std::env::var("YINGLIU_P0_EXIT_AFTER_READY").is_ok() {
