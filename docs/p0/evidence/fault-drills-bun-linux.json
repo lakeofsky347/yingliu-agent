@@ -1,0 +1,50 @@
+{
+  "sidecar": "/workspace/yingliu-agent-verify/dist-p0/bun-linux-x64/yingliu-sidecar",
+  "at": "2026-10-24T07:56:31.171Z",
+  "results": [
+    {
+      "drill": "crash-during-render",
+      "ok": true,
+      "renderersSeen": [
+        "chrome",
+        "chrome",
+        "chrome",
+        "chrome",
+        "chrome",
+        "chrome"
+      ],
+      "orphansAfter3s": [],
+      "restartAcquiredLockMs": 300,
+      "runStatusAfterRestart": "paused",
+      "runMessage": "应用重启时运行被中断，可点击「继续」从断点恢复",
+      "uncertain": 1,
+      "taskStatuses": [
+        null
+      ],
+      "autoResubmittedRender": false,
+      "projectRevision": 1
+    },
+    {
+      "drill": "cancel-during-render",
+      "ok": true,
+      "runStatus": "cancelled",
+      "cancelMs": 17,
+      "renderProcessesLeft": [],
+      "healthy": true,
+      "projectId": "film-1bb078c6-5603-470f-b74a-5a03332a602e"
+    },
+    {
+      "drill": "client-disconnect",
+      "ok": true,
+      "sidecarAlive": true,
+      "projectsAfter": 0,
+      "note": "中断的 create 是否已受理由 list 判定；P1 requestId 将使其可查询"
+    },
+    {
+      "drill": "host-stdin-closed",
+      "ok": true,
+      "exit": 0,
+      "relaunchOk": true
+    }
+  ]
+}
