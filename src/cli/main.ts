@@ -14,7 +14,7 @@ import { MODEL_PROTOCOLS, MODEL_ROLES, ROLE_OUTPUT, ROLE_PROTOCOLS, type Modalit
 import { MOCK_BASE_URL, mockFetch, installMockNetworkGuard } from './mock.ts';
 import { acquireOwner, BusyError } from './lock.ts';
 
-export const EXIT = { OK: 0, ERROR: 1, USAGE: 2, NOT_FOUND: 3, NEEDS_APPROVAL: 4, BUDGET: 5, ENVIRONMENT: 6, RUN_FAILED: 7, TIMEOUT: 8, BUSY: 9, CONFIG: 10 } as const;
+export const EXIT = { OK: 0, ERROR: 1, USAGE: 2, NOT_FOUND: 3, NEEDS_APPROVAL: 4, BUDGET: 5, ENVIRONMENT: 6, RUN_FAILED: 7, TIMEOUT: 8, BUSY: 9, CONFIG: 10, STARTUP: 11 } as const;
 export class CliError extends Error { details?: Record<string, unknown>; constructor(public code: keyof typeof EXIT, message: string) { super(message); } }
 
 type Flags = Record<string, string | boolean>;
@@ -253,15 +253,18 @@ export async function runCli(argv: string[], io: { out: (s: string) => void; err
   if (positional[0] === 'doctor') { const r = doctor(); return emit(true, r.data, r.exit); }
   // C03: the CLI process is the only owner of a run (no resident service), so a run cannot outlive it; refuse instead of abandoning it.
   if (flags['no-wait'] !== undefined) return emit(false, { code: 'USAGE', message: '不支持 --no-wait：CLI 没有常驻进程，命令退出后运行会被中断。请去掉 --no-wait 并用 --timeout <秒> 控制等待；超时后运行会暂停，可用 agent resume 继续' }, EXIT.USAGE);
-  const dir = dataDirectory(); await mkdir(dir, { recursive: true });
+  const dir = dataDirectory();
   const secrets = new EnvSecrets(join(dir, 'cli-key-env.json')), mock = flags.mock === true;
+  // C07: every startup failure becomes a single ok:false line with code STARTUP (BUSY/CONFIG/USAGE keep their own codes).
+  const startup = async <T,>(what: string, work: () => Promise<T>): Promise<T> => { try { return await work(); } catch (e) { if (e instanceof CliError) throw e; throw new CliError('STARTUP', `启动失败（${what}）：${e instanceof Error ? e.message : String(e)}`); } };
   let app: App | undefined, release: (() => Promise<void>) | undefined; const unguard = mock ? installMockNetworkGuard() : undefined;
   try {
     const projects = process.env.YINGLIU_PROJECTS ? resolve(process.env.YINGLIU_PROJECTS) : join(dir, 'projects'), readOnly = isReadOnly(positional, flags);
     const lockSeconds = flags['lock-timeout'] === undefined ? 30 : Number(flags['lock-timeout']); if (!Number.isFinite(lockSeconds) || lockSeconds < 0) throw new CliError('USAGE', '--lock-timeout 必须是非负数字');
-    try { release = await acquireOwner([dir, projects], positional.slice(0, 2).join(' '), lockSeconds * 1000); } catch (e) { if (e instanceof BusyError) throw new CliError('BUSY', e.message); throw e; }
+    await startup('创建数据目录 ' + dir, () => mkdir(dir, { recursive: true }));
+    await startup('获取数据目录锁', async () => { try { release = await acquireOwner([dir, projects], positional.slice(0, 2).join(' '), lockSeconds * 1000); } catch (e) { if (e instanceof BusyError) throw new CliError('BUSY', e.message); throw e; } });
     if (!readOnly || positional[0] === 'models') await secrets.check(); // C06: a broken key map fails up front with CONFIG instead of surfacing as a provider error
-    app = await createApplication({ dataDirectory: dir, projectsDirectory: projects, credentials: secrets, ...(mock ? { fetch: mockFetch(), resumeRemoteTasks: false } : {}), ...(readOnly ? { recover: false } : {}) });
+    app = await startup('初始化应用', () => createApplication({ dataDirectory: dir, projectsDirectory: projects, credentials: secrets, ...(mock ? { fetch: mockFetch(), resumeRemoteTasks: false } : {}), ...(readOnly ? { recover: false } : {}) }));
     const ctx: Ctx = { app, secrets, flags, mock };
     if (mock && !readOnly) await ensureMockModels(ctx);
     const r = await dispatch(ctx, positional);

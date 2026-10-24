@@ -42,8 +42,9 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 | 6 | ENVIRONMENT | doctor 未通过，或导出缺少 Chromium/ffmpeg |
 | 7 | RUN_FAILED | 运行状态为 failed/cancelled，或导出任务失败 |
 | 8 | TIMEOUT | 等待超时（运行已暂停） |
-| 10 | CONFIG | `cli-key-env.json` 损坏或无法读写（原文件保持不变） |
 | 9 | BUSY | 该数据目录正被另一个 yingliu 进程占用（等待 `--lock-timeout` 秒后仍未释放） |
+| 10 | CONFIG | `cli-key-env.json` 损坏或无法读写（原文件保持不变） |
+| 11 | STARTUP | 启动失败（数据目录无法创建、锁文件无法写入、应用状态无法加载等）；`--json` 下只输出一行 `ok:false` |
 
 ## 命令参考
 
