@@ -172,3 +172,24 @@ test('R07: an archive with invalid agent docs is rejected before any project is 
     assert.equal((await f.backend.call<{projects:unknown[]}>('list',{})).projects.length,before,'rolled-back import is not left active');
   }finally{await f.close();}
 });
+test('PR1-R06: every required Story/Character/Shot field is enforced before registration; compliant legacy stories are migrated and usable by all consumers',async()=>{
+  const {AgentService}=await import('../src/agent/service.ts');const {storyBrief,anchorPrompt}=await import('../src/agent/story.ts');const f=await fixture();
+  try{
+    const agent=new AgentService(join(f.directory,'agent-runs'),{} as never,{dataDirectory:join(f.directory,'agent-data'),resolveModel:async()=>{throw new Error('unused');}} as never);
+    const full=()=>({version:3,status:'approved',title:'T',logline:'L',targetSeconds:10,style:{look:'a',palette:'b',typography:'c',motion:'d',negative:'e'},consistency:{},updatedAt:'2026-01-01T00:00:00.000Z',
+      characters:[{id:'c1',name:'阿明',description:'d',features:['红围巾'],referenceAssetIds:[]}],
+      shots:[{id:'s1',summary:'开场',shotType:'wide',camera:'static',durationSeconds:3,dialogue:'',characters:['c1'],continueFromPrevious:false}]});
+    const required:[string,(s:any)=>void][]=[
+      ['character.id',s=>delete s.characters[0].id],['character.name',s=>delete s.characters[0].name],['character.features',s=>delete s.characters[0].features],['character.referenceAssetIds',s=>delete s.characters[0].referenceAssetIds],
+      ['shot.id',s=>delete s.shots[0].id],['shot.summary',s=>delete s.shots[0].summary],['shot.durationSeconds',s=>delete s.shots[0].durationSeconds],['shot.characters',s=>delete s.shots[0].characters],
+      ['shot.characters unknown id',s=>{s.shots[0].characters=['ghost'];}],['version',s=>delete s.version],['style.look type',s=>{s.style.look=5;}],
+    ];
+    for(const [name,mutate] of required){const story=full();mutate(story);assert.throws(()=>agent.validateDocs({story}),/智能体资料损坏/,name);await assert.rejects(agent.importDocs('p-'+name.replace(/\W/g,''),{story}),/智能体资料损坏/,name);}
+    // legacy document: optional/defaultable fields absent (no style/consistency/description/shotType/camera/dialogue/continueFromPrevious/title/logline/targetSeconds)
+    const legacy={version:1,status:'approved',characters:[{id:'c1',name:'阿明',features:[],referenceAssetIds:[]}],shots:[{id:'s1',summary:'开场',durationSeconds:3,characters:['c1']}]};
+    agent.validateDocs({story:legacy});await agent.importDocs('legacy',{story:legacy});
+    const stored=await agent.story('legacy');
+    assert.match(storyBrief(stored),/阿明/);assert.equal(typeof anchorPrompt(stored,['c1']),'string');
+    assert.equal(stored.characters[0].description,'');assert.equal(stored.shots[0].continueFromPrevious,false);assert.deepEqual(stored.consistency,{});
+  }finally{await f.close();}
+});
