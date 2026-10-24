@@ -402,8 +402,9 @@ export class AgentService {
       respond(JSON.stringify({ error: message, hint: kind === 'conflict' ? '工程版本已变化：先调用 project_get 获取最新 revision 再重试' : kind === 'retry' ? '临时故障，已重试多次' : '请修正参数或换一种方法' }));
       await this.save(run); return 'next';
     }
-    delete run.inFlight; // outcome known (success); recorded below even if the run is being stopped
-    signal.throwIfAborted();
+    // PR1-R03 single durable commit point: a known success (even one that arrives after pause/cancel aborted the signal) is
+    // charged, answered and dequeued in the same save that clears inFlight; only then is the stop request honoured.
+    delete run.inFlight;
     chargeTool(run.usage, result.cost, tool.risk); if (tool.risk === 'cost') await this.spend(run.projectId, tool.name, result.waitFor ? null : result.cost);
     if (tool.risk === 'write') meta.dirty = true;
     if (result.images?.length) {
@@ -411,8 +412,8 @@ export class AgentService {
       else result = { ...result, content: result.content + '（画面已截取；当前模型或设置不允许发送图片，请用 visual_review 或 render_check 检查）' };
     }
     await this.finishStep(run, step, { status: 'complete', summary: bound(result.content, 300) });
-    if (result.waitFor) { run.waiting = { ...result.waitFor, callId: call.id }; run.queue.shift(); run.status = 'waiting_task'; run.message = '等待生成任务完成'; await this.save(run); return 'next'; }
-    respond(result.content); await this.save(run); return 'next';
+    if (result.waitFor) { run.waiting = { ...result.waitFor, callId: call.id }; run.queue.shift(); run.status = 'waiting_task'; run.message = '等待生成任务完成'; await this.save(run); signal.throwIfAborted(); return 'next'; }
+    respond(result.content); await this.save(run); signal.throwIfAborted(); return 'next';
   }
 
   private async awaitTask(run: AgentRun, signal: AbortSignal): Promise<void> {

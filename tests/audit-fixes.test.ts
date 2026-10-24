@@ -286,3 +286,28 @@ for (const mode of ['pause', 'restart'] as const) test(`R03: a paid call in flig
     assert.equal(submissions, 1);
   } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
 });
+
+test('PR1-R03: a paid call that succeeds after the pause signal is committed once (receipt, charge, dequeue) and never resubmitted', async () => {
+  const d = await dir(); let submissions = 0;
+  const { port } = fakePort({ capabilities: async () => ({ roles: ['sfx'] }), generateAudio: async (_p, _r, _t, { signal }) => { if (++submissions > 1) return { id: 'asset-' + submissions, name: '风声', cost: 0.5 }; return new Promise(resolve => signal.addEventListener('abort', () => setTimeout(() => resolve({ id: 'asset-late', name: '风声', cost: 0.5 }), 5), { once: true })); } });
+  const gw = toolGateway((_b, turn) => turn < 3 ? { toolCalls: [{ name: 'generate_sfx', arguments: { prompt: '风声', durationSeconds: 1 } }] } : done());
+  const service = new AgentService(d, port, { resolveModel: model(), fetch: gw.fetch, retryBaseMs: 1 });
+  try {
+    const started = await service.start({ projectId: 'proj-1', goal: '音效', autoApprove: ['read', 'write', 'cost'] });
+    for (let i = 0; i < 500 && submissions === 0; i++) await new Promise(r => setTimeout(r, 5));
+    await service.pause(started.id);
+    let run = await service.get(started.id);
+    assert.equal(run.status, 'paused');
+    assert.equal(run.queue.length, 0, 'the completed call is dequeued');
+    assert.equal(run.inFlight, undefined);
+    assert.equal(run.uncertainSubmissions?.length ?? 0, 0, 'a known success is not recorded as unknown');
+    assert.equal(run.usage.cost, 0.5, 'charge recorded');
+    assert.equal((await service.ledger('proj-1')).spent, 0.5, 'ledger matches the success receipt');
+    assert.ok(run.transcript.some(m => m.role === 'tool' && String(m.content).includes('asset-late')), 'success receipt answered to the model');
+    await service.resume(started.id);
+    run = await settle(service, started.id, ['awaiting_approval', 'complete', 'failed', 'paused']);
+    // the scripted model asks again on later turns; whatever happens, the first logical request was submitted once before resume
+    assert.ok(submissions >= 1);
+    assert.equal((await service.ledger('proj-1')).byTool['generate_sfx']?.calls, submissions, 'every submission is charged exactly once');
+  } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
+});
