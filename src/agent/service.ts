@@ -382,7 +382,10 @@ export class AgentService {
         const review = await this.selfCheck(run, signal);
         if (review && !review.pass) { run.messages.push({ role: 'user', content: `自检（第 ${run.reviewRounds} 轮）发现问题，请修复后再总结：\n${review.text}` }); await this.save(run); continue; }
       }
-      run.status = 'complete'; run.final = turn.content; run.message = '已完成'; await this.store.trace(run.id, { event: 'run.complete', usage: run.usage }); await this.save(run); return;
+      // Trace and persist the terminal snapshot before 'complete' is observable in memory (readers may act on it immediately).
+      await this.store.trace(run.id, { event: 'run.complete', usage: run.usage });
+      const final = { ...run, status: 'complete' as const, final: turn.content, message: '已完成', updatedAt: now() }; await this.store.save(final);
+      run.status = 'complete'; run.final = turn.content; run.message = '已完成'; run.updatedAt = final.updatedAt; this.emit({ type: 'run', run: this.public(run) }); return;
     }
   }
 
