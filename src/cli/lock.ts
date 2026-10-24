@@ -22,8 +22,20 @@ async function targetFor(directory: string): Promise<LockTarget> {
   if (!info.isDirectory()) throw new Error('工程锁目标不是目录：' + path);
   // Some filesystems do not expose a file ID. The canonical path is a conservative fallback.
   const identity = info.ino !== 0n ? `${info.dev}:${info.ino}` : (process.platform === 'win32' ? path.toLowerCase() : path);
+  return { path, identity, port: lockPortFor(identity) };
+}
+
+/** Outside every common ephemeral range (Linux 32768-60999, Windows/macOS/IANA 49152-65535), so outgoing connections never
+ *  squat a lock port. YINGLIU_LOCK_PORT pins one port for all directories (profile-wide lock) when the derived one collides. */
+export const LOCK_PORT_RANGE = { min: 21000, max: 28999 } as const;
+export function lockPortFor(identity: string, env: NodeJS.ProcessEnv = process.env): number {
+  const override = env.YINGLIU_LOCK_PORT;
+  if (override !== undefined && override !== '') {
+    if (!/^\d+$/.test(override) || Number(override) < 1024 || Number(override) > 65535) throw new Error('YINGLIU_LOCK_PORT 必须是 1024-65535 之间的整数');
+    return Number(override);
+  }
   const hash = createHash('sha256').update('yingliu-owner-v1\0' + identity).digest();
-  return { path, identity, port: 49152 + hash.readUInt32BE(0) % 16384 };
+  return LOCK_PORT_RANGE.min + hash.readUInt32BE(0) % (LOCK_PORT_RANGE.max - LOCK_PORT_RANGE.min + 1);
 }
 
 /** Binding is the authority, not the diagnostic banner or any file. Hash collisions remain BUSY. */
