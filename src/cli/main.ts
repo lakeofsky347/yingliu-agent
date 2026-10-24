@@ -10,6 +10,7 @@ import { dirname, join, resolve } from 'node:path';
 import { createApplication } from '../app/application.ts';
 import { detectEnvironment } from '../host/renderer.ts';
 import type { SecretStore } from '../app/contracts.ts';
+import { MODEL_PROTOCOLS, MODEL_ROLES, ROLE_OUTPUT, ROLE_PROTOCOLS, type Modality, type ModelProtocol, type ModelRole } from '../models/contracts.ts';
 import { MOCK_BASE_URL, mockFetch, installMockNetworkGuard } from './mock.ts';
 import { acquireOwner, BusyError } from './lock.ts';
 
@@ -124,7 +125,7 @@ export const HELP = `yingliu — 映流智能体 headless CLI（详见 docs/CLI.
   agent status <runId> [--trace] | resume <runId> | approve <runId> --call <callId> --exec <execId> [--args-hash h] | reject <runId> --call <callId> --exec <execId> [--reason r]
   story show <projectId> | qc show <projectId> [--run] | ledger show <projectId>
   render <projectId> | export mp4 <projectId> [--out <file>]
-  models list | models add --name <n> --base-url <url> --model <m> [--protocol chat-completions] [--role director] [--api-key-env ENV_NAME]`;
+  models list | models add --name <n> --base-url <url> --model <m> [--protocol chat-completions|images|video-gateway|speech|async-task] [--role <按协议默认>|none] [--output-modality text|image|video|audio] [--api-key-env ENV_NAME]`;
 
 async function dispatch(ctx: Ctx, pos: string[]): Promise<{ data: unknown; exit?: number }> {
   const [group, sub, arg] = pos, f = ctx.flags;
@@ -177,13 +178,37 @@ async function dispatch(ctx: Ctx, pos: string[]): Promise<{ data: unknown; exit?
         return { data: { connections, models: list.models, roles: list.roles } };
       }
       case 'add': {
-        const envName = str(f, 'api-key-env'); if (envName && !process.env[envName]) throw new CliError('USAGE', `环境变量 ${envName} 未设置`);
-        const conn = await call(ctx, 'models.connection.save', { name: str(f, 'name', true), protocol: str(f, 'protocol') ?? 'chat-completions', baseUrl: str(f, 'base-url', true), auth: envName ? 'bearer' : 'none' });
-        if (envName) await ctx.secrets.bind(conn.credentialRef, envName);
-        const role = str(f, 'role') ?? 'director';
-        const model = await call(ctx, 'models.model.save', { connectionId: conn.id, model: str(f, 'model', true), inputModalities: ['text'], outputModalities: ['text'], parameters: {} });
-        if (role !== 'none') await call(ctx, 'models.role.bind', { role, modelId: model.id });
-        return { data: { connectionId: conn.id, modelId: model.id, role, apiKeyEnv: envName ?? null } };
+        // C05: precheck everything (protocol, role, modality, key env) before any write; then save and roll back on failure.
+        const protocol = (str(f, 'protocol') ?? 'chat-completions') as ModelProtocol;
+        if (!MODEL_PROTOCOLS.includes(protocol)) throw new CliError('USAGE', `未知协议 ${protocol}；可选：${MODEL_PROTOCOLS.join(', ')}`);
+        const fixed: Partial<Record<ModelProtocol, Modality>> = { 'chat-completions': 'text', images: 'image', 'video-gateway': 'video', speech: 'audio' };
+        const defaults: Partial<Record<ModelProtocol, ModelRole>> = { 'chat-completions': 'director', images: 'image', 'video-gateway': 'video', speech: 'speech' };
+        const roleFlag = str(f, 'role'), role = (roleFlag ?? defaults[protocol] ?? 'none') as ModelRole | 'none';
+        if (role !== 'none' && !MODEL_ROLES.includes(role)) throw new CliError('USAGE', `未知角色 ${role}；可选：${MODEL_ROLES.join(', ')}, none`);
+        if (role !== 'none' && !ROLE_PROTOCOLS[role].includes(protocol)) throw new CliError('USAGE', `协议 ${protocol} 不能绑定角色 ${role}（该角色支持：${ROLE_PROTOCOLS[role].join(', ')}）`);
+        const modalityFlag = str(f, 'output-modality') as Modality | undefined;
+        if (modalityFlag && !['text', 'image', 'video', 'audio'].includes(modalityFlag)) throw new CliError('USAGE', '--output-modality 必须是 text、image、video 或 audio');
+        const output = modalityFlag ?? (role !== 'none' ? ROLE_OUTPUT[role] : fixed[protocol]);
+        if (!output) throw new CliError('USAGE', `协议 ${protocol} 需要 --role（如 music/sfx/image/video/speech）或 --output-modality 来确定模型输出`);
+        if (fixed[protocol] && output !== fixed[protocol]) throw new CliError('USAGE', `协议 ${protocol} 的输出只能是 ${fixed[protocol]}`);
+        if (role !== 'none' && output !== ROLE_OUTPUT[role]) throw new CliError('USAGE', `角色 ${role} 需要输出 ${ROLE_OUTPUT[role]}，与 --output-modality ${output} 冲突`);
+        const envName = str(f, 'api-key-env');
+        if (envName && !/^[A-Z_][A-Z0-9_]{0,100}$/.test(envName)) throw new CliError('USAGE', '--api-key-env 必须是环境变量名（大写字母、数字、下划线）');
+        if (envName && !process.env[envName]) throw new CliError('USAGE', `环境变量 ${envName} 未设置`);
+        const name = str(f, 'name', true)!, baseUrl = str(f, 'base-url', true)!, modelName = str(f, 'model', true)!;
+        let conn: any, model: any, bound = false;
+        try {
+          conn = await call(ctx, 'models.connection.save', { name, protocol, baseUrl, auth: envName ? 'bearer' : 'none' });
+          if (envName) { await ctx.secrets.bind(conn.credentialRef, envName); bound = true; }
+          model = await call(ctx, 'models.model.save', { connectionId: conn.id, model: modelName, inputModalities: ['text'], outputModalities: [output], parameters: {} });
+          if (role !== 'none') await call(ctx, 'models.role.bind', { role, modelId: model.id });
+        } catch (error) {
+          if (model) await call(ctx, 'models.model.remove', { id: model.id }).catch(() => {});
+          if (conn) await call(ctx, 'models.connection.remove', { id: conn.id }).catch(() => {});
+          if (bound) await ctx.secrets.delete(conn.credentialRef).catch(() => {});
+          throw error instanceof CliError ? error : new CliError('USAGE', '添加模型失败，已回滚：' + (error instanceof Error ? error.message : String(error)));
+        }
+        return { data: { connectionId: conn.id, modelId: model.id, protocol, outputModality: output, role, apiKeyEnv: envName ?? null } };
       }
     } break;
   }

@@ -64,7 +64,7 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 | `ledger show <projectId>` | `{spent, maxCost, currency, unknownCostCalls, byTool}` |
 | `render <projectId>` / `export mp4 <projectId> [--out F]` | `{projectId, path, output}` |
 | `models list` | `{connections:[{id,name,protocol,baseUrl,auth,hasKey,apiKeyEnv}], models, roles}` |
-| `models add --name N --base-url U --model M [--protocol P] [--role R\|none] [--api-key-env ENV]` | `{connectionId, modelId, role, apiKeyEnv}` |
+| `models add --name N --base-url U --model M [--protocol P] [--role R\|none] [--output-modality O] [--api-key-env ENV]` | `{connectionId, modelId, protocol, outputModality, role, apiKeyEnv}`。按协议推导输出和默认角色：chat-completions→text/director，images→image/image，video-gateway→video/video，speech→audio/speech；async-task 必须给 `--role`（music/sfx/image/video/speech）或 `--output-modality`。先做全部预检，任何一步失败都会回滚，不留下连接、模型或密钥绑定 |
 
 `agent run` 选项：
 - `--auto-approve read,write,plan`（默认值）
