@@ -90,5 +90,5 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 2. **审批必须带 execId。** 只能批准 `agent status` 当前返回的 `pending.execId`。参数变化或步骤已过期都会被拒绝，不要猜测或复用旧的 execId。
 3. **`uncertainSubmissions` 非空时，表示云端可能已经受理并计费。** 系统不会自动重新提交，后续付费调用都需要人工批准。重新提交前先确认外部任务（jobId）的状态。
 4. **API Key 只通过环境变量提供。** `models add --api-key-env NAME` 只保存变量名（`$YINGLIU_DATA_DIR/cli-key-env.json`），不保存密钥本身，也不会打印。运行时从环境变量读取。
-5. 不要把 mock 结果当成真实模型验收；不要读取其他应用的凭据。
+5. `--mock` 模式下，除本地模拟网关外的任何网络请求（模型、媒体、语音、恢复轮询，包括直接调用全局 fetch 的通道）都会在发出前被拒绝；已存在的非 mock 待处理媒体任务不会被恢复或轮询，保持原状，等非 mock 命令再处理。不要把 mock 结果当成真实模型验收；不要读取其他应用的凭据。
 6. 同一 profile 同一时刻只有一个 CLI 进程持有数据（见“单一数据所有者”）。收到 `BUSY` 时，应该等待后重试，不要删除锁文件。

@@ -10,7 +10,7 @@ import { dirname, join, resolve } from 'node:path';
 import { createApplication } from '../app/application.ts';
 import { detectEnvironment } from '../host/renderer.ts';
 import type { SecretStore } from '../app/contracts.ts';
-import { MOCK_BASE_URL, mockFetch } from './mock.ts';
+import { MOCK_BASE_URL, mockFetch, installMockNetworkGuard } from './mock.ts';
 import { acquireOwner, BusyError } from './lock.ts';
 
 export const EXIT = { OK: 0, ERROR: 1, USAGE: 2, NOT_FOUND: 3, NEEDS_APPROVAL: 4, BUDGET: 5, ENVIRONMENT: 6, RUN_FAILED: 7, TIMEOUT: 8, BUSY: 9 } as const;
@@ -201,12 +201,12 @@ export async function runCli(argv: string[], io: { out: (s: string) => void; err
   if (positional[0] === 'doctor') { const r = doctor(); return emit(true, r.data, r.exit); }
   const dir = dataDirectory(); await mkdir(dir, { recursive: true });
   const secrets = new EnvSecrets(join(dir, 'cli-key-env.json')), mock = flags.mock === true;
-  let app: App | undefined, release: (() => Promise<void>) | undefined;
+  let app: App | undefined, release: (() => Promise<void>) | undefined; const unguard = mock ? installMockNetworkGuard() : undefined;
   try {
     const projects = process.env.YINGLIU_PROJECTS ? resolve(process.env.YINGLIU_PROJECTS) : join(dir, 'projects'), readOnly = isReadOnly(positional, flags);
     const lockSeconds = flags['lock-timeout'] === undefined ? 30 : Number(flags['lock-timeout']); if (!Number.isFinite(lockSeconds) || lockSeconds < 0) throw new CliError('USAGE', '--lock-timeout 必须是非负数字');
     try { release = await acquireOwner([dir, projects], positional.slice(0, 2).join(' '), lockSeconds * 1000); } catch (e) { if (e instanceof BusyError) throw new CliError('BUSY', e.message); throw e; }
-    app = await createApplication({ dataDirectory: dir, projectsDirectory: projects, credentials: secrets, ...(mock ? { fetch: mockFetch() } : {}), ...(readOnly ? { recover: false } : {}) });
+    app = await createApplication({ dataDirectory: dir, projectsDirectory: projects, credentials: secrets, ...(mock ? { fetch: mockFetch(), resumeRemoteTasks: false } : {}), ...(readOnly ? { recover: false } : {}) });
     const ctx: Ctx = { app, secrets, flags, mock };
     if (mock && !readOnly) await ensureMockModels(ctx);
     const r = await dispatch(ctx, positional);
@@ -214,5 +214,5 @@ export async function runCli(argv: string[], io: { out: (s: string) => void; err
   } catch (error) {
     const e = error instanceof CliError ? error : new CliError('ERROR', error instanceof Error ? error.message : String(error));
     return emit(false, { code: e.code, message: e.message }, EXIT[e.code]);
-  } finally { await app?.dispose().catch(() => {}); await release?.(); }
+  } finally { await app?.dispose().catch(() => {}); await release?.(); unguard?.(); }
 }

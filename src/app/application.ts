@@ -33,14 +33,14 @@ export class MemorySecrets implements SecretStore {
   async set(ref:string,value:string){this.values.set(ref,value);}
   async delete(ref:string){this.values.delete(ref);}
 }
-export async function createApplication(options:{dataDirectory:string;projectsDirectory?:string;credentials:SecretStore;reveal?:(path:string)=>Promise<void>;fetch?:typeof fetch;recover?:boolean}){
+export async function createApplication(options:{dataDirectory:string;projectsDirectory?:string;credentials:SecretStore;reveal?:(path:string)=>Promise<void>;fetch?:typeof fetch;recover?:boolean;resumeRemoteTasks?:boolean}){
   const dataDirectory=resolve(options.dataDirectory);
   const providers=new ProviderManager(dataDirectory,options.credentials,options.fetch?{fetch:options.fetch}:{});await providers.initialize();
   const backend=new AppBackend({...options,dataDirectory,providers:providers.host()});
   const conversation=new ConversationService(backend,providers,dataDirectory);
   await backend.call('catalog');
   const media=new MediaTaskService(dataDirectory,providers.registry,backend.mediaPort());
-  if(options.recover!==false)await media.recover();
+  if(options.recover!==false&&options.resumeRemoteTasks!==false)await media.recover();
   const workflowPort:WorkflowPort={
     snapshot:id=>backend.call('current',{projectId:id}),source:(id,shotId)=>backend.call('source',{projectId:id,shotId}),
     commit:(id,expectedRevision,project,sources,label)=>backend.call('apply',{projectId:id,expectedRevision,project,sources:Object.entries(sources).map(([shotId,source])=>({shotId,source})),label}),

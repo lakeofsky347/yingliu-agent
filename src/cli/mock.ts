@@ -19,14 +19,21 @@ export function mockDirector(body: { messages?: Msg[] }): { tool?: string; args?
   if (name === 'video_update') return { tool: 'export_mp4', args: {} };
   return { text: '模拟导演：已完成（' + (name ?? 'unknown') + '）。' };
 }
-export function mockFetch(real: typeof fetch = globalThis.fetch): typeof fetch {
+export class MockNetworkError extends Error { constructor(url: string) { super(`模拟模式（--mock）禁止访问真实网络：${url}`); } }
+/** C02: in mock mode only MOCK_HOST answers; every other request is refused before it leaves the process (definitively not submitted). */
+export function mockFetch(_real?: typeof fetch): typeof fetch {
   let n = 0;
   return (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
-    if (url.hostname !== MOCK_HOST) return real(input as string, init);
+    if (url.hostname !== MOCK_HOST) throw Object.assign(new MockNetworkError(url.origin + url.pathname), { submissionUncertain: false });
     if (!url.pathname.endsWith('/chat/completions')) return new Response(JSON.stringify({ data: [{ id: 'mock-director' }] }), { headers: { 'content-type': 'application/json' } });
     const body = JSON.parse(String(init?.body ?? '{}')); const r = mockDirector(body); n++;
     const message = r.tool ? { role: 'assistant', content: null, tool_calls: [{ id: `mock_${n}`, type: 'function', function: { name: r.tool, arguments: JSON.stringify(r.args) } }] } : { role: 'assistant', content: r.text };
     return new Response(JSON.stringify({ choices: [{ message, finish_reason: r.tool ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 10 } }), { headers: { 'content-type': 'application/json' } });
   }) as typeof fetch;
+}
+/** C02: channels that call the global fetch directly (e.g. speech) are covered by swapping it for the duration of a mock command. */
+export function installMockNetworkGuard(): () => void {
+  const previous = globalThis.fetch; globalThis.fetch = mockFetch();
+  return () => { globalThis.fetch = previous; };
 }
