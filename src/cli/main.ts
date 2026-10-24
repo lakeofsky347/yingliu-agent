@@ -3,7 +3,7 @@
  * Reuses the same application services as the desktop app (createApplication + route()).
  * Docs: docs/CLI.md
  */
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -14,7 +14,7 @@ import { MODEL_PROTOCOLS, MODEL_ROLES, ROLE_OUTPUT, ROLE_PROTOCOLS, type Modalit
 import { MOCK_BASE_URL, mockFetch, installMockNetworkGuard } from './mock.ts';
 import { acquireOwner, BusyError } from './lock.ts';
 
-export const EXIT = { OK: 0, ERROR: 1, USAGE: 2, NOT_FOUND: 3, NEEDS_APPROVAL: 4, BUDGET: 5, ENVIRONMENT: 6, RUN_FAILED: 7, TIMEOUT: 8, BUSY: 9 } as const;
+export const EXIT = { OK: 0, ERROR: 1, USAGE: 2, NOT_FOUND: 3, NEEDS_APPROVAL: 4, BUDGET: 5, ENVIRONMENT: 6, RUN_FAILED: 7, TIMEOUT: 8, BUSY: 9, CONFIG: 10 } as const;
 export class CliError extends Error { details?: Record<string, unknown>; constructor(public code: keyof typeof EXIT, message: string) { super(message); } }
 
 type Flags = Record<string, string | boolean>;
@@ -40,11 +40,24 @@ const num = (f: Flags, k: string): number | undefined => { const v = str(f, k); 
 /** Keys are never stored by the CLI: connections map their credentialRef to an environment variable NAME. */
 class EnvSecrets implements SecretStore {
   constructor(private file: string) {}
-  private async map(): Promise<Record<string, string>> { try { return JSON.parse(await readFile(this.file, 'utf8')); } catch { return {}; } }
-  async bind(ref: string, envName: string) { if (!/^[A-Z_][A-Z0-9_]{0,100}$/.test(envName)) throw new CliError('USAGE', '--api-key-env 必须是环境变量名（大写字母、数字、下划线）'); const m = await this.map(); m[ref] = envName; await mkdir(dirname(this.file), { recursive: true }); await writeFile(this.file, JSON.stringify(m, null, 2)); }
+  /** C06: only a missing file means "no bindings". Corrupt JSON or I/O/permission errors fail with CONFIG and leave the bytes untouched. */
+  private async map(): Promise<Record<string, string>> {
+    let text: string;
+    try { text = await readFile(this.file, 'utf8'); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return {}; throw new CliError('CONFIG', `无法读取 ${this.file}：${(e as Error).message}`); }
+    let value: unknown; try { value = JSON.parse(text); } catch (e) { throw new CliError('CONFIG', `${this.file} 已损坏（不是合法 JSON），已保留原文件，请手工修复或移走后重试：${(e as Error).message}`); }
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.values(value).every(v => typeof v === 'string')) throw new CliError('CONFIG', `${this.file} 格式无效（应为 { 凭据引用: 环境变量名 }），已保留原文件`);
+    return value as Record<string, string>;
+  }
+  /** Atomic write: temp file in the same directory, then rename. */
+  private async write(m: Record<string, string>) {
+    await mkdir(dirname(this.file), { recursive: true }); const tmp = `${this.file}.${process.pid}.${Date.now()}.tmp`;
+    try { await writeFile(tmp, JSON.stringify(m, null, 2), { mode: 0o600 }); await rename(tmp, this.file); } catch (e) { await rm(tmp, { force: true }).catch(() => {}); throw new CliError('CONFIG', `无法写入 ${this.file}：${(e as Error).message}`); }
+  }
+  async check() { await this.map(); }
+  async bind(ref: string, envName: string) { if (!/^[A-Z_][A-Z0-9_]{0,100}$/.test(envName)) throw new CliError('USAGE', '--api-key-env 必须是环境变量名（大写字母、数字、下划线）'); const m = await this.map(); m[ref] = envName; await this.write(m); }
   async get(ref: string) { const name = (await this.map())[ref]; return name ? process.env[name] || undefined : undefined; }
   async set(): Promise<void> { throw new Error('CLI 不保存 API Key；请用 --api-key-env 指定环境变量名'); }
-  async delete(ref: string) { const m = await this.map(); delete m[ref]; await writeFile(this.file, JSON.stringify(m, null, 2)).catch(() => {}); }
+  async delete(ref: string) { const m = await this.map(); if (!(ref in m)) return; delete m[ref]; await this.write(m); }
   async envName(ref: string) { return (await this.map())[ref]; }
 }
 
@@ -173,6 +186,7 @@ async function dispatch(ctx: Ctx, pos: string[]): Promise<{ data: unknown; exit?
     }
     case 'models': switch (sub) {
       case 'list': {
+        await ctx.secrets.check();
         const list = await call(ctx, 'models.list');
         const connections = await Promise.all(list.connections.map(async (c: any) => { const { credentialRef, credentialStatus, ...rest } = c; void credentialStatus; return { ...rest, apiKeyEnv: await ctx.secrets.envName(credentialRef) ?? null }; }));
         return { data: { connections, models: list.models, roles: list.roles } };
@@ -195,6 +209,7 @@ async function dispatch(ctx: Ctx, pos: string[]): Promise<{ data: unknown; exit?
         const envName = str(f, 'api-key-env');
         if (envName && !/^[A-Z_][A-Z0-9_]{0,100}$/.test(envName)) throw new CliError('USAGE', '--api-key-env 必须是环境变量名（大写字母、数字、下划线）');
         if (envName && !process.env[envName]) throw new CliError('USAGE', `环境变量 ${envName} 未设置`);
+        await ctx.secrets.check();
         const name = str(f, 'name', true)!, baseUrl = str(f, 'base-url', true)!, modelName = str(f, 'model', true)!;
         let conn: any, model: any, bound = false;
         try {
@@ -245,6 +260,7 @@ export async function runCli(argv: string[], io: { out: (s: string) => void; err
     const projects = process.env.YINGLIU_PROJECTS ? resolve(process.env.YINGLIU_PROJECTS) : join(dir, 'projects'), readOnly = isReadOnly(positional, flags);
     const lockSeconds = flags['lock-timeout'] === undefined ? 30 : Number(flags['lock-timeout']); if (!Number.isFinite(lockSeconds) || lockSeconds < 0) throw new CliError('USAGE', '--lock-timeout 必须是非负数字');
     try { release = await acquireOwner([dir, projects], positional.slice(0, 2).join(' '), lockSeconds * 1000); } catch (e) { if (e instanceof BusyError) throw new CliError('BUSY', e.message); throw e; }
+    if (!readOnly || positional[0] === 'models') await secrets.check(); // C06: a broken key map fails up front with CONFIG instead of surfacing as a provider error
     app = await createApplication({ dataDirectory: dir, projectsDirectory: projects, credentials: secrets, ...(mock ? { fetch: mockFetch(), resumeRemoteTasks: false } : {}), ...(readOnly ? { recover: false } : {}) });
     const ctx: Ctx = { app, secrets, flags, mock };
     if (mock && !readOnly) await ensureMockModels(ctx);

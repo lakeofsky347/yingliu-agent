@@ -42,6 +42,7 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 | 6 | ENVIRONMENT | doctor 未通过，或导出缺少 Chromium/ffmpeg |
 | 7 | RUN_FAILED | 运行状态为 failed/cancelled，或导出任务失败 |
 | 8 | TIMEOUT | 等待超时（运行已暂停） |
+| 10 | CONFIG | `cli-key-env.json` 损坏或无法读写（原文件保持不变） |
 | 9 | BUSY | 该数据目录正被另一个 yingliu 进程占用（等待 `--lock-timeout` 秒后仍未释放） |
 
 ## 命令参考
@@ -89,6 +90,6 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 1. **付费和导出默认不自动批准。** 只有同时提供 `--allow-paid` 和正数 `--max-cost`，`--auto-approve` 里才能包含 `cost` 或 `export`，否则返回 exit 2。预算上限会写入运行的 `budget.maxCost`。费用未知的付费调用仍需人工批准。
 2. **审批必须带 execId。** 只能批准 `agent status` 当前返回的 `pending.execId`。参数变化或步骤已过期都会被拒绝，不要猜测或复用旧的 execId。
 3. **`uncertainSubmissions` 非空时，表示云端可能已经受理并计费。** 系统不会自动重新提交，后续付费调用都需要人工批准。重新提交前先确认外部任务（jobId）的状态。
-4. **API Key 只通过环境变量提供。** `models add --api-key-env NAME` 只保存变量名（`$YINGLIU_DATA_DIR/cli-key-env.json`），不保存密钥本身，也不会打印。运行时从环境变量读取。
+4. **API Key 只通过环境变量提供。** `models add --api-key-env NAME` 只保存变量名（`$YINGLIU_DATA_DIR/cli-key-env.json`），不保存密钥本身，也不会打印。运行时从环境变量读取。该文件只有在不存在时才视为空；内容损坏或权限错误会返回 `CONFIG`（exit 10），且不会改动原文件。写入采用临时文件加 rename 的原子方式。
 5. `--mock` 模式下，除本地模拟网关外的任何网络请求（模型、媒体、语音、恢复轮询，包括直接调用全局 fetch 的通道）都会在发出前被拒绝；已存在的非 mock 待处理媒体任务不会被恢复或轮询，保持原状，等非 mock 命令再处理。不要把 mock 结果当成真实模型验收；不要读取其他应用的凭据。
 6. 同一 profile 同一时刻只有一个 CLI 进程持有数据（见“单一数据所有者”）。收到 `BUSY` 时，应该等待后重试，不要删除锁文件。
