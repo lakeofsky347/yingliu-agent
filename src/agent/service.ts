@@ -468,7 +468,17 @@ export class AgentService {
     const key = run.id + '.' + receipt.execId;
     const call = run.queue.find(item => item.execId === receipt.execId);
     if (!call) {
-      if (!(run.settledToolExecIds ?? []).includes(key)) throw new Error('工具成功回执无法匹配运行队列；未重新提交');
+      if (!(run.settledToolExecIds ?? []).includes(key)) {
+        // Orphaned success: never resubmit and never block the run forever. Account the known cost once (ledger dedupes by key),
+        // record it as an uncertain submission (later paid calls need explicit approval) and tell the model it was not adopted.
+        const error = '工具已成功，但回执无法匹配运行队列；结果未自动采用，未重新提交（请人工核对）';
+        chargeTool(run.usage, receipt.result.cost, receipt.risk); (run.settledToolExecIds ??= []).push(key);
+        if (receipt.risk === 'cost') await this.spend(run.projectId, receipt.tool, receipt.result.waitFor ? null : receipt.result.cost, false, key);
+        (run.uncertainSubmissions ??= []).push({ execId: receipt.execId, tool: receipt.tool, at: now(), error, attempts: 1 });
+        if (run.inFlight?.execId === receipt.execId) delete run.inFlight;
+        await this.store.trace(run.id, { event: 'tool.orphan_success', execId: receipt.execId, tool: receipt.tool });
+        await this.save(run);
+      }
       await this.store.removeToolSuccess(run.id, receipt.execId); return;
     }
     if (call.name !== receipt.tool || argsHash(run.id, call.name, JSON.parse(call.arguments || '{}')) !== receipt.argsHash) throw new Error('工具成功回执与执行参数不符；未重新提交');
