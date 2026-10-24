@@ -16,6 +16,7 @@ export interface AgentDocs {
   ledger(): Promise<Ledger>;
   saveQc(report: QcReport): Promise<void>;
 }
+export interface ProjectTaskRef { id: string; kind: 'storyboard' | 'scenes' | 'modify' | 'preview' | 'export' | 'audio'; retryOf?: string }
 export interface ToolResult {
   /** Text returned to the model (redacted, size-bounded). */
   content: string;
@@ -25,8 +26,12 @@ export interface ToolResult {
   cost?: number | null;
   /** When set, the run suspends until this async task reaches a terminal phase. */
   waitFor?: { kind: 'media' | 'workflow'; id: string };
+  /** Exact host task started by this call; later tasks must not replace this association. */
+  projectTask?: ProjectTaskRef;
   revision?: number;
 }
+/** Persisted separately before any fallible bookkeeping, so a known side effect is never submitted again. */
+export interface ToolSuccessReceipt { execId: string; tool: string; argsHash: string; risk: ToolRisk; stepIndex: number; at: string; result: ToolResult }
 export interface AgentTool {
   /** Tool only exposed when all these roles are bound. */
   requires?: GenRole[];
@@ -79,7 +84,10 @@ export interface AgentRun {
   messages: AgentMessage[]; steps: RunStep[];
   /** Tool calls from the last assistant turn not yet executed (resumable). */
   queue: ToolCall[];
-  pending?: PendingApproval; waiting?: { kind: 'media' | 'workflow'; id: string; callId: string };
+  pending?: PendingApproval; waiting?: { kind: 'media' | 'workflow'; id: string; callId: string; execId?: string };
+  taskRefs?: (ProjectTaskRef & { callId: string; execId?: string })[];
+  /** Usage settlement keys already applied to this snapshot; the project ledger has its own atomic deduplication. */
+  settledToolExecIds?: string[];
   /** Legacy (≤0.5.0) field; never trusted for skipping approval. */
   approvedCallIds: string[];
   /** One-shot approvals bound to a server execution ID + tool + canonical argument hash; consumed on use. */

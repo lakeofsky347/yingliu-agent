@@ -39,4 +39,8 @@ export interface MediaProjectPort {
   /** One CAS transaction; idempotent for provenance.taskId in case response is lost. */
   applyResult(input:{projectId:string;shotId?:string;expectedRevision:number;files:GeneratedFile[];provenance:{taskId:string;connectionId:string;model:string;operation:MediaOperation;prompt:string;inputHashes:{assetId:string;sha256:string}[]}}):Promise<{assetIds:string[];revision:number}>;
 }
-export interface MediaTaskOptions {fetch?:typeof fetch;pollIntervalMs?:number;maxConcurrent?:number;maxArtifactBytes?:number;maxTaskBytes?:number;onChange?:(task:MediaTask)=>void}
+export interface MediaTaskOptions {
+  fetch?:typeof fetch;pollIntervalMs?:number;maxConcurrent?:number;maxArtifactBytes?:number;maxTaskBytes?:number;onChange?:(task:MediaTask)=>void;
+  /** False freezes persisted tasks for this service instance, including when newly created work schedules. */
+  resumeExistingTasks?:boolean;
+}

@@ -7,9 +7,10 @@ import type { ChatInput, SecretStore } from './contracts.ts';
 import { foundationPacks } from './packs.ts';
 import { applicationHealth } from './health.ts';
 import { exportProjectArchive, importProjectArchive } from './archive.ts';
-import { sendOutcome, withSubmission } from '../agent/submission.ts';
+import { sendOutcome, submissionOf, withSubmission } from '../agent/submission.ts';
 import { MediaTaskService } from '../jobs/media-tasks.ts';
 import type { MediaRequest } from '../jobs/contracts.ts';
+import type { RemoteJob } from '../jobs/contracts.ts';
 import type { ConnectionInput, ModelInput, ModelRole } from '../models/contracts.ts';
 import { WorkflowService } from '../workflows/service.ts';
 import type { WorkflowRequest, WorkflowPort } from '../workflows/contracts.ts';
@@ -21,7 +22,8 @@ import { ROLE_OUTPUT, ROLE_PROTOCOLS } from '../models/contracts.ts';
 import { pollTemplate, submitTemplate } from '../models/adapters/template.ts';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
+import { writeDurableFile } from '../agent/durable-file.ts';
 
 export const ENDPOINTS=new Set(['catalog','current','create','open','save','import','source','saveSource','restoreSource','preview','generate','export','cancel','environment','reveal','apply','inspect','list','focus','audio','tts','history','undo','redo','rename','duplicate','archive','tasks','retry','packs.list','app.health','app.exportProject','app.importProject','providers.get','providers.save','providers.check','chat.history','chat.send','chat.cancel']);
 for(const endpoint of ['models.list','models.connection.save','models.connection.remove','models.model.save','models.model.remove','models.role.bind','models.check','media.generate','media.list','media.get','media.retry','media.pause','media.cancel','media.apply','video.clip.save','video.clip.remove','video.clip.extract'])ENDPOINTS.add(endpoint);
@@ -39,7 +41,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
   const backend=new AppBackend({...options,dataDirectory,providers:providers.host()});
   const conversation=new ConversationService(backend,providers,dataDirectory);
   await backend.call('catalog');
-  const media=new MediaTaskService(dataDirectory,providers.registry,backend.mediaPort());
+  const media=new MediaTaskService(dataDirectory,providers.registry,backend.mediaPort(),{fetch:options.fetch,resumeExistingTasks:options.recover!==false&&options.resumeRemoteTasks!==false});
   if(options.recover!==false&&options.resumeRemoteTasks!==false)await media.recover();
   const workflowPort:WorkflowPort={
     snapshot:id=>backend.call('current',{projectId:id}),source:(id,shotId)=>backend.call('source',{projectId:id,shotId}),
@@ -104,8 +106,8 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
       // submits a new paid job; the receipt is removed only once the asset is registered or the provider definitively failed.
       const receipts=join(dataDirectory,'agent-receipts'),key=createHash('sha256').update([id,role,resolved.connection.id,resolved.model.id,prompt,String(durationSeconds??'')].join('\0')).digest('hex').slice(0,40);
       const receiptFile=join(receipts,key+'.json'),artifactFile=join(receipts,key+'.bin');
-      type Receipt={stage:'accepted'|'downloaded';jobId?:string;mime?:string;cost:number|null;at:string};
-      const writeAtomic=async(file:string,data:string|Uint8Array)=>{await mkdir(receipts,{recursive:true});const tmp=file+'.'+randomUUID()+'.tmp';await writeFile(tmp,data);await rename(tmp,file);};
+      type Receipt={stage:'accepted'|'downloaded';jobId?:string;result?:RemoteJob;mime?:string;cost:number|null;at:string};
+      const writeAtomic=async(file:string,data:string|Uint8Array)=>writeDurableFile(file,data);
       const saveReceipt=(value:Receipt)=>writeAtomic(receiptFile,JSON.stringify(value));
       const dropReceipt=async()=>{await rm(receiptFile,{force:true});await rm(artifactFile,{force:true});};
       let receipt:Receipt|undefined;
@@ -114,17 +116,18 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         const context={connection:resolved.connection,key:await providers.registry.credential(resolved.connection),signal,fetch:options.fetch};
         let bytes:Uint8Array|undefined,mime='audio/mpeg';let cost:number|null=receipt?.cost??null;let jobId=receipt?.jobId;
         if(!receipt){
-          const result=await submitTemplate(context,{clientRequestId:randomUUID(),model:resolved.model,prompt,duration:durationSeconds,parameters:{}},'audio').catch(error=>{throw withSubmission(error,signal.aborted?'unknown':sendOutcome(error));});
+          const result=await submitTemplate(context,{clientRequestId:randomUUID(),model:resolved.model,prompt,duration:durationSeconds,parameters:{}},'audio').catch(error=>{throw withSubmission(error,submissionOf(error)??(signal.aborted?'unknown':sendOutcome(error)));});
           try{
             if('kind' in result){bytes=result.bytes;mime=result.mimeType;await writeAtomic(artifactFile,bytes);receipt={stage:'downloaded',mime,cost:null,at:new Date().toISOString()};}
-            else{jobId=result.jobId;receipt={stage:'accepted',jobId,cost:null,at:new Date().toISOString()};}
+            else{jobId=result.jobId;receipt={stage:'accepted',jobId,result,cost:typeof result.usage?.cost==='number'?result.usage.cost:null,at:new Date().toISOString()};}
             await saveReceipt(receipt);
           }catch(error){throw withSubmission(error,'unknown',jobId);}
         }
         try{
           if(receipt.stage==='accepted'){
             const configuredWait=Number(resolved.model.parameters.maxWaitMs),deadline=Date.now()+(Number.isFinite(configuredWait)&&configuredWait>=1000?Math.min(configuredWait,3_600_000):Math.max(60000,resolved.connection.requestTimeoutMs*6));
-            let result=await pollTemplate(context,resolved.model,jobId!,'audio');
+            // JSON providers may finish synchronously (idPath=''). Keep that response, including artifacts and cost.
+            let result=receipt.result??await pollTemplate(context,resolved.model,jobId!,'audio');
             while(result.status==='queued'||result.status==='running'){if(Date.now()>deadline)throw withSubmission(new Error('音频生成等待超时；云端任务可能仍在执行（任务 '+jobId+'）'),'unknown',jobId);await new Promise(r=>setTimeout(r,Number(resolved.model.parameters.pollIntervalMs)||2000));signal.throwIfAborted();result=await pollTemplate(context,resolved.model,jobId!,'audio');}
             if(result.status==='failed'||result.status==='cancelled'){await dropReceipt();throw withSubmission(new Error('音频生成失败：'+(result.error??result.status)),'failed',jobId);}
             if(result.status!=='succeeded'||!result.artifacts?.length)throw withSubmission(new Error('音频生成失败：'+(result.error??result.status)),'unknown',jobId);

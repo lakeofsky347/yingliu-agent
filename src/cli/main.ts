@@ -13,6 +13,7 @@ import type { SecretStore } from '../app/contracts.ts';
 import { MODEL_PROTOCOLS, MODEL_ROLES, ROLE_OUTPUT, ROLE_PROTOCOLS, type Modality, type ModelProtocol, type ModelRole } from '../models/contracts.ts';
 import { MOCK_BASE_URL, mockFetch, installMockNetworkGuard } from './mock.ts';
 import { acquireOwner, BusyError } from './lock.ts';
+import { installCliLifecycle, CliInterruptedError, type CliLifecycle } from './lifecycle.ts';
 
 export const EXIT = { OK: 0, ERROR: 1, USAGE: 2, NOT_FOUND: 3, NEEDS_APPROVAL: 4, BUDGET: 5, ENVIRONMENT: 6, RUN_FAILED: 7, TIMEOUT: 8, BUSY: 9, CONFIG: 10, STARTUP: 11 } as const;
 export class CliError extends Error { details?: Record<string, unknown>; constructor(public code: keyof typeof EXIT, message: string) { super(message); } }
@@ -66,9 +67,11 @@ const TERMINAL = new Set(['complete', 'failed', 'cancelled', 'budget_exceeded'])
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 type App = Awaited<ReturnType<typeof createApplication>>;
-interface Ctx { app: App; secrets: EnvSecrets; flags: Flags; mock: boolean }
+interface Ctx { app: App; secrets: EnvSecrets; flags: Flags; mock: boolean; lifecycle: CliLifecycle }
 async function call<T = any>(ctx: Ctx, endpoint: string, payload: unknown = {}): Promise<T> {
+  ctx.lifecycle.throwIfInterrupted();
   const r = await ctx.app.route(endpoint, payload);
+  ctx.lifecycle.throwIfInterrupted();
   if (!r.ok) { const m = r.error.message; throw new CliError(/未找到|不存在|not found/i.test(m) ? 'NOT_FOUND' : 'ERROR', m); }
   return r.value as T;
 }
@@ -93,41 +96,60 @@ async function waitRun(ctx: Ctx, runId: string) {
   }
   return run;
 }
-/** C04: the command's result is the run merged with the project task it started (e.g. export_mp4). A failed/cancelled task makes
- *  the command fail (RUN_FAILED, exit 7) even when the run itself completed; a completed export returns its output path. */
-export function mergeRunResult(view: ReturnType<typeof runView>, task: { kind: string; status: string; message?: string; error?: string } | undefined, output?: { id?: string; path?: string }) {
-  const taskView = task ? { kind: task.kind, status: task.status, message: task.message, error: task.error } : undefined;
-  if (task && (task.status === 'failed' || task.status === 'cancelled')) {
-    return { ok: false as const, error: { code: 'RUN_FAILED' as const, message: `运行关联的${task.kind === 'export' ? '导出' : ''}任务${task.status === 'failed' ? '失败' : '已取消'}：${task.error || task.message || task.status}`, run: view, task: taskView } };
+interface RunTaskResult { id: string; kind: string; status: string; message?: string; error?: string; retryOf?: string; outputId?: string }
+interface RunOutput { id: string; path: string }
+/** R2-06: only durable task IDs returned by this run's tools belong to the run. A preview cannot hide an earlier failed export.
+ * A successful explicit retry can supersede failed ancestors, but only when its own output ID resolves to a project output. */
+export function mergeRunResult(view: ReturnType<typeof runView>, tasks: RunTaskResult[], outputs: RunOutput[] = []) {
+  const outputFor = (task: RunTaskResult) => task.kind === 'export' && task.status === 'complete' && task.outputId ? outputs.find(output => output.id === task.outputId && output.path) : undefined;
+  const superseded = new Map<string, string>(), byId = new Map(tasks.map(task => [task.id, task]));
+  for (const task of tasks) {
+    if (!outputFor(task)) continue;
+    const seen = new Set([task.id]); let parentId = task.retryOf;
+    while (parentId && !seen.has(parentId)) {
+      seen.add(parentId); const parent = byId.get(parentId);
+      if (!parent || parent.kind !== 'export' || !['failed', 'cancelled'].includes(parent.status)) break;
+      superseded.set(parent.id, task.id); parentId = parent.retryOf;
+    }
   }
-  return { ok: true as const, data: { ...view, ...(taskView ? { task: taskView } : {}), ...(task?.kind === 'export' && task.status === 'complete' && output?.path ? { output: { id: output.id, path: output.path } } : {}) } };
+  const taskViews = tasks.map(task => ({ ...task, ...(superseded.has(task.id) ? { supersededBy: superseded.get(task.id)! } : {}) }));
+  const failed = taskViews.find(task => !superseded.has(task.id) && (['failed', 'cancelled'].includes(task.status) || task.kind === 'export' && task.status === 'complete' && !outputFor(task)));
+  if (failed) {
+    const reason = failed.error || (failed.status === 'complete' ? '任务完成但未找到对应成片（outputId）' : failed.message || failed.status);
+    return { ok: false as const, error: { code: 'RUN_FAILED' as const, message: `运行关联的${failed.kind === 'export' ? '导出' : ''}任务失败：${reason}`, run: view, task: failed, tasks: taskViews } };
+  }
+  const task = taskViews.filter(task => task.kind === 'export').at(-1) ?? taskViews.at(-1);
+  const completed = [...tasks].reverse().find(task => !!outputFor(task)), output = completed && outputFor(completed);
+  return { ok: true as const, data: { ...view, tasks: taskViews, ...(task ? { task } : {}), ...(output ? { output: { id: output.id, path: output.path } } : {}) } };
 }
-async function finishRun(ctx: Ctx, run: any, since: string) {
+async function finishRun(ctx: Ctx, run: any, _since: string) {
   const done = await waitRun(ctx, run.id);
-  // Tools such as export_mp4 start a project task and return; keep the process alive until it settles so it is not killed on exit.
-  const { task, snap } = await waitIdle(ctx, done.projectId);
-  const own = task && task.startedAt >= since ? task : undefined; // only a task started during this command belongs to this run
-  const merged = mergeRunResult(runView(done), own, snap?.project?.outputs?.at(-1));
-  if (!merged.ok) throw Object.assign(new CliError('RUN_FAILED', merged.error.message), { details: { run: merged.error.run, task: merged.error.task } });
+  const { tasks, snap } = await waitRunTasks(ctx, done.projectId, done.taskRefs ?? []);
+  const merged = mergeRunResult(runView(done), tasks, snap.project?.outputs ?? []);
+  if (!merged.ok) throw Object.assign(new CliError('RUN_FAILED', merged.error.message), { details: { run: merged.error.run, task: merged.error.task, tasks: merged.error.tasks } });
   return { data: merged.data, exit: runExit(done.status) };
 }
-async function waitIdle(ctx: Ctx, projectId: string) {
+async function waitRunTasks(ctx: Ctx, projectId: string, refs: { id: string; kind: string }[]) {
   const until = Date.now() + (num(ctx.flags, 'timeout') ?? 600) * 1000;
+  const unique = [...new Map(refs.map(ref => [ref.id, ref])).values()];
   while (true) {
-    const snap = await call(ctx, 'current', { projectId }), task = snap.task;
-    if (!task || task.status !== 'running') return { task: task ?? undefined, snap };
-    if (Date.now() > until) throw new CliError('TIMEOUT', '等待工程任务超时：' + task.kind);
+    const snap = await call(ctx, 'current', { projectId });
+    const records = unique.length ? (await call<{ tasks: RunTaskResult[] }>(ctx, 'tasks', { projectId })).tasks : [];
+    const tasks: RunTaskResult[] = unique.map(ref => {
+      const found = snap.task?.id === ref.id ? snap.task : records.find(task => task.id === ref.id);
+      return found ? { id: found.id, kind: found.kind, status: found.status, message: found.message, error: found.error, retryOf: found.retryOf, outputId: found.outputId } : { id: ref.id, kind: ref.kind, status: 'failed', error: '未找到运行关联的任务记录' };
+    });
+    if (tasks.every(task => task.status !== 'running')) return { tasks, snap };
+    if (Date.now() > until) throw new CliError('TIMEOUT', '等待运行关联任务超时：' + tasks.filter(task => task.status === 'running').map(task => task.id).join(', '));
     await sleep(200);
   }
 }
-async function waitTask(ctx: Ctx, projectId: string, kind: string) {
-  const until = Date.now() + (num(ctx.flags, 'timeout') ?? 600) * 1000;
-  while (true) {
-    const snap = await call(ctx, 'current', { projectId }); const task = snap.task;
-    if (task && task.kind === kind && task.status !== 'running') return { snap, task };
-    if (Date.now() > until) throw new CliError('TIMEOUT', '等待任务超时');
-    await sleep(200);
-  }
+async function waitTask(ctx: Ctx, projectId: string, kind: string, taskId?: string) {
+  // Direct render/export callers also pin the submitted task, rather than accepting a different latest task of the same kind.
+  const id = taskId ?? (await call(ctx, 'current', { projectId })).task?.id;
+  if (!id) throw new CliError('RUN_FAILED', '提交后没有返回任务 ID');
+  const { snap, tasks } = await waitRunTasks(ctx, projectId, [{ id, kind }]);
+  return { snap, task: tasks[0]! };
 }
 
 export const HELP = `yingliu — 映流智能体 headless CLI（详见 docs/CLI.md）
@@ -177,10 +199,12 @@ async function dispatch(ctx: Ctx, pos: string[]): Promise<{ data: unknown; exit?
       const projectId = group === 'render' ? sub : (sub === 'mp4' ? arg : undefined);
       if (!projectId) throw new CliError('USAGE', group === 'render' ? '用法：render <projectId>' : '用法：export mp4 <projectId>');
       const env = detectEnvironment({}); if (!env.browserAvailable || !env.ffmpegAvailable) throw new CliError('ENVIRONMENT', '导出需要 Chromium 和 ffmpeg；先运行 yingliu doctor');
-      await call(ctx, 'export', { projectId });
-      const { snap, task } = await waitTask(ctx, projectId, 'export');
+      const submitted = await call(ctx, 'export', { projectId });
+      const { snap, task } = await waitTask(ctx, projectId, 'export', submitted.task?.id);
       if (task.status !== 'complete') throw new CliError('RUN_FAILED', task.error || task.message || '导出失败');
-      const output = snap.project.outputs.at(-1); let path = output?.path;
+      const output = snap.project.outputs.find((item: RunOutput) => item.id === task.outputId);
+      if (!output?.path) throw new CliError('RUN_FAILED', '导出完成但未找到该任务对应的成片（outputId）');
+      let path = output.path;
       const out = str(f, 'out'); if (out && path) { const { copyFile } = await import('node:fs/promises'); await mkdir(dirname(resolve(out)), { recursive: true }); await copyFile(path, resolve(out)); path = resolve(out); }
       return { data: { projectId, path, output } };
     }
@@ -257,20 +281,32 @@ export async function runCli(argv: string[], io: { out: (s: string) => void; err
   const secrets = new EnvSecrets(join(dir, 'cli-key-env.json')), mock = flags.mock === true;
   // C07: every startup failure becomes a single ok:false line with code STARTUP (BUSY/CONFIG/USAGE keep their own codes).
   const startup = async <T,>(what: string, work: () => Promise<T>): Promise<T> => { try { return await work(); } catch (e) { if (e instanceof CliError) throw e; throw new CliError('STARTUP', `启动失败（${what}）：${e instanceof Error ? e.message : String(e)}`); } };
+  const lifecycle = installCliLifecycle();
   let app: App | undefined, release: (() => Promise<void>) | undefined; const unguard = mock ? installMockNetworkGuard() : undefined;
+  let result: { ok: boolean; payload: unknown; code: number };
   try {
     const projects = process.env.YINGLIU_PROJECTS ? resolve(process.env.YINGLIU_PROJECTS) : join(dir, 'projects'), readOnly = isReadOnly(positional, flags);
     const lockSeconds = flags['lock-timeout'] === undefined ? 30 : Number(flags['lock-timeout']); if (!Number.isFinite(lockSeconds) || lockSeconds < 0) throw new CliError('USAGE', '--lock-timeout 必须是非负数字');
     await startup('创建数据目录 ' + dir, () => mkdir(dir, { recursive: true }));
-    await startup('获取数据目录锁', async () => { try { release = await acquireOwner([dir, projects], positional.slice(0, 2).join(' '), lockSeconds * 1000); } catch (e) { if (e instanceof BusyError) throw new CliError('BUSY', e.message); throw e; } });
+    await startup('获取数据目录锁', async () => { try { release = await acquireOwner([dir, projects], positional.slice(0, 2).join(' '), lockSeconds * 1000, { signal: lifecycle.signal }); } catch (e) { if (e instanceof BusyError) throw new CliError('BUSY', e.message); throw e; } });
     if (!readOnly || positional[0] === 'models') await secrets.check(); // C06: a broken key map fails up front with CONFIG instead of surfacing as a provider error
     app = await startup('初始化应用', () => createApplication({ dataDirectory: dir, projectsDirectory: projects, credentials: secrets, ...(mock ? { fetch: mockFetch(), resumeRemoteTasks: false } : {}), ...(readOnly ? { recover: false } : {}) }));
-    const ctx: Ctx = { app, secrets, flags, mock };
+    lifecycle.throwIfInterrupted();
+    const ctx: Ctx = { app, secrets, flags, mock, lifecycle };
     if (mock && !readOnly) await ensureMockModels(ctx);
     const r = await dispatch(ctx, positional);
-    return emit(true, r.data, r.exit ?? EXIT.OK);
+    result = { ok: true, payload: r.data, code: r.exit ?? EXIT.OK };
   } catch (error) {
     const e = error instanceof CliError ? error : new CliError('ERROR', error instanceof Error ? error.message : String(error));
-    return emit(false, { code: e.code, message: e.message, ...(e.details ?? {}) }, EXIT[e.code]);
-  } finally { await app?.dispose().catch(() => {}); await release?.(); unguard?.(); }
+    result = { ok: false, payload: { code: e.code, message: e.message, ...(e.details ?? {}) }, code: EXIT[e.code] };
+  } finally {
+    try { await lifecycle.shutdown(async () => { await app?.dispose(); }, release); }
+    catch (error) { result = { ok: false, payload: { code: 'ERROR', message: '退出清理失败：' + (error instanceof Error ? error.message : String(error)) }, code: EXIT.ERROR }; }
+    finally { unguard?.(); }
+  }
+  if (lifecycle.signal.aborted) {
+    const error = lifecycle.signal.reason as CliInterruptedError;
+    return emit(false, { code: 'INTERRUPTED', message: error.message, signal: error.signalName }, lifecycle.exitCode!);
+  }
+  return emit(result!.ok, result!.payload, result!.code);
 }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { EXIT } from '../src/cli/main.ts';
+import { acquireOwner } from '../src/cli/lock.ts';
 import { cli, withCliEnv } from './cli-helpers.ts';
 
 test('C01: parallel creates of different projects in one profile all survive (single data owner via cross-process lock)', () => withCliEnv(async () => {
@@ -15,11 +16,13 @@ test('C01: parallel creates of different projects in one profile all survive (si
 
 test('C01: a profile held by a live owner yields an explicit BUSY error after --lock-timeout', () => withCliEnv(async () => {
   const data = process.env.YINGLIU_DATA_DIR!; await mkdir(data, { recursive: true });
-  await writeFile(join(data, '.yingliu-owner.lock'), JSON.stringify({ pid: process.pid, host: (await import('node:os')).hostname(), startedAt: new Date().toISOString(), command: 'test-holder' }));
-  const r = await cli(['project', 'list', '--lock-timeout', '0.3']);
-  assert.equal(r.code, EXIT.BUSY, r.out); assert.equal(r.json.ok, false); assert.equal(r.json.error.code, 'BUSY'); assert.match(r.json.error.message, /test-holder|占用/);
-  // a stale lock from a dead process is reclaimed
-  await writeFile(join(data, '.yingliu-owner.lock'), JSON.stringify({ pid: 2 ** 22 + 12345, host: (await import('node:os')).hostname(), startedAt: new Date().toISOString(), command: 'dead' }));
+  const release = await acquireOwner([data], 'test-holder', 1000);
+  try {
+    const r = await cli(['project', 'list', '--lock-timeout', '0.3']);
+    assert.equal(r.code, EXIT.BUSY, r.out); assert.equal(r.json.ok, false); assert.equal(r.json.error.code, 'BUSY'); assert.match(r.json.error.message, /test-holder|占用/);
+  } finally { await release(); }
+  // Legacy metadata is diagnostic only; even a half-written file cannot strand an owner.
+  await writeFile(join(data, '.yingliu-owner.lock'), '{"pid":');
   assert.equal((await cli(['project', 'list', '--lock-timeout', '0.3'])).code, 0);
 }));
 

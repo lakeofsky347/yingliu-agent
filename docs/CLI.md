@@ -25,9 +25,10 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 - 失败：`{"ok":false,"error":{"code":"USAGE|NOT_FOUND|ERROR|...","message":"中文说明"}}`
 - 不加 `--json` 时，结果以可读 JSON 输出，错误写到 stderr。
 - `--timeout <秒>`：等待运行或任务的上限，默认 600。超时后运行会被暂停，可以用 `agent resume` 继续。
-- **单一数据所有者（C01）。** 每条命令在打开应用前，会对数据目录（`YINGLIU_DATA_DIR`）和工程目录（`YINGLIU_PROJECTS`）各加一把跨进程独占锁（`.yingliu-owner.lock`），命令结束才释放。其他进程最多等 `--lock-timeout` 秒（默认 30），超时返回 `BUSY`（exit 9），错误信息里写明占用者的 pid 和命令。同机上已退出进程留下的锁会被自动回收。我们选择了锁而不是常驻服务：不需要管理守护进程；代价是长时间的 `agent run` 会独占整个 profile，并行任务请使用不同的 `YINGLIU_DATA_DIR`。
+- **单一数据所有者（C01）。** 每条命令在打开应用前，会按数据目录（`YINGLIU_DATA_DIR`）和工程目录（`YINGLIU_PROJECTS`）的真实目录身份，取得由操作系统持有的本机 TCP listener 锁，应用清理完毕才释放。符号链接别名指向同一把锁。其他进程最多等 `--lock-timeout` 秒（默认 30），超时返回 `BUSY`（exit 9）；能识别占用者时附上 pid 和命令。进程崩溃时操作系统自动释放，无需删除 `.yingliu-owner.lock`；旧版本遗留的空或截断文件不参与新锁判断。目录映射的端口若与其他目录或服务碰撞，会保守返回 BUSY；不会尝试接管。该互斥适用于同机运行本版本协议的 CLI，不协调其他机器、旧版本 CLI 或桌面进程。长时间的 `agent run` 会独占整个 profile，并行任务请使用不同的数据与工程目录。
 - 只读命令（`project list/get`、`agent status`、`story/ledger show`、`qc show`（不带 `--run`）、`models list`）以只读方式打开：不会结算中断的运行，不会恢复媒体任务，也不会改写状态。
-- 进程退出前会等工程任务（如 export_mp4 发起的导出）结束，避免任务被中途杀掉。`agent run/resume/approve/reject` 的结果会合并本次命令期间启动的工程任务：任务失败或取消时返回 `ok:false`、`code: RUN_FAILED`（exit 7），并在 `error.run`、`error.task` 中附上详情；导出成功时 `data.output.path` 给出成片路径。
+- 正常退出前会等待运行关联的工程任务。收到 SIGINT/SIGTERM 时，入口停止新调用，等待应用停止其拥有的工作与子进程，然后释放锁；JSON 返回 `INTERRUPTED`，分别退出 130/143。
+- `agent run/resume/approve/reject` 按工具回执中保存的任务 ID 汇总所有关联任务，结果在 `tasks` 数组中返回。任何未被成功显式重试替代的失败或取消任务都会返回 `ok:false`、`code: RUN_FAILED`（exit 7），并在 `error.run`、`error.task`、`error.tasks` 中附上详情；后续预览成功不会覆盖导出失败。成功导出按任务记录的 `outputId` 返回对应的 `data.output.path`，不会选择工程最后一个产物。模型可用 `export_mp4` 的 `retryTaskId` 显式重试失败或取消的导出；只有该重试链上成功且有对应成片时，才替代原失败任务。
 
 ## 退出码
 
@@ -44,7 +45,8 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 | 8 | TIMEOUT | 等待超时（运行已暂停） |
 | 9 | BUSY | 该数据目录正被另一个 yingliu 进程占用（等待 `--lock-timeout` 秒后仍未释放） |
 | 10 | CONFIG | `cli-key-env.json` 损坏或无法读写（原文件保持不变） |
-| 11 | STARTUP | 启动失败（数据目录无法创建、锁文件无法写入、应用状态无法加载等）；`--json` 下只输出一行 `ok:false` |
+| 11 | STARTUP | 启动失败（数据目录无法创建、所有者锁无法取得、应用状态无法加载等）；`--json` 下只输出一行 `ok:false` |
+| 130 / 143 | INTERRUPTED | 收到 SIGINT / SIGTERM；等待应用清理后退出 |
 
 ## 命令参考
 

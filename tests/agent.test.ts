@@ -29,7 +29,8 @@ function project(): VideoProject {
 }
 function fakePort(overrides: Partial<AgentPort> = {}) {
   const state = { project: project(), calls: [] as string[], saved: [] as unknown[] };
-  const snap = () => ({ project: structuredClone(state.project), root: '/secret/path', task: null, environment: { browserAvailable: true, ffmpegAvailable: true, ffprobeAvailable: true } } as unknown as StudioSnapshot);
+  let task: StudioSnapshot['task'] = null;
+  const snap = () => ({ project: structuredClone(state.project), root: '/secret/path', task, environment: { browserAvailable: true, ffmpegAvailable: true, ffprobeAvailable: true } } as unknown as StudioSnapshot);
   const port: AgentPort = {
     snapshot: async () => snap(),
     readSource: async () => defaultSceneSource(),
@@ -40,6 +41,10 @@ function fakePort(overrides: Partial<AgentPort> = {}) {
     commit: async (_p, _r, next) => { state.project = { ...next, revision: state.project.revision + 1 }; return snap(); },
     route: async (endpoint, payload) => {
       state.calls.push(endpoint);
+      if (endpoint === 'export' || endpoint === 'preview') {
+        task = { id: 'fixture-' + endpoint + '-' + state.calls.length, kind: endpoint, status: 'complete', progress: 1, message: 'fixture complete', startedAt: new Date().toISOString() };
+        return { ok: true, value: snap() };
+      }
       if (endpoint === 'media.generate') return { ok: true, value: { id: 'task-1', phase: 'pending', payload } };
       if (endpoint === 'media.get') return { ok: true, value: { id: 'task-1', phase: 'ready', usage: { cost: 0.5 } } };
       return { ok: true, value: {} };
