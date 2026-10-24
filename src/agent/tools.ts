@@ -1,11 +1,11 @@
 import { compileDirectorPlan } from '../app/conversation.ts';
 import type { ChatInput } from '../app/contracts.ts';
-import type { AgentTool, JsonSchema, ToolContext, ToolResult } from './contracts.ts';
+import type { AgentTool, JsonSchema, ProjectTaskRef, ToolContext, ToolResult } from './contracts.ts';
 import { bound, summarizeProject } from './context.ts';
 import { synthesize, type SynthSpec } from './synth.ts';
 import type { Capabilities } from './contracts.ts';
-import type { VideoProject } from '../shared/types.ts';
-import { anchorPrompt, dataChecks, frameIssue, normalizeCharacter, normalizeShots, normalizeStyle, pngLuma, type QcReport, type Story } from './story.ts';
+import type { StudioSnapshot, VideoProject } from '../shared/types.ts';
+import { anchorPrompt, dataChecks, frameIssue, normalizeCharacter, normalizeShots, normalizeStyle, pngLuma, qcStatus, type QcReport, type Story } from './story.ts';
 import { SKILLS, skillIndex } from './skills.ts';
 
 const object = (properties: Record<string, JsonSchema>, required: string[] = []): JsonSchema => ({ type: 'object', properties, required, additionalProperties: false });
@@ -19,6 +19,11 @@ async function rpc(ctx: ToolContext, endpoint: string, payload: Record<string, u
   const result = await ctx.port.route(endpoint, { projectId: ctx.projectId, ...payload });
   if (!result.ok) throw Object.assign(new Error(result.error?.message ?? '操作失败'), { code: result.error?.code });
   return result.value;
+}
+function projectTask(snapshot: StudioSnapshot): ProjectTaskRef {
+  const task = snapshot.task as (StudioSnapshot['task'] & { retryOf?: string });
+  if (!task?.id) throw new Error('任务已提交，但没有返回任务 ID；请检查任务记录后继续');
+  return { id: task.id, kind: task.kind, ...(task.retryOf ? { retryOf: task.retryOf } : {}) };
 }
 function agentInput(ctx: ToolContext, message: string): ChatInput { return { message, projectId: ctx.projectId, provider: 'agent', model: 'agent', intent: 'modify' }; }
 
@@ -68,7 +73,8 @@ export async function qualityCheck(ctx: ToolContext): Promise<QcReport> {
     try { const shot = await ctx.port.capture(ctx.projectId, f.frame, ctx.signal); const luma = shot.mime === 'image/png' ? pngLuma(shot.bytes) : null; if (!luma) { unchecked.push(`${f.shotId}：画面格式无法分析`); continue; } const issue = frameIssue(f.shotId, luma); if (issue) issues.push(issue); }
     catch (error) { if (ctx.signal.aborted) throw error; unchecked.push(`${f.shotId}：截帧失败（${error instanceof Error ? error.message : String(error)}）`); }
   }
-  const report: QcReport = { pass: !issues.some(i => i.severity === 'high'), checkedAt: new Date().toISOString(), issues, unchecked };
+  const status = qcStatus(issues, unchecked);
+  const report: QcReport = { status, pass: status === 'pass', checkedAt: new Date().toISOString(), issues, unchecked };
   await ctx.docs.saveQc(report); return report;
 }
 
@@ -99,9 +105,9 @@ export function createTools(): AgentTool[] {
       async run(_args, ctx) { await rpc(ctx, 'undo', {}); const snapshot = await ctx.port.snapshot(ctx.projectId); return { content: json({ ok: true, revision: snapshot.project?.revision }), revision: snapshot.project?.revision }; } },
     { name: 'render_check', risk: 'read', description: '刷新预览并检查资源与关键帧，返回渲染错误。', parameters: object({}),
       async run(_args, ctx) {
-        await rpc(ctx, 'preview', {});
-        for (let i = 0; i < 240; i++) { ctx.signal.throwIfAborted(); const s = await ctx.port.snapshot(ctx.projectId); if (!s.task || s.task.kind !== 'preview' || s.task.status !== 'running') return { content: json({ status: s.task?.status ?? 'complete', message: s.task?.message, error: s.task?.error }) }; await new Promise(r => setTimeout(r, 250)); }
-        return { content: json({ status: 'timeout', message: '预览检查超过 60 秒' }) };
+        const task = projectTask(await rpc(ctx, 'preview', {}) as StudioSnapshot);
+        for (let i = 0; i < 240; i++) { ctx.signal.throwIfAborted(); const s = await ctx.port.snapshot(ctx.projectId); if (s.task?.id === task.id && s.task.status !== 'running') return { content: json({ taskId: task.id, status: s.task.status, message: s.task.message, error: s.task.error }), projectTask: task }; await new Promise(r => setTimeout(r, 250)); }
+        return { content: json({ taskId: task.id, status: 'timeout', message: '预览检查超过 60 秒' }), projectTask: task };
       } },
     { name: 'capture_frame', risk: 'read', description: '截取指定帧的画面，用于你自己查看（需要视觉模型）。', parameters: object({ frame: int('帧序号，从 0 开始') }, ['frame']),
       async run(args, ctx) { const frame = Number(args.frame); if (!Number.isSafeInteger(frame) || frame < 0) throw new Error('frame 无效'); const shot = await ctx.port.capture(ctx.projectId, frame, ctx.signal); return { content: json({ frame: shot.frame, shotId: shot.shotId }), images: [{ mime: shot.mime, bytes: shot.bytes }] }; } },
@@ -128,9 +134,19 @@ export function createTools(): AgentTool[] {
         const task = await rpc(ctx, 'media.generate', { expectedRevision: revision(args), operation: image ? 'image-to-video' : 'text-to-video', prompt: await anchored(ctx, args), ...(args.shotId ? { shotId: args.shotId } : {}), ...(image ? { imageAssetIds: [image], allowImageUpload: true } : {}), clientRequestId: `${ctx.runId}.${String(args.__callId ?? '')}` }) as { id: string }; return { content: json({ taskId: task.id, firstFrame: image || undefined }), waitFor: { kind: 'media', id: task.id } }; } },
     { name: 'media_apply', risk: 'write', description: '把已就绪的生成素材采用到工程。', parameters: object({ taskId: str('媒体任务 ID'), expectedRevision: int('当前工程版本') }, ['taskId', 'expectedRevision']),
       async run(args, ctx) { const value = await rpc(ctx, 'media.apply', { taskId: need(args, 'taskId'), expectedRevision: revision(args) }); return { content: json(value) }; } },
-    { name: 'generate_voice', risk: 'cost', requires: ['speech'], description: '为镜头生成配音（产生费用，需要用户批准）。', parameters: object({ shotId: str('镜头 ID'), text: str('旁白文字') }, ['shotId', 'text']),
+    { name: 'generate_voice', risk: 'cost', requires: ['speech'], description: '为镜头生成配音并登记为工程素材（产生费用，需要用户批准）。单镜头传 shotId+text；多个镜头一次批准传 lines=[{shotId,text}]。之后用 audio_edit 放到音轨或 align_to_voice 对齐。', parameters: object({ expectedRevision: int('当前工程版本'), shotId: str('镜头 ID'), text: str('旁白文字'), lines: { type: 'array', items: object({ shotId: str('镜头 ID'), text: str('旁白文字') }, ['shotId', 'text']) } }),
       estimate: () => null,
-      async run(args, ctx) { if (!ctx.port.voice) throw new Error('未配置配音'); const asset = await ctx.port.voice(ctx.projectId, need(args, 'shotId'), need(args, 'text'), ctx.signal); return { content: json({ ok: true, assetId: asset.id, name: asset.name }) }; } },
+      async run(args, ctx) {
+        if (!ctx.port.voice) throw new Error('未配置配音');
+        const lines = Array.isArray(args.lines) && args.lines.length ? (args.lines as Record<string, unknown>[]).slice(0, 50).map(line => ({ shotId: need(line, 'shotId'), text: need(line, 'text') })) : [{ shotId: need(args, 'shotId'), text: need(args, 'text') }];
+        const expected = Number.isSafeInteger(args.expectedRevision) ? args.expectedRevision as number : undefined; const results = [];
+        for (const [index, line] of lines.entries()) {
+          const asset = await ctx.port.voice(ctx.projectId, line.shotId, line.text, ctx.signal, { ...(index === 0 && expected !== undefined ? { expectedRevision: expected } : {}), requestId: `${ctx.runId}.${String(args.__callId ?? '')}.${index}` });
+          results.push({ shotId: line.shotId, assetId: asset.id, name: asset.name, revision: asset.revision });
+        }
+        const last = results.at(-1)!;
+        return { content: json({ ok: true, ...(results.length === 1 ? { assetId: last.assetId, name: last.name } : { voices: results }), revision: last.revision, hint: '素材已登记进工程；用 audio_edit 加入音轨或 align_to_voice 对齐' }), revision: last.revision };
+      } },
     { name: 'generate_music', risk: 'cost', requires: ['music'], description: '用已接入的音乐模型生成背景音乐并导入为素材（产生费用，需要用户批准）。之后用 audio_edit 放到音轨。', parameters: object({ prompt: str('风格、情绪、乐器、节奏'), durationSeconds: { type: 'number', description: '时长（秒）' } }, ['prompt']),
       estimate: () => null,
       async run(args, ctx) { if (!ctx.port.generateAudio) throw new Error('未配置音乐生成'); const asset = await ctx.port.generateAudio(ctx.projectId, 'music', need(args, 'prompt'), { durationSeconds: Number(args.durationSeconds) || undefined, signal: ctx.signal }); return { content: json({ ok: true, assetId: asset.id, name: asset.name, hint: '用 audio_edit 把它加入音轨' }), cost: asset.cost ?? null }; } },
@@ -146,14 +162,33 @@ export function createTools(): AgentTool[] {
         const asset = await ctx.port.importAudio(ctx.projectId, typeof args.name === 'string' && args.name.trim() ? args.name.trim().slice(0, 60) : '合成音效 · ' + kind, bytes, 'audio/wav');
         return { content: json({ ok: true, assetId: asset.id, name: asset.name, bytes: bytes.length, hint: '用 audio_edit 把它加入音轨' }) };
       } },
-    { name: 'run_workflow', risk: 'cost', description: '宏工具：一次运行工作台的固定协作流程（导演→画面→配音→视觉检查），可能调用生成模型（需要用户批准）。', parameters: object({ expectedRevision: int('当前工程版本'), prompt: str('制作要求') }, ['expectedRevision', 'prompt']),
+    { name: 'run_workflow', risk: 'cost', description: '宏工具：一次运行工作台的固定协作流程（导演→画面→配音），可能调用生成模型（需要用户批准）。visual 选画面类型：code=代码动画（免费），image=生图，video=生视频；不填时按已接入能力选择（有视频模型→video，有图片模型→image，否则 code）。', parameters: object({ expectedRevision: int('当前工程版本'), prompt: str('制作要求'), visual: { type: 'string', enum: ['code', 'image', 'video'], description: '画面类型' }, narration: { type: 'boolean', description: '是否配音（需已接入配音）' } }, ['expectedRevision', 'prompt']),
       estimate: () => null,
-      async run(args, ctx) { const record = await rpc(ctx, 'workflows.run', { expectedRevision: revision(args), prompt: need(args, 'prompt') }) as { id: string }; return { content: json({ workflowId: record.id }), waitFor: { kind: 'workflow', id: record.id } }; } },
-    { name: 'export_mp4', risk: 'export', description: '导出当前版本为 MP4（需要用户批准）。导出前自动质检；有严重问题时拒绝导出，确需导出传 force=true。', parameters: object({ force: { type: 'boolean' } }),
+      async run(args, ctx) {
+        const roles = (await ctx.port.capabilities?.().catch(() => null))?.roles ?? [];
+        const visual = args.visual === undefined ? (roles.includes('video') ? 'video' : roles.includes('image') ? 'image' : 'code') : String(args.visual);
+        if (!['code', 'image', 'video'].includes(visual)) throw new Error('visual 须为 code / image / video');
+        if (visual !== 'code' && !roles.includes(visual as 'image' | 'video')) throw new Error(`未接入${visual === 'image' ? '图片' : '视频'}生成模型，不能用 visual=${visual}；改用 code`);
+        const narration = args.narration === true; if (narration && !roles.includes('speech')) throw new Error('未接入配音，不能 narration=true');
+        // Visual review uploads keyframes; the macro never opts in on the user's behalf.
+        const record = await rpc(ctx, 'workflows.run', { expectedRevision: revision(args), prompt: need(args, 'prompt'), visual, narration, review: false, allowImageUpload: false }) as { id: string };
+        return { content: json({ workflowId: record.id, visual, narration }), waitFor: { kind: 'workflow', id: record.id } };
+      } },
+    { name: 'export_mp4', risk: 'export', description: '导出当前版本为 MP4（需要用户批准）。导出前自动质检；有严重问题时拒绝导出，确需导出传 force=true。重试失败或取消的导出时传 retryTaskId，保留任务替代关系。', parameters: object({ force: { type: 'boolean' }, retryTaskId: str('明确重试的失败/取消导出任务 ID') }),
       async run(args, ctx) {
         const report = await qualityCheck(ctx);
-        if (!report.pass && args.force !== true) return { content: json({ ok: false, blocked: true, message: '导出前质检未通过，先修复下列问题（或确认后用 force=true 强制导出）', issues: report.issues }) };
-        await rpc(ctx, 'export', {}); return { content: json({ ok: true, message: '已开始导出，可在「任务记录」查看进度', qc: { pass: report.pass, issues: report.issues.length } }) };
+        if (!report.pass && args.force !== true) return { content: json({ ok: false, blocked: true, status: report.status, message: report.status === 'partial' ? '导出前质检未完成：部分关键帧没有检查（见 unchecked），不能视为通过。修复后重试，或确认后用 force=true 强制导出' : '导出前质检未通过，先修复下列问题（或确认后用 force=true 强制导出）', issues: report.issues, unchecked: report.unchecked }) };
+        let snapshot: StudioSnapshot;
+        if (args.retryTaskId !== undefined) {
+          const taskId = need(args, 'retryTaskId');
+          const { tasks } = await rpc(ctx, 'tasks', {}) as { tasks: { id: string; kind: string; status: string; retryable: boolean }[] };
+          const previous = tasks.find(task => task.id === taskId);
+          if (!previous || previous.kind !== 'export' || !['failed', 'cancelled'].includes(previous.status) || !previous.retryable) throw new Error('retryTaskId 必须是本工程可重试的失败或取消导出任务');
+          const current = await ctx.port.snapshot(ctx.projectId);
+          snapshot = await rpc(ctx, 'retry', { taskId, expectedRevision: current.project?.revision }) as StudioSnapshot;
+        } else snapshot = await rpc(ctx, 'export', {}) as StudioSnapshot;
+        const task = projectTask(snapshot);
+        return { content: json({ ok: true, taskId: task.id, ...(task.retryOf ? { retryOf: task.retryOf } : {}), message: '已开始导出，可在「任务记录」查看进度', qc: { status: report.status, pass: report.pass, issues: report.issues.length, unchecked: report.unchecked.length, forced: !report.pass } }), projectTask: task };
       } },
     { name: 'skill_read', risk: 'read', description: '读取导演技能文档（按主题）：' + skillIndex() + '。写镜头源码前按需查阅。', parameters: object({ topic: { type: 'string', enum: Object.keys(SKILLS) } }, ['topic']),
       async run(args) { const skill = SKILLS[String(args.topic)]; if (!skill) throw new Error('未知主题；可选：' + Object.keys(SKILLS).join(', ')); return { content: `# ${skill.title}\n${skill.body}` }; } },

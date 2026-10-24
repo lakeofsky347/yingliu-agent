@@ -1,8 +1,8 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { mkdir, readFile } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import type { VideoProject } from '../shared/types.ts';
+import { writeDurableFile } from './durable-file.ts';
 
 export interface StoryStyle { look: string; palette: string; typography: string; motion: string; negative: string }
 export interface StoryCharacter { id: string; name: string; description: string; features: string[]; referenceAssetIds: string[]; voice?: string }
@@ -13,7 +13,7 @@ export interface Story {
   style: StoryStyle; characters: StoryCharacter[]; shots: StoryShot[]; approvedAt?: string; updatedAt: string;
   consistency: Record<string, ConsistencyScore>;
 }
-export interface Ledger { version: number; projectId: string; maxCost: number | null; currency: string; spent: number; unknownCostCalls: number; byTool: Record<string, { calls: number; cost: number }>; updatedAt: string }
+export interface Ledger { version: number; projectId: string; maxCost: number | null; currency: string; spent: number; unknownCostCalls: number; byTool: Record<string, { calls: number; cost: number }>; settledExecutions?: Record<string, true>; updatedAt: string }
 
 const SAFE = /^[a-zA-Z0-9_-]{1,120}$/;
 const text = (value: unknown, max: number) => typeof value === 'string' ? value.trim().slice(0, max) : '';
@@ -62,20 +62,32 @@ export class ProjectDocs<T extends { version: number }> {
   private queue: Promise<unknown> = Promise.resolve();
   constructor(private readonly directory: string, private readonly empty: (projectId: string) => T) {}
   private file(projectId: string) { if (!SAFE.test(projectId)) throw new Error('工程 ID 无效'); return join(this.directory, projectId + '.json'); }
-  async get(projectId: string): Promise<T> { await this.queue.catch(() => {}); try { return JSON.parse(await readFile(this.file(projectId), 'utf8')) as T; } catch { return this.empty(projectId); } }
+  async get(projectId: string): Promise<T> { await this.queue.catch(() => {}); return this.read(projectId); }
   update(projectId: string, change: (current: T) => T, expectedVersion?: number): Promise<T> {
     const work = async () => {
       const current = await this.read(projectId);
       if (expectedVersion !== undefined && expectedVersion !== current.version) throw Object.assign(new Error(`版本已变化（当前 ${current.version}），请重新读取`), { code: 'REVISION_CONFLICT' });
       const next = { ...change(structuredClone(current)), version: current.version + 1 };
       await mkdir(this.directory, { recursive: true });
-      const file = this.file(projectId), temporary = file + '.tmp-' + randomUUID();
-      try { await writeFile(temporary, JSON.stringify(next, null, 1)); await rename(temporary, file); } finally { await rm(temporary, { force: true }); }
+      await writeDurableFile(this.file(projectId), JSON.stringify(next, null, 1));
       return next;
     };
     const next = this.queue.then(work, work); this.queue = next.catch(() => {}); return next;
   }
-  private async read(projectId: string): Promise<T> { try { return JSON.parse(await readFile(this.file(projectId), 'utf8')) as T; } catch { return this.empty(projectId); } }
+  /** Raw stored document, or undefined when this project has none yet (used by project backups). */
+  async raw(projectId: string): Promise<T | undefined> { await this.queue.catch(() => {}); try { await readFile(this.file(projectId)); } catch (error) { if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return undefined; } return this.read(projectId); }
+  /** Replace the whole document (restore from backup); serialized with updates, version continues from the current file. */
+  put(projectId: string, value: T): Promise<T> { return this.update(projectId, () => structuredClone(value)); }
+  /** Only a missing file starts empty. Corrupt JSON or permission errors keep the original file untouched and surface an error,
+   *  so a damaged ledger can never silently reset spend to zero. */
+  private async read(projectId: string): Promise<T> {
+    const file = this.file(projectId); let text: string;
+    try { text = await readFile(file, 'utf8'); }
+    catch (error) { if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return this.empty(projectId); throw Object.assign(new Error(`智能体资料无法读取（${basename(this.directory)}/${projectId}.json：${(error as NodeJS.ErrnoException)?.code ?? '未知错误'}）；原文件已保留，请检查权限后重试`), { code: 'AGENT_DOC_UNREADABLE' }); }
+    let value: unknown; try { value = JSON.parse(text); } catch { value = undefined; }
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !Number.isSafeInteger((value as { version?: unknown }).version)) throw Object.assign(new Error(`智能体资料已损坏（${basename(this.directory)}/${projectId}.json）；原文件已保留，不会按空记录继续（避免账本被清零）。请从备份恢复或手动修复`), { code: 'AGENT_DOC_CORRUPT' });
+    return value as T;
+  }
 }
 export const emptyLedger = (projectId: string): Ledger => ({ version: 0, projectId, maxCost: null, currency: 'CNY', spent: 0, unknownCostCalls: 0, byTool: {}, updatedAt: new Date(0).toISOString() });
 
@@ -102,7 +114,10 @@ export function pngLuma(bytes: Uint8Array): { mean: number; std: number } | null
 }
 
 export interface QcIssue { check: 'black' | 'silence' | 'subtitle' | 'duration' | 'consistency'; severity: 'low' | 'medium' | 'high'; shotId?: string; message: string }
-export interface QcReport { pass: boolean; checkedAt: string; issues: QcIssue[]; unchecked: string[] }
+/** status: pass = every check ran and nothing severe; partial = no severe issue but some checks could not run; fail = a severe issue. `pass` is true only for status pass. */
+export type QcStatus = 'pass' | 'partial' | 'fail';
+export interface QcReport { status?: QcStatus; pass: boolean; checkedAt: string; issues: QcIssue[]; unchecked: string[] }
+export function qcStatus(issues: QcIssue[], unchecked: string[]): QcStatus { return issues.some(i => i.severity === 'high') ? 'fail' : unchecked.length ? 'partial' : 'pass'; }
 
 /** Project-data checks (no rendering): silence, subtitle overflow, durations, consistency scores. */
 export function dataChecks(project: VideoProject, story: Story | null, threshold = 75): QcIssue[] {

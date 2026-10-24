@@ -25,7 +25,7 @@ const json=(value:unknown)=>Buffer.from(JSON.stringify(value));
 function assetPaths(asset:Asset):string[]{return [...new Set([asset.path,asset.originalPath].filter((value):value is string=>typeof value==='string'))];}
 interface ArchiveEntry {name:string;bytes:number;sha256:string}
 interface ExtractedEntry extends ArchiveEntry {path:string;complete:boolean}
-function allowed(name:string){return name==='manifest.json'||name==='project.json'||/^sources\/[\w-]{1,100}\.json$/.test(name)||/^assets\/[\w./-]+$/.test(name)&&!name.split('/').some(part=>!part||part==='.'||part==='..');}
+function allowed(name:string){return name==='manifest.json'||name==='project.json'||/^sources\/[\w-]{1,100}\.json$/.test(name)||/^agent\/(story|ledger|qc)\.json$/.test(name)||/^assets\/[\w./-]+$/.test(name)&&!name.split('/').some(part=>!part||part==='.'||part==='..');}
 function fileLimit(name:string,limits:ResolvedArchiveLimits){return name.startsWith('assets/')?limits.fileBytes:Math.min(limits.fileBytes,METADATA_LIMIT);}
 function cleanProject(project:VideoProject):VideoProject{
   const value=structuredClone(project);value.outputs=[];delete value.sessionIds;
@@ -84,13 +84,16 @@ async function extractArchive(input:{path?:string;dataBase64?:string},directory:
   }finally{for(const fd of handles)closeSync(fd);}
 }
 
-export async function exportProjectArchive(backend:BackendPort,input:{projectId?:string;path?:string;limits?:ArchiveLimits}){
+/** Optional agent-side data (story/ledger/QC) carried in agent/*.json so a backup restores budget and story state. */
+export interface AgentArchiveData { export(projectId:string):Promise<Partial<Record<'story'|'ledger'|'qc',unknown>>>; import(projectId:string,docs:Partial<Record<'story'|'ledger'|'qc',unknown>>):Promise<void>; /** R07: throw if docs are invalid; called before the project is registered. */ validate?(docs:Partial<Record<'story'|'ledger'|'qc',unknown>>):void }
+export async function exportProjectArchive(backend:BackendPort,input:{projectId?:string;path?:string;limits?:ArchiveLimits},agent?:AgentArchiveData){
   const limits=resolveLimits(input.limits);
   const snapshot=await backend.call<StudioSnapshot>('current',{projectId:input.projectId});if(!snapshot.project||!snapshot.root)throw new Error('请先打开一个影片工程');
   const project=cleanProject(snapshot.project);validateStoredProject(project);
   const entries:{name:string;bytes?:Uint8Array;path?:string}[]=[{name:'project.json',bytes:json(project)}],seen=new Set(['project.json']);let total=entries[0]!.bytes!.length;
   const store=new ProjectStore();
   for(const shot of project.shots){const source=await store.readSource(snapshot.root,shot,project.revision),bytes=json(source);entries.push({name:'sources/'+shot.id+'.json',bytes});total+=bytes.length;}
+  if(agent)for(const [name,value]of Object.entries(await agent.export(project.id))){const bytes=json(value);entries.push({name:'agent/'+name+'.json',bytes});total+=bytes.length;}
   for(const asset of project.assets)for(const relative of assetPaths(asset))if(!seen.has(relative)){
     if(!allowed(relative)||!relative.startsWith('assets/'))throw new Error('工程包含非素材目录的文件引用');const path=await projectPath(snapshot.root,relative),info=await stat(path);
     if(!info.isFile()||info.size>limits.fileBytes)throw new Error('素材 '+asset.name+' 超过工程包单文件限额 '+limits.fileBytes+' 字节');total+=info.size;seen.add(relative);entries.push({name:relative,path});
@@ -108,7 +111,7 @@ export async function exportProjectArchive(backend:BackendPort,input:{projectId?
   }finally{await rm(temporary,{force:true});if(temporaryDirectory)await rm(temporaryDirectory,{recursive:true,force:true});}
 }
 
-export async function importProjectArchive(backend:BackendPort,input:{path?:string;dataBase64?:string;limits?:ArchiveLimits}):Promise<StudioSnapshot>{
+export async function importProjectArchive(backend:BackendPort,input:{path?:string;dataBase64?:string;limits?:ArchiveLimits},agent?:AgentArchiveData):Promise<StudioSnapshot>{
   const limits=resolveLimits(input.limits);
   if(!input.path&&!input.dataBase64)throw new Error('请选择一个 .yingliu 工程包');
   if(input.path&&input.dataBase64)throw new Error('工程包文件和数据只能选择一种');
@@ -126,6 +129,13 @@ export async function importProjectArchive(backend:BackendPort,input:{path?:stri
     project.id='film-'+randomUUID();project.revision=0;project.createdAt=project.updatedAt=new Date().toISOString();
     const sources=[];for(const shot of project.shots){const entry=files.get('sources/'+shot.id+'.json');if(!entry)throw new Error('工程包缺少镜头源码');sources.push({shotId:shot.id,source:JSON.parse(await readFile(entry.path,'utf8')) as SceneSource});}
     const assetFiles=[...new Set(project.assets.flatMap(assetPaths))].map(path=>{if(!allowed(path)||!path.startsWith('assets/'))throw new Error('素材路径无效');const entry=files.get(path);if(!entry)throw new Error('工程包缺少素材 '+path);return {path,localPath:entry.path};});
-    return await backend.call('create',{project,sources,assetFiles});
+    const agentDocs:Partial<Record<'story'|'ledger'|'qc',unknown>>={};for(const name of ['story','ledger','qc'] as const){const entry=files.get('agent/'+name+'.json');if(entry)try{agentDocs[name]=JSON.parse(await readFile(entry.path,'utf8'));}catch{throw new Error('工程包中的智能体资料损坏：'+name);}}
+    const hasDocs=!!agent&&Object.keys(agentDocs).length>0;if(hasDocs)agent!.validate?.(agentDocs);
+    const created=await backend.call<StudioSnapshot>('create',{project,sources,assetFiles});
+    if(hasDocs)try{await agent!.import(created.project?.id??project.id,agentDocs);}catch(error){
+      // R07: never leave a half-imported project active; the hub has no hard delete, so archive it (recoverable, hidden from the list)
+      await backend.call('archive',{projectId:created.project?.id??project.id,archived:true}).catch(()=>{});throw error;
+    }
+    return created;
   }finally{await rm(directory,{recursive:true,force:true});}
 }

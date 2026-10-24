@@ -97,9 +97,9 @@ test('plan approval: rejected plans are not saved; approved plan is injected int
     const s = await service.start({ projectId: 'p', goal: '做一个雪夜小狐狸短片', autoApprove: ['read', 'write', 'cost'] });
     let run = await settle(service, s.id, ['awaiting_approval', 'failed', 'complete']);
     assert.equal(run.pending?.tool, 'plan_story'); assert.equal(run.pending?.risk, 'plan'); assert.match(run.pending!.reason, /创作计划/);
-    await service.reject(s.id, 'p1', '风格再想想'); assert.equal((await service.story('p')).status, 'empty');
-    run = await settle(service, s.id, ['awaiting_approval', 'failed', 'complete']); assert.equal(run.pending?.callId, 'p2'); await service.approve(s.id, 'p2');
-    run = await settle(service, s.id, ['awaiting_approval', 'failed', 'complete']); assert.equal(run.pending?.callId, 'p3'); await service.approve(s.id, 'p3');
+    await service.reject(s.id, 'p1', (await service.get(s.id)).pending!.execId!, '风格再想想'); assert.equal((await service.story('p')).status, 'empty');
+    run = await settle(service, s.id, ['awaiting_approval', 'failed', 'complete']); assert.equal(run.pending?.callId, 'p2'); await service.approve(s.id, 'p2', (await service.get(s.id)).pending!.execId!);
+    run = await settle(service, s.id, ['awaiting_approval', 'failed', 'complete']); assert.equal(run.pending?.callId, 'p3'); await service.approve(s.id, 'p3', (await service.get(s.id)).pending!.execId!);
     run = await settle(service, s.id, ['complete', 'failed', 'awaiting_approval']); assert.equal(run.status, 'complete', run.message);
     const story = await service.story('p'); assert.equal(story.status, 'approved'); assert.equal(story.shots.length, 2); assert.equal(story.shots[1].continueFromPrevious, true);
     const gen = calls.find(c => c.endpoint === 'media.generate')!; assert.match(String(gen.payload.prompt), /雪地中的小狐狸\n【一致性锚点】画风：水彩绘本/); assert.match(String(gen.payload.prompt), /红色围巾/);
@@ -115,14 +115,14 @@ test('consistency review scores shots and only proposes regeneration; frame hand
   const service = new AgentService(d, p, { resolveModel: model, fetch: gw.fetch, maxReviewRounds: 0, pollMs: 5 });
   try {
     await service.docs('p').updateStory(s => ({ ...s, ...plan, style: { ...plan.style, typography: '' }, characters: [{ ...plan.characters[0], referenceAssetIds: [] }], status: 'approved', shots: normalizeShots(shots.shots, [{ id: 'fox', name: '', description: '', features: [], referenceAssetIds: [] }]) }));
-    const s = await service.start({ projectId: 'p', goal: '检查一致性' });
+    const s = await service.start({ projectId: 'p', goal: '检查一致性', allowImages: true });
     const run = await settle(service, s.id, ['awaiting_approval', 'failed', 'complete']);
     assert.equal(run.status, 'awaiting_approval'); assert.equal(run.pending?.tool, 'generate_video');
     const story = await service.story('p'); assert.equal(story.consistency.b.score, 40); assert.equal(story.consistency.a.score, 92);
     const review = run.transcript.find(m => m.role === 'tool' && /proposals/.test(m.content))!; assert.match(review.content, /建议重生/); assert.doesNotMatch(review.content, /"shotId":"a","action"/);
     assert.ok(!calls.some(c => c.endpoint === 'media.generate'), 'no spend before approval');
     assert.deepEqual(imports, ['尾帧承接 · a→b']);
-    await service.approve(s.id, 'v1'); await settle(service, s.id, ['complete', 'failed']);
+    await service.approve(s.id, 'v1', (await service.get(s.id)).pending!.execId!); await settle(service, s.id, ['complete', 'failed']);
     const gen = calls.find(c => c.endpoint === 'media.generate')!; assert.equal(gen.payload.operation, 'image-to-video'); assert.deepEqual(gen.payload.imageAssetIds, ['tail']);
   } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
 });
@@ -136,7 +136,7 @@ test('project budget persists across runs and stops spending; export is blocked 
     await service.setProjectBudget('p', 0.3);
     const s = await service.start({ projectId: 'p', goal: '配乐', autoApprove: ['read', 'write', 'cost'] });
     let run = await settle(service, s.id, ['awaiting_approval', 'failed', 'complete']); assert.equal(run.status, 'awaiting_approval'); assert.match(run.pending!.reason, /项目费用上限/);
-    await service.approve(s.id, 'm1'); run = await settle(service, s.id, ['complete', 'failed']); assert.equal(run.status, 'complete');
+    await service.approve(s.id, 'm1', (await service.get(s.id)).pending!.execId!); run = await settle(service, s.id, ['complete', 'failed']); assert.equal(run.status, 'complete');
     let ledger = await service.ledger('p'); assert.equal(ledger.spent, 0.2); assert.deepEqual(ledger.byTool.generate_music, { calls: 1, cost: 0.2 });
     await service.setProjectBudget('p', 0.2);
     gw.reset?.();

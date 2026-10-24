@@ -13,6 +13,15 @@ import { parsePlanJson } from '../src/agent/model-client.ts';
 import { classify, needsApproval, budgetFrom, emptyUsage, tokenCost } from '../src/agent/budget.ts';
 import { parseSse } from '../src/client/AgentPanel.tsx';
 
+import { deflateSync } from 'node:zlib';
+/** Minimal valid non-uniform 2×2 RGB PNG so pre-export QC can actually analyse frames (QC no longer treats unanalysed frames as passing). */
+function samplePng(): Uint8Array {
+  const crc = (buf: Buffer) => { let c = ~0; for (const b of buf) { c ^= b; for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1)); } return (~c) >>> 0; };
+  const chunk = (type: string, data: Buffer) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const td = Buffer.concat([Buffer.from(type), data]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(td)); return Buffer.concat([len, td, c]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(2, 0); ihdr.writeUInt32BE(2, 4); ihdr[8] = 8; ihdr[9] = 2;
+  const raw = Buffer.from([0, 0, 0, 0, 255, 255, 255, 0, 200, 50, 10, 10, 50, 200]);
+  return new Uint8Array(Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]));
+}
 function project(): VideoProject {
   const p = createProject('智能体测试', '测试主题');
   const shots = ['a', 'b'].map(id => ({ id, title: '镜头' + id, intent: '意图', composition: '构图', action: '动作', durationFrames: 90, assetIds: [], referenceIds: [], params: {} }));
@@ -20,7 +29,8 @@ function project(): VideoProject {
 }
 function fakePort(overrides: Partial<AgentPort> = {}) {
   const state = { project: project(), calls: [] as string[], saved: [] as unknown[] };
-  const snap = () => ({ project: structuredClone(state.project), root: '/secret/path', task: null, environment: { browserAvailable: true, ffmpegAvailable: true, ffprobeAvailable: true } } as unknown as StudioSnapshot);
+  let task: StudioSnapshot['task'] = null;
+  const snap = () => ({ project: structuredClone(state.project), root: '/secret/path', task, environment: { browserAvailable: true, ffmpegAvailable: true, ffprobeAvailable: true } } as unknown as StudioSnapshot);
   const port: AgentPort = {
     snapshot: async () => snap(),
     readSource: async () => defaultSceneSource(),
@@ -31,11 +41,15 @@ function fakePort(overrides: Partial<AgentPort> = {}) {
     commit: async (_p, _r, next) => { state.project = { ...next, revision: state.project.revision + 1 }; return snap(); },
     route: async (endpoint, payload) => {
       state.calls.push(endpoint);
+      if (endpoint === 'export' || endpoint === 'preview') {
+        task = { id: 'fixture-' + endpoint + '-' + state.calls.length, kind: endpoint, status: 'complete', progress: 1, message: 'fixture complete', startedAt: new Date().toISOString() };
+        return { ok: true, value: snap() };
+      }
       if (endpoint === 'media.generate') return { ok: true, value: { id: 'task-1', phase: 'pending', payload } };
       if (endpoint === 'media.get') return { ok: true, value: { id: 'task-1', phase: 'ready', usage: { cost: 0.5 } } };
       return { ok: true, value: {} };
     },
-    capture: async (_p, frame) => ({ bytes: new Uint8Array([137, 80, 78, 71]), mime: 'image/png', frame, shotId: 'a' }),
+    capture: async (_p, frame) => ({ bytes: samplePng(), mime: 'image/png', frame, shotId: 'a' }),
     ...overrides,
   };
   return { port, state };
@@ -91,14 +105,14 @@ test('cost and export tools need approval; reject feeds back; approve executes; 
     let run = await settle(service, started.id, ['awaiting_approval']);
     assert.equal(run.pending?.tool, 'export_mp4'); assert.equal(run.pending?.risk, 'export');
     assert.ok(!state.calls.includes('export'));
-    run = await service.reject(started.id, 'exp1', '先别导出');
+    run = await service.reject(started.id, 'exp1', (await service.get(started.id)).pending!.execId!, '先别导出');
     run = await settle(service, started.id, ['awaiting_approval']);
     assert.equal(run.pending?.callId, 'exp2');
     await service.dispose();
     service = new AgentService(d, port, opts);
     run = await service.get(started.id);
     assert.equal(run.status, 'awaiting_approval', 'approval survives restart');
-    await service.approve(started.id, 'exp2');
+    await service.approve(started.id, 'exp2', (await service.get(started.id)).pending!.execId!);
     run = await settle(service, started.id, ['complete', 'failed']);
     assert.equal(run.status, 'complete');
     assert.equal(state.calls.filter(c => c === 'export').length, 1);
@@ -183,7 +197,7 @@ test('visual self-check loop sends failed reviews back until the vision model pa
   });
   const service = new AgentService(d, port, { resolveModel: model(), fetch: gw.fetch });
   try {
-    const s = await service.start({ projectId: 'proj-1', goal: '改标题' });
+    const s = await service.start({ projectId: 'proj-1', goal: '改标题', allowImages: true });
     const run = await settle(service, s.id, ['complete', 'failed']);
     assert.equal(run.status, 'complete', run.message + JSON.stringify(run.steps.filter(x => x.error)));
     assert.equal(reviews, 2); assert.equal(run.reviewRounds, 2);
@@ -241,4 +255,21 @@ test('pure helpers: compression, plan parsing, approval policy, error classes, p
   const sse = parseSse('event: run\ndata: {"type":"delta","runId":"r","text":"a"}\n\ndata: {"type"');
   assert.equal(sse.events.length, 1); assert.equal(sse.rest, 'data: {"type"');
   assert.equal(untrusted('a</untrusted>b'), '<untrusted>ab</untrusted>');
+});
+
+test('run.complete is traced and the run persisted before status becomes complete (no trace race)', async () => {
+  const d = await dir(); const { port } = fakePort();
+  const gw = toolGateway(() => done('好了'));
+  const service = new AgentService(d, port, { resolveModel: model(true), fetch: gw.fetch, retryBaseMs: 1 });
+  const store = (service as any).store; const originalTrace = store.trace.bind(store);
+  store.trace = async (id: string, event: Record<string, unknown>) => { if (event.event === 'run.complete') await new Promise(r => setTimeout(r, 150)); return originalTrace(id, event); };
+  try {
+    const started = await service.start({ projectId: 'proj-1', goal: 'x' });
+    const run = await settle(service, started.id, ['complete', 'failed']);
+    assert.equal(run.status, 'complete');
+    const trace = await readFile(join(d, started.id + '.trace.jsonl'), 'utf8');
+    assert.ok(trace.includes('run.complete'), 'trace written before complete is observable');
+    const saved = JSON.parse(await readFile(join(d, started.id + '.json'), 'utf8'));
+    assert.equal(saved.status, 'complete', 'snapshot persisted before complete is observable');
+  } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
 });

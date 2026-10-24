@@ -16,7 +16,7 @@ import {inspectCredential,isCredentialError,updateCredential} from '../app/secre
 import {defaultTtsSettings,validateTtsSettings} from '../shared/tts-capability.ts';
 
 interface TaskRequest { endpoint:'preview'|'export'|'generate'; payload:Record<string,string> }
-interface RecordedTask extends TaskState { appRecordVersion?:1; revision?:number; request?:TaskRequest; retryOf?:string }
+interface RecordedTask extends TaskState { appRecordVersion?:1; revision?:number; request?:TaskRequest; retryOf?:string; outputId?:string }
 
 export class StudioService {
   readonly store:ProjectStore;readonly renderer=new VideoRenderer();
@@ -203,7 +203,7 @@ export class StudioService {
     for(const name of names.filter(name=>/^[a-zA-Z0-9_-]+\.json$/.test(name))){
       try{const value=JSON.parse(await readFile(await projectPath(root,'.studio/tasks/'+name),'utf8')) as RecordedTask;
         if(value.id+'.json'!==name||typeof value.startedAt!=='string'||!['storyboard','scenes','modify','preview','export','audio'].includes(value.kind)||!['running','complete','failed','cancelled'].includes(value.status))continue;
-        const task:RecordedTask={id:value.id,kind:value.kind,status:value.status,startedAt:value.startedAt,progress:Number.isFinite(value.progress)?value.progress:0,message:await this.redact(String(value.message??'')),logPath:await projectPath(root,'.studio/tasks/'+name),finishedAt:typeof value.finishedAt==='string'?value.finishedAt:undefined,error:typeof value.error==='string'?await this.redact(value.error):undefined,shotId:typeof value.shotId==='string'?value.shotId:undefined,appRecordVersion:value.appRecordVersion===1?1:undefined,revision:Number.isSafeInteger(value.revision)?value.revision:undefined,retryOf:typeof value.retryOf==='string'?value.retryOf:undefined};
+        const task:RecordedTask={id:value.id,kind:value.kind,status:value.status,startedAt:value.startedAt,progress:Number.isFinite(value.progress)?value.progress:0,message:await this.redact(String(value.message??'')),logPath:await projectPath(root,'.studio/tasks/'+name),finishedAt:typeof value.finishedAt==='string'?value.finishedAt:undefined,error:typeof value.error==='string'?await this.redact(value.error):undefined,shotId:typeof value.shotId==='string'?value.shotId:undefined,appRecordVersion:value.appRecordVersion===1?1:undefined,revision:Number.isSafeInteger(value.revision)?value.revision:undefined,retryOf:typeof value.retryOf==='string'?value.retryOf:undefined,outputId:typeof value.outputId==='string'?value.outputId:undefined};
         const request=value.appRecordVersion===1&&value.request?this.recordedRequest(value.request.endpoint,value.request.payload):undefined;
         if(request&&((request.endpoint==='preview'||request.endpoint==='export')?request.endpoint===value.kind:request.payload.kind===value.kind)){
           for(const key of Object.keys(request.payload))request.payload[key]=await this.redact(request.payload[key]!);task.request=request;
@@ -220,13 +220,13 @@ export class StudioService {
     }
     this.task=records[0]??null;
   }
-  private async start(kind:TaskState['kind'],work:(signal:AbortSignal)=>Promise<void>,shotId?:string,request?:TaskRequest,retryOf?:string):Promise<void>{
+  private async start(kind:TaskState['kind'],work:(signal:AbortSignal,task:RecordedTask)=>Promise<void>,shotId?:string,request?:TaskRequest,retryOf?:string):Promise<void>{
     this.assertIdle();const root=this.required().root;
     const task:RecordedTask={id:randomUUID(),kind,status:'running',progress:0,message:'准备中',startedAt:new Date().toISOString(),shotId,appRecordVersion:1,revision:this.required().project.revision,request,retryOf};
     const controller=new AbortController();this.controller=controller;this.task=task;
     try{await this.writeTaskJournal(root,task);}catch(error){task.status='failed';task.error='任务记录保存失败：'+String(error);task.message=task.error;throw error;}
     this.job=(async()=>{
-      try{await work(controller.signal);controller.signal.throwIfAborted();task.status='complete';task.progress=1;task.message='已完成';}
+      try{await work(controller.signal,task);controller.signal.throwIfAborted();task.status='complete';task.progress=1;task.message='已完成';}
       catch(error){task.status=controller.signal.aborted?'cancelled':'failed';task.error=error instanceof Error?error.message:String(error);task.message=task.status==='cancelled'?'已取消':task.error;}
       finally{
         task.error=task.error?await this.redact(task.error):undefined;task.message=await this.redact(task.message);task.finishedAt=new Date().toISOString();
@@ -350,7 +350,7 @@ export class StudioService {
             }
           },data.shotId,this.recordedRequest('generate',data),data._retryOf);break;
         }
-        case 'export':{const {root,project}=this.required();compileSpec(project);const snapshot=structuredClone(project);await this.start('export',async signal=>{const result=await this.renderer.export(root,snapshot,this.settings,signal,(p,m)=>this.progress(p,m));signal.throwIfAborted();await this.enqueue(async()=>{signal.throwIfAborted();const current=structuredClone(this.required().project);current.outputs.push(result);await this.persist(current,{},'导出成片记录');if(!result.url&&this.previewUrl)result.url=new URL(relative(root,result.path).split('/').map(encodeURIComponent).join('/'),this.previewUrl).href;});},undefined,this.recordedRequest('export',data),data._retryOf);break;}
+        case 'export':{const {root,project}=this.required();compileSpec(project);const snapshot=structuredClone(project);await this.start('export',async(signal,task)=>{const result=await this.renderer.export(root,snapshot,this.settings,signal,(p,m)=>this.progress(p,m));signal.throwIfAborted();await this.enqueue(async()=>{signal.throwIfAborted();const current=structuredClone(this.required().project);current.outputs.push(result);await this.persist(current,{},'导出成片记录');task.outputId=result.id;if(!result.url&&this.previewUrl)result.url=new URL(relative(root,result.path).split('/').map(encodeURIComponent).join('/'),this.previewUrl).href;});},undefined,this.recordedRequest('export',data),data._retryOf);break;}
         case 'history':return {ok:true,value:await this.store.history(this.required().root)};
         case 'undo':case 'redo':{this.assertIdle();this.project=await this.store.moveHistory(this.required().root,endpoint,data.expectedRevision);await this.refreshAfterCommit();break;}
         case 'rename':{this.assertIdle();if(typeof data.title!=='string'||!data.title.trim())throw new Error('工程名称不能为空');const next=structuredClone(this.required().project);next.title=data.title.trim();await this.persist(next,{},'重命名工程');break;}

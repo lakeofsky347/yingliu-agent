@@ -74,6 +74,8 @@
 | `openai-speech` OpenAI 兼容 TTS | 音频 | `https://api.openai.com/v1` |
 | `generic-async` 自定义 | 任意 | 自定义 |
 
+> **Replicate 模型名编码待真实验证**：`replicate` 预设的提交路径是 `/models/{{model}}/predictions`，模板路径变量统一做 URL 编码，`owner/name` 中的 `/` 会被编码为 `%2F`。Replicate 是否接受这种写法尚未用真实账号验证（本仓库测试只用本地网关）；本轮不改变行为。如果真实服务返回 404，请改用 `generic-async` 模板，并把 owner 和 name 分开写进路径。
+
 连接检查只发 GET 请求（`checkPath` 或根路径），不提交生成；401/403 会提示凭据被拒绝。
 
 ### 角色与能力

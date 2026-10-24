@@ -64,7 +64,7 @@ export function StoryPanel({ controller, project }: { controller: StudioControll
       <button disabled={busy} onClick={() => void act(() => controller.api.call('agent.budget.set', { projectId: project.id, maxCost: cap === '' ? null : Number(cap) }))}>保存上限</button>
     </section>
     <section aria-label="导出前质检">
-      <h4>导出前质检 {qc ? (qc.pass ? '· 通过' : '· 有严重问题') : ''}</h4>
+      <h4>导出前质检 {qc ? (qc.pass ? '· 通过' : (qc.status ?? (qc.unchecked.length ? 'partial' : 'fail')) === 'partial' ? '· 部分未检查（不算通过）' : '· 有严重问题') : ''}</h4>
       <button disabled={busy} onClick={() => void act(async () => setQc(await controller.api.call<QcReport>('agent.qc', { projectId: project.id })))}>运行质检</button>
       {qc && <>
         <p className="vs-muted">检查于 {new Date(qc.checkedAt).toLocaleString()}</p>

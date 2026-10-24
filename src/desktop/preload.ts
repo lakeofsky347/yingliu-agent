@@ -1,4 +1,9 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webFrame } from 'electron';
+import { lockdownWebRTC } from '../shared/webrtc-lockdown.ts';
+// R01: runs in every frame (nodeIntegrationInSubFrames) before page scripts; strips WebRTC from the page's main world.
+// The IP-handling policy alone still allows TCP ICE and proxied UDP.
+if(typeof contextBridge.executeInMainWorld==='function')contextBridge.executeInMainWorld({func:lockdownWebRTC});
+else void webFrame.executeJavaScript('('+lockdownWebRTC.toString()+')()');
 // No general IPC, Node or filesystem API is exposed to page content.
 if(process.isMainFrame)contextBridge.exposeInMainWorld('yingliu',Object.freeze({
   call:(endpoint:string,payload:unknown={})=>ipcRenderer.invoke('yingliu:call',endpoint,payload),

@@ -16,6 +16,7 @@ export interface AgentDocs {
   ledger(): Promise<Ledger>;
   saveQc(report: QcReport): Promise<void>;
 }
+export interface ProjectTaskRef { id: string; kind: 'storyboard' | 'scenes' | 'modify' | 'preview' | 'export' | 'audio'; retryOf?: string }
 export interface ToolResult {
   /** Text returned to the model (redacted, size-bounded). */
   content: string;
@@ -25,8 +26,12 @@ export interface ToolResult {
   cost?: number | null;
   /** When set, the run suspends until this async task reaches a terminal phase. */
   waitFor?: { kind: 'media' | 'workflow'; id: string };
+  /** Exact host task started by this call; later tasks must not replace this association. */
+  projectTask?: ProjectTaskRef;
   revision?: number;
 }
+/** Persisted separately before any fallible bookkeeping, so a known side effect is never submitted again. */
+export interface ToolSuccessReceipt { execId: string; tool: string; argsHash: string; risk: ToolRisk; stepIndex: number; at: string; result: ToolResult }
 export interface AgentTool {
   /** Tool only exposed when all these roles are bound. */
   requires?: GenRole[];
@@ -40,7 +45,8 @@ export interface AgentTool {
 
 export type GenRole = 'image' | 'video' | 'speech' | 'music' | 'sfx' | 'vision';
 export interface Capabilities { roles: GenRole[]; director?: string; models?: Partial<Record<GenRole, string>> }
-export interface ToolCall { id: string; name: string; arguments: string }
+/** `id` is the provider's tool_call_id (only used to thread tool messages); `execId` is server-generated and single-use. */
+export interface ToolCall { id: string; name: string; arguments: string; execId?: string }
 export type AgentMessage =
   | { role: 'system' | 'user'; content: string | AgentContent[] }
   | { role: 'assistant'; content: string | null; tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[] }
@@ -68,7 +74,7 @@ export interface RunStep {
   startedAt: string; finishedAt?: string; durationMs?: number;
   tool?: string; callId?: string; risk?: ToolRisk; arguments?: string; summary?: string; error?: string; attempts?: number;
 }
-export interface PendingApproval { callId: string; tool: string; risk: ToolRisk; arguments: string; reason: string; estimate: number | null }
+export interface PendingApproval { callId: string; tool: string; risk: ToolRisk; arguments: string; reason: string; estimate: number | null; execId?: string; argsHash?: string }
 
 export interface AgentRun {
   version: 1; id: string; projectId: string; goal: string; status: RunStatus; message: string;
@@ -78,8 +84,19 @@ export interface AgentRun {
   messages: AgentMessage[]; steps: RunStep[];
   /** Tool calls from the last assistant turn not yet executed (resumable). */
   queue: ToolCall[];
-  pending?: PendingApproval; waiting?: { kind: 'media' | 'workflow'; id: string; callId: string };
-  approvedCallIds: string[]; reviewRounds: number; final?: string; error?: string;
+  pending?: PendingApproval; waiting?: { kind: 'media' | 'workflow'; id: string; callId: string; execId?: string };
+  taskRefs?: (ProjectTaskRef & { callId: string; execId?: string })[];
+  /** Usage settlement keys already applied to this snapshot; the project ledger has its own atomic deduplication. */
+  settledToolExecIds?: string[];
+  /** Legacy (≤0.5.0) field; never trusted for skipping approval. */
+  approvedCallIds: string[];
+  /** One-shot approvals bound to a server execution ID + tool + canonical argument hash; consumed on use. */
+  approvals?: { execId: string; tool: string; argsHash: string }[];
+  reviewRounds: number;
+  /** Paid/side-effect submissions whose outcome is unknown (accepted-then-lost response). Never auto-resubmitted. */
+  /** R03: receipt persisted *before* a paid/export side effect starts; cleared once its outcome is known. */
+  inFlight?: { execId: string; tool: string; argsHash: string; startedAt: string };
+  uncertainSubmissions?: { execId: string; tool: string; at: string; error: string; attempts: number; jobId?: string }[]; final?: string; error?: string;
   /** Capabilities and tool names active at the latest model step. */
   active?: { roles: GenRole[]; tools: string[]; selfMade: string[] };
 }
@@ -99,9 +116,10 @@ export interface AgentPort {
   commit(projectId: string, expectedRevision: number, project: VideoProject, sources: Record<string, SceneSource>, label: string): Promise<StudioSnapshot>;
   route(endpoint: string, payload: Record<string, unknown>): Promise<{ ok: boolean; value?: unknown; error?: { code: string; message: string } }>;
   capture(projectId: string, frame: number, signal: AbortSignal): Promise<{ bytes: Uint8Array; mime: string; frame: number; shotId: string }>;
-  voice?(projectId: string, shotId: string, text: string, signal: AbortSignal): Promise<{ id: string; name: string }>;
+  /** Synthesize narration and register it as a project asset (idempotent per requestId). */
+  voice?(projectId: string, shotId: string, text: string, signal: AbortSignal, options?: { expectedRevision?: number; requestId?: string }): Promise<{ id: string; name: string; revision?: number }>;
   /** Generate audio with a bound role (speech/music/sfx) and import it as a project asset. */
-  generateAudio?(projectId: string, role: 'speech' | 'music' | 'sfx', prompt: string, options: { durationSeconds?: number; signal: AbortSignal }): Promise<{ id: string; name: string; cost?: number | null }>;
+  generateAudio?(projectId: string, role: 'speech' | 'music' | 'sfx', prompt: string, options: { durationSeconds?: number; signal: AbortSignal; shotId?: string }): Promise<{ id: string; name: string; cost?: number | null }>;
   /** Import locally synthesized audio bytes (WAV) as a project asset. */
   importAudio?(projectId: string, name: string, bytes: Uint8Array, mime: string): Promise<{ id: string; name: string }>;
   /** Which generation roles are currently bound (hot: read every step). */

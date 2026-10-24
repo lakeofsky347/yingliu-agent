@@ -121,3 +121,75 @@ test('archive limits are validated and enforced during stream output, compressed
     assert.equal((await f.backend.call<{projects:unknown[]}>('list')).projects.length,2);
   }finally{await f.close();}
 });
+
+test('backup carries agent story, budget ledger and QC, restored under the new project ID',async()=>{
+  const {AgentService}=await import('../src/agent/service.ts');
+  const f=await fixture();try{
+    const agent=new AgentService(join(f.directory,'agent-runs'),{} as never,{dataDirectory:join(f.directory,'agent-data'),resolveModel:async()=>{throw new Error('unused');}} as never);
+    const hooks={export:(id:string)=>agent.exportDocs(id),import:(id:string,docs:Record<string,unknown>)=>agent.importDocs(id,docs)};
+    const project=createProject('带智能体资料','主题');await f.backend.call('create',{project,sources:project.shots.map(shot=>({shotId:shot.id,source:defaultSceneSource()}))});
+    await agent.saveStory(project.id,{logline:'保留的故事'},0);
+    await (agent as unknown as {ledgers:{update(id:string,c:(l:Record<string,unknown>)=>Record<string,unknown>):Promise<unknown>}}).ledgers.update(project.id,l=>({...l,maxCost:50,spent:12.5}));
+    const exported=await exportProjectArchive(f.backend,{projectId:project.id},hooks);
+    const names=Object.keys(unzipSync(Buffer.from(exported.dataBase64!,'base64')));assert.ok(names.includes('agent/story.json')&&names.includes('agent/ledger.json'));assert.ok(!names.includes('agent/qc.json'),'missing docs are omitted');
+    const restored=await importProjectArchive(f.backend,{dataBase64:exported.dataBase64},hooks);const id=restored.project!.id;assert.notEqual(id,project.id);
+    const story=await agent.story(id);assert.equal(story.logline,'保留的故事');assert.equal((story as unknown as {projectId?:string}).projectId??id,id);
+    const ledger=(await agent.exportDocs(id)).ledger as {spent:number;maxCost:number;projectId:string};assert.equal(ledger.spent,12.5);assert.equal(ledger.maxCost,50);assert.equal(ledger.projectId,id);
+    const plain=await importProjectArchive(f.backend,{dataBase64:exported.dataBase64});assert.ok(plain.project,'archives with agent data still import without hooks');
+  }finally{await f.close();}
+});
+test('R06: importDocs rejects structurally invalid story/ledger/QC documents and writes nothing',async()=>{
+  const {AgentService}=await import('../src/agent/service.ts');const f=await fixture();
+  try{
+    const agent=new AgentService(join(f.directory,'agent-runs'),{} as never,{dataDirectory:join(f.directory,'agent-data'),resolveModel:async()=>{throw new Error('unused');}} as never);
+    const bad:Record<string,unknown>[]=[
+      {story:{version:1,shots:'not-an-array',characters:[]}},
+      {story:{version:1,shots:[{id:'s1',durationSeconds:'long'}],characters:[]}},
+      {story:{version:1,shots:[],characters:[{id:'c1',name:'A',features:'x'}]}},
+      {ledger:{version:1,spent:'12',byTool:{}}},
+      {ledger:{version:1,spent:1,byTool:{gen:{calls:'1',cost:0}}}},
+      {qc:{version:1,report:{pass:true,checkedAt:'x',issues:'none',unchecked:[]}}},
+      {story:{version:1,shots:[],characters:[]},ledger:{version:1,spent:-5,byTool:{}}},
+    ];
+    for(const docs of bad){await assert.rejects(agent.importDocs('p-'+bad.indexOf(docs),docs),/智能体资料损坏/,JSON.stringify(docs));assert.deepEqual(await agent.exportDocs('p-'+bad.indexOf(docs)),{},'nothing written for '+JSON.stringify(docs));}
+  }finally{await f.close();}
+});
+test('R07: an archive with invalid agent docs is rejected before any project is registered',async()=>{
+  const {AgentService}=await import('../src/agent/service.ts');const f=await fixture();
+  try{
+    const agent=new AgentService(join(f.directory,'agent-runs'),{} as never,{dataDirectory:join(f.directory,'agent-data'),resolveModel:async()=>{throw new Error('unused');}} as never);
+    const hooks={export:(id:string)=>agent.exportDocs(id),import:(id:string,docs:Record<string,unknown>)=>agent.importDocs(id,docs),validate:(docs:Record<string,unknown>)=>agent.validateDocs(docs)};
+    const first=await f.backend.call<StudioSnapshot>('create',{title:'带剧本'});await agent.saveStory(first.project!.id,{logline:'x'},0);
+    const exported=await exportProjectArchive(f.backend,{projectId:first.project!.id},hooks);const files=unzipSync(Buffer.from(exported.dataBase64!,'base64'));
+    files['agent/story.json']=Buffer.from(JSON.stringify({version:1,shots:'broken',characters:[]}));
+    const manifest=JSON.parse(Buffer.from(files['manifest.json']!).toString('utf8'));manifest.files=Object.entries(files).filter(([n])=>n!=='manifest.json').map(([name,data])=>({name,bytes:data.length,sha256:createHash('sha256').update(data).digest('hex')}));files['manifest.json']=Buffer.from(JSON.stringify(manifest));
+    const count=async()=>(await f.backend.call<{projects:unknown[]}>('list',{includeArchived:true})).projects.length;const before=await count();
+    await assert.rejects(importProjectArchive(f.backend,{dataBase64:Buffer.from(zipSync(files)).toString('base64')},hooks),/智能体资料损坏/);
+    assert.equal(await count(),before,'no orphan project registered');
+    // a failure after registration rolls the project back (archived) instead of leaving a half-imported project visible
+    const failing={...hooks,import:async()=>{throw new Error('disk full');}};const okFiles=unzipSync(Buffer.from(exported.dataBase64!,'base64'));
+    await assert.rejects(importProjectArchive(f.backend,{dataBase64:Buffer.from(zipSync(okFiles)).toString('base64')},failing),/disk full/);
+    assert.equal((await f.backend.call<{projects:unknown[]}>('list',{})).projects.length,before,'rolled-back import is not left active');
+  }finally{await f.close();}
+});
+test('PR1-R06: every required Story/Character/Shot field is enforced before registration; compliant legacy stories are migrated and usable by all consumers',async()=>{
+  const {AgentService}=await import('../src/agent/service.ts');const {storyBrief,anchorPrompt}=await import('../src/agent/story.ts');const f=await fixture();
+  try{
+    const agent=new AgentService(join(f.directory,'agent-runs'),{} as never,{dataDirectory:join(f.directory,'agent-data'),resolveModel:async()=>{throw new Error('unused');}} as never);
+    const full=()=>({version:3,status:'approved',title:'T',logline:'L',targetSeconds:10,style:{look:'a',palette:'b',typography:'c',motion:'d',negative:'e'},consistency:{},updatedAt:'2026-01-01T00:00:00.000Z',
+      characters:[{id:'c1',name:'阿明',description:'d',features:['红围巾'],referenceAssetIds:[]}],
+      shots:[{id:'s1',summary:'开场',shotType:'wide',camera:'static',durationSeconds:3,dialogue:'',characters:['c1'],continueFromPrevious:false}]});
+    const required:[string,(s:any)=>void][]=[
+      ['character.id',s=>delete s.characters[0].id],['character.name',s=>delete s.characters[0].name],['character.features',s=>delete s.characters[0].features],['character.referenceAssetIds',s=>delete s.characters[0].referenceAssetIds],
+      ['shot.id',s=>delete s.shots[0].id],['shot.summary',s=>delete s.shots[0].summary],['shot.durationSeconds',s=>delete s.shots[0].durationSeconds],['shot.characters',s=>delete s.shots[0].characters],
+      ['shot.characters unknown id',s=>{s.shots[0].characters=['ghost'];}],['version',s=>delete s.version],['style.look type',s=>{s.style.look=5;}],
+    ];
+    for(const [name,mutate] of required){const story=full();mutate(story);assert.throws(()=>agent.validateDocs({story}),/智能体资料损坏/,name);await assert.rejects(agent.importDocs('p-'+name.replace(/\W/g,''),{story}),/智能体资料损坏/,name);}
+    // legacy document: optional/defaultable fields absent (no style/consistency/description/shotType/camera/dialogue/continueFromPrevious/title/logline/targetSeconds)
+    const legacy={version:1,status:'approved',characters:[{id:'c1',name:'阿明',features:[],referenceAssetIds:[]}],shots:[{id:'s1',summary:'开场',durationSeconds:3,characters:['c1']}]};
+    agent.validateDocs({story:legacy});await agent.importDocs('legacy',{story:legacy});
+    const stored=await agent.story('legacy');
+    assert.match(storyBrief(stored),/阿明/);assert.equal(typeof anchorPrompt(stored,['c1']),'string');
+    assert.equal(stored.characters[0].description,'');assert.equal(stored.shots[0].continueFromPrevious,false);assert.deepEqual(stored.consistency,{});
+  }finally{await f.close();}
+});

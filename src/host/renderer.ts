@@ -85,6 +85,14 @@ async function closeServer(server:Server):Promise<void> {
   server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));
 }
 
+/**
+ * F01: scene code is untrusted. route()/routeWebSocket() do not see WebRTC, so a STUN/TURN or data-channel peer
+ * could still exfiltrate over UDP. Force Chromium to never use non-proxied UDP (no proxy is configured, so no
+ * UDP at all) and remove the WebRTC constructors from every frame before scene code runs.
+ */
+export const WEBRTC_LOCKDOWN_ARGS=['--force-webrtc-ip-handling-policy=disable_non_proxied_udp','--webrtc-ip-handling-policy=disable_non_proxied_udp'];
+import { WEBRTC_LOCKDOWN_SCRIPT } from '../shared/webrtc-lockdown.ts';
+export { WEBRTC_LOCKDOWN_SCRIPT };
 export class VideoRenderer {
   private servers=new Map<string,ProjectServer>();
   private pendingServers=new Map<string,Promise<ProjectServer>>();
@@ -136,7 +144,7 @@ export class VideoRenderer {
     // 逐帧契约要求同一帧可复现：GPU 光栅的 2D canvas 在不同页面状态下会出现 ±1 的采样差异，
     // 会让逆序 seek / 冷启动的字节比对偶发失败。固定用 Skia 软件光栅画 2D canvas，
     // 合成与 WebGL 仍走原路径，渲染结果与截图因此稳定可复现。
-    const browser=await chromium.launch({executablePath:env.browserPath,headless:true,args:['--disable-background-timer-throttling','--disable-renderer-backgrounding','--disable-accelerated-2d-canvas','--disable-accelerated-video-decode']});this.browsers.add(browser);
+    const browser=await chromium.launch({executablePath:env.browserPath,headless:true,args:[...WEBRTC_LOCKDOWN_ARGS,'--disable-background-timer-throttling','--disable-renderer-backgrounding','--disable-accelerated-2d-canvas','--disable-accelerated-video-decode']});this.browsers.add(browser);
     const cancel=()=>{void browser.close().catch(()=>{});};signal?.addEventListener('abort',cancel,{once:true});
     try {
       const context=await browser.newContext({viewport:{width:spec.target.width,height:spec.target.height},deviceScaleFactor:1,serviceWorkers:'block'});
@@ -147,6 +155,7 @@ export class VideoRenderer {
         else{issues.push({message:'Blocked external resource: '+request.origin+request.pathname});await route.abort('blockedbyclient');}
       });
       await context.routeWebSocket('**/*',async socket=>{issues.push({message:'Blocked WebSocket: '+socket.url().split('?')[0]});await socket.close();});
+      await context.addInitScript(WEBRTC_LOCKDOWN_SCRIPT);
       const page=await context.newPage();page.setDefaultTimeout(30_000);
       page.on('pageerror',error=>issues.push({message:error.message}));
       page.on('console',message=>{if(message.type()==='error')issues.push({message:message.text()});});

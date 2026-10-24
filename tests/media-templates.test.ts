@@ -101,3 +101,15 @@ test('failed remote status surfaces; binary audio and Replicate-style polling wo
   const checked = await manager.check(c.id); assert.equal(checked.ok, true); assert.match(checked.message, /不提交生成任务/);
   await rm(f.directory + '-pm', { recursive: true, force: true });
 });
+
+test('F09: template submit forwards durationSeconds and rejects multiple reference images up front', async t => {
+  const f = await fixture(t, { pollsBeforeDone: 1 });
+  await f.registry.saveConnection({ id: 'ds9', name: 'DS', protocol: 'async-task', baseUrl: f.gateway.url + '/api/v1', apiKey: 'k' });
+  await f.registry.saveModel({ id: 'wv9', connectionId: 'ds9', model: 'wanx', inputModalities: ['text', 'image'], parameters: { preset: 'dashscope-video' } }); await f.registry.bindRole('video', 'wv9');
+  const task = await f.service.generate({ projectId: 'film', expectedRevision: 3, operation: 'text-to-video', prompt: '八秒', parameters: { durationSeconds: 8 } });
+  await settle(f.service, task.id, x => x.phase === 'ready' || x.phase === 'failed');
+  const submit = f.gateway.requests.find(r => r.method === 'POST')!;
+  assert.equal((submit.body as any).parameters.duration, 8);
+  await assert.rejects(f.service.generate({ projectId: 'film', expectedRevision: 3, operation: 'image-to-video', prompt: '两张图', imageAssetIds: ['a', 'b'], allowImageUpload: true }), /1 张/);
+  assert.equal(f.gateway.requests.filter(r => r.method === 'POST').length, 1, 'no second billable submit');
+});
