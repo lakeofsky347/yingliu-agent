@@ -120,10 +120,11 @@ test('R2-01b: a success receipt that matches no queued call is settled as uncert
     const started = await service.start({ projectId: project.id, goal: 'music', autoApprove: ['read', 'write', 'cost'] });
     assert.equal((await settle(service, started.id, ['failed', 'complete'])).status, 'failed');
     await rm(join(directory, 'ledger'));
+    await service.dispose(); // wait for the failed loop's last snapshot write before editing it
     // Simulate a snapshot that lost its queue entry (e.g. hand-edited or older format) while the success receipt survived.
     const runFile = join(directory, started.id + '.json'); const snapshot = JSON.parse(await readFile(runFile, 'utf8'));
     snapshot.queue = []; snapshot.settledToolExecIds = []; await writeFile(runFile, JSON.stringify(snapshot));
-    await service.dispose(); service = new AgentService(directory, port, { resolveModel: model, fetch: gateway.fetch });
+    service = new AgentService(directory, port, { resolveModel: model, fetch: gateway.fetch });
     await service.resume(started.id);
     const done = await settle(service, started.id, ['complete', 'failed', 'awaiting_approval']);
     assert.equal(done.status, 'complete', done.error);
