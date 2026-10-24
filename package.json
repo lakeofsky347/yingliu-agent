@@ -5,6 +5,9 @@
   "private": true,
   "type": "module",
   "main": "dist/desktop/main.cjs",
+  "bin": {
+    "yingliu": "bin/yingliu.mjs"
+  },
   "description": "映流智能体：导演智能体驱动的本地视频创作应用（源自 yingliu-studio）：模型对话、分镜节点图、可编辑画面、工程历史与 MP4 导出",
   "license": "GPL-3.0-only",
   "engines": {
@@ -20,7 +23,9 @@
     "package:demo": "npm run package:app",
     "verify": "node --import tsx scripts/verify-app.ts",
     "verify:models": "node --import tsx scripts/verify-model-ui.ts",
-    "verify:film": "node --import tsx scripts/verify-multimodal-film.ts"
+    "verify:film": "node --import tsx scripts/verify-multimodal-film.ts",
+    "cli": "node bin/yingliu.mjs",
+    "setup:cli": "bash scripts/setup-cli.sh"
   },
   "dependencies": {
     "@comfyorg/litegraph": "0.17.2",

@@ -32,7 +32,7 @@ export class MemorySecrets implements SecretStore {
   async set(ref:string,value:string){this.values.set(ref,value);}
   async delete(ref:string){this.values.delete(ref);}
 }
-export async function createApplication(options:{dataDirectory:string;credentials:SecretStore;reveal?:(path:string)=>Promise<void>;fetch?:typeof fetch}){
+export async function createApplication(options:{dataDirectory:string;projectsDirectory?:string;credentials:SecretStore;reveal?:(path:string)=>Promise<void>;fetch?:typeof fetch}){
   const dataDirectory=resolve(options.dataDirectory);
   const providers=new ProviderManager(dataDirectory,options.credentials,options.fetch?{fetch:options.fetch}:{});await providers.initialize();
   const backend=new AppBackend({...options,dataDirectory,providers:providers.host()});

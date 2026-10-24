@@ -11,3 +11,12 @@
 同一项目的写操作统一排队并检查 expectedRevision。模型生成的页面不能获得 Node、IPC、凭据或任意文件 API。仅清理本应用启动的进程。
 
 用户已授权构建本地独立应用、继续工程完善、初始化本目录仓库、创建对应私有 GitHub 仓库并推送。最终核对本地 HEAD 与远端分支一致。不要修改远端其他仓库。
+
+## 给其他智能体：命令行（无需接入）
+
+不接入 IPC/MCP 也可以直接使用 `yingliu` CLI（`node bin/yingliu.mjs`；安装后用 `yingliu`）。完整说明见 [docs/CLI.md](docs/CLI.md)。
+
+- 首次使用：`scripts/setup-cli.sh`，然后运行 `yingliu doctor --json`。
+- 加 `--json` 时输出一行 JSON；退出码固定：0 成功，2 用法错误，3 不存在，4 需要审批，5 超预算，6 环境缺失，7 运行失败，8 超时。
+- 用 `YINGLIU_DATA_DIR` / `YINGLIU_PROJECTS` 隔离数据；`--mock` 时请用单独的数据目录。
+- 付费和导出不会自动批准，除非同时给出 `--allow-paid` 和 `--max-cost`；审批必须带 `pending.execId`；API Key 只通过 `--api-key-env` 指定环境变量名提供。
