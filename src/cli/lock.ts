@@ -12,6 +12,9 @@ export class BusyError extends Error {
   }
 }
 
+/** Invalid lock configuration (e.g. YINGLIU_LOCK_PORT); the CLI maps it to CONFIG (exit 10). */
+export class LockConfigError extends Error {}
+
 interface LockTarget { path: string; identity: string; port: number }
 const HOST = '127.0.0.1', BANNER = 'yingliu-owner-v1 ';
 
@@ -31,7 +34,7 @@ export const LOCK_PORT_RANGE = { min: 21000, max: 28999 } as const;
 export function lockPortFor(identity: string, env: NodeJS.ProcessEnv = process.env): number {
   const override = env.YINGLIU_LOCK_PORT;
   if (override !== undefined && override !== '') {
-    if (!/^\d+$/.test(override) || Number(override) < 1024 || Number(override) > 65535) throw new Error('YINGLIU_LOCK_PORT 必须是 1024-65535 之间的整数');
+    if (!/^\d+$/.test(override) || Number(override) < 1024 || Number(override) > 65535) throw new LockConfigError('YINGLIU_LOCK_PORT 必须是 1024-65535 之间的整数');
     return Number(override);
   }
   const hash = createHash('sha256').update('yingliu-owner-v1\0' + identity).digest();

@@ -12,7 +12,7 @@ import { detectEnvironment } from '../host/renderer.ts';
 import type { SecretStore } from '../app/contracts.ts';
 import { MODEL_PROTOCOLS, MODEL_ROLES, ROLE_OUTPUT, ROLE_PROTOCOLS, type Modality, type ModelProtocol, type ModelRole } from '../models/contracts.ts';
 import { MOCK_BASE_URL, mockFetch, installMockNetworkGuard } from './mock.ts';
-import { acquireOwner, BusyError } from './lock.ts';
+import { acquireOwner, BusyError, LockConfigError } from './lock.ts';
 import { installCliLifecycle, CliInterruptedError, type CliLifecycle } from './lifecycle.ts';
 
 export const EXIT = { OK: 0, ERROR: 1, USAGE: 2, NOT_FOUND: 3, NEEDS_APPROVAL: 4, BUDGET: 5, ENVIRONMENT: 6, RUN_FAILED: 7, TIMEOUT: 8, BUSY: 9, CONFIG: 10, STARTUP: 11 } as const;
@@ -288,7 +288,7 @@ export async function runCli(argv: string[], io: { out: (s: string) => void; err
     const projects = process.env.YINGLIU_PROJECTS ? resolve(process.env.YINGLIU_PROJECTS) : join(dir, 'projects'), readOnly = isReadOnly(positional, flags);
     const lockSeconds = flags['lock-timeout'] === undefined ? 30 : Number(flags['lock-timeout']); if (!Number.isFinite(lockSeconds) || lockSeconds < 0) throw new CliError('USAGE', '--lock-timeout 必须是非负数字');
     await startup('创建数据目录 ' + dir, () => mkdir(dir, { recursive: true }));
-    await startup('获取数据目录锁', async () => { try { release = await acquireOwner([dir, projects], positional.slice(0, 2).join(' '), lockSeconds * 1000, { signal: lifecycle.signal }); } catch (e) { if (e instanceof BusyError) throw new CliError('BUSY', e.message); throw e; } });
+    await startup('获取数据目录锁', async () => { try { release = await acquireOwner([dir, projects], positional.slice(0, 2).join(' '), lockSeconds * 1000, { signal: lifecycle.signal }); } catch (e) { if (e instanceof BusyError) throw new CliError('BUSY', e.message); if (e instanceof LockConfigError) throw new CliError('CONFIG', e.message); throw e; } });
     if (!readOnly || positional[0] === 'models') await secrets.check(); // C06: a broken key map fails up front with CONFIG instead of surfacing as a provider error
     app = await startup('初始化应用', () => createApplication({ dataDirectory: dir, projectsDirectory: projects, credentials: secrets, ...(mock ? { fetch: mockFetch(), resumeRemoteTasks: false } : {}), ...(readOnly ? { recover: false } : {}) }));
     lifecycle.throwIfInterrupted();
