@@ -132,3 +132,41 @@ test('R04: application music adapter reports a poll timeout as a structured unkn
     assert.ok(error, 'must fail'); assert.equal(error.submission, 'unknown'); assert.match(String(error.jobId), /^rp-/);
   } finally { await app.dispose(); await media.close(); await rm(directory, { recursive: true, force: true }); }
 });
+
+test('PR1-R04: after the provider accepted a music job, download/import failures keep a durable receipt; a repeat call re-registers the artifact without a new paid submission', { skip: !hasFfprobe && 'ffprobe 不可用' }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-pr1-r04-'));
+  const wav = Buffer.from(synthesize({ kind: 'tone', durationSeconds: 1 }));
+  const media = await startTemplateGateway({ audio: wav, pollsBeforeDone: 1 });
+  let failDownloads = 1;
+  const spyFetch: typeof fetch = async (input, init) => { const url = String(input instanceof Request ? input.url : input); if (url.includes('/files/') && failDownloads > 0) { failDownloads--; throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }); } return fetch(input, init); };
+  const app = await createApplication({ dataDirectory: directory, credentials: new MemorySecrets(), fetch: spyFetch });
+  const call = async <T,>(endpoint: string, payload: unknown = {}) => { const r = await app.route(endpoint, payload); if (!r.ok) throw new Error(endpoint + ': ' + r.error.message); return r.value as T; };
+  const submits = () => media.requests.filter(r => r.method === 'POST' && r.path.includes('/predictions') && !r.path.endsWith('/cancel')).length;
+  try {
+    const rc = await call<{ id: string }>('models.connection.save', { name: 'music', protocol: 'async-task', baseUrl: media.url + '/v1', auth: 'none' });
+    const m = await call<{ id: string }>('models.model.save', { connectionId: rc.id, model: 'meta/musicgen', inputModalities: ['text'], outputModalities: ['audio'], parameters: { preset: 'replicate', pollIntervalMs: 5 } });
+    await call('models.role.bind', { role: 'music', modelId: m.id });
+    const created = await call<StudioSnapshot>('create', { blank: true, title: '导入失败' }); const projectId = created.project!.id;
+    const agentPort = (app.agent as unknown as { port: AgentPort }).port;
+    const backend = app.backend as unknown as { call: (endpoint: string, payload?: unknown) => Promise<unknown> };
+    const original = backend.call.bind(backend); let failImports = 0;
+    backend.call = async (endpoint, payload) => { if (endpoint === 'import' && failImports > 0) { failImports--; throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }); } return original(endpoint, payload); };
+    const signal = new AbortController().signal;
+    // 1) download fails after acceptance -> unknown, receipt kept
+    let error = await agentPort.generateAudio!(projectId, 'music', 'lofi', { durationSeconds: 1, signal }).then(() => null, e => e);
+    assert.equal(error?.submission, 'unknown'); assert.equal(submits(), 1);
+    // 2) repeat: re-polls the saved job, download now works, import fails every local retry -> unknown, still one submission
+    failImports = 100;
+    error = await agentPort.generateAudio!(projectId, 'music', 'lofi', { durationSeconds: 1, signal }).then(() => null, e => e);
+    assert.equal(error?.submission, 'unknown'); assert.equal(submits(), 1, 'import failure never resubmits');
+    // 3) repeat after the disk recovers: registers the saved artifact, still one submission
+    failImports = 0;
+    const asset = await agentPort.generateAudio!(projectId, 'music', 'lofi', { durationSeconds: 1, signal });
+    assert.equal(submits(), 1);
+    const after = await call<StudioSnapshot>('current', { projectId });
+    assert.ok(after.project!.assets.some(a => a.id === asset.id && a.kind === 'audio'));
+    // 4) once registered, a further identical request is a new generation (receipt consumed)
+    await agentPort.generateAudio!(projectId, 'music', 'lofi', { durationSeconds: 1, signal });
+    assert.equal(submits(), 2);
+  } finally { await app.dispose(); await media.close(); await rm(directory, { recursive: true, force: true }); }
+});
