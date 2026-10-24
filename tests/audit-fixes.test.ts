@@ -264,3 +264,25 @@ test('R04: an adapter-declared unknown outcome (plain-text poll timeout with job
   try { const st = await s2.start({ projectId: 'proj-1', goal: 'x', autoApprove: ['read', 'write', 'cost'] }); const r = await settle(s2, st.id, ['paused', 'complete', 'failed']); assert.equal(r.status, 'complete'); assert.equal(calls, 1); assert.equal(r.uncertainSubmissions?.length ?? 0, 0); }
   finally { await s2.dispose(); await rm(d2, { recursive: true, force: true }); }
 });
+
+for (const mode of ['pause', 'restart'] as const) test(`R03: a paid call in flight when the run is ${mode === 'pause' ? 'paused' : 'disposed and restarted'} is settled as unknown; resume never resubmits it`, async () => {
+  const d = await dir(); let submissions = 0;
+  const { port } = fakePort({ capabilities: async () => ({ roles: ['sfx'] }), generateAudio: async (_p, _r, _t, { signal }) => { submissions++; return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })); } });
+  const gw = toolGateway(() => ({ toolCalls: [{ name: 'generate_sfx', arguments: { prompt: '风声', durationSeconds: 1 } }] }));
+  let service = new AgentService(d, port, { resolveModel: model(), fetch: gw.fetch, retryBaseMs: 1 });
+  try {
+    const started = await service.start({ projectId: 'proj-1', goal: '音效', autoApprove: ['read', 'write', 'cost'] });
+    for (let i = 0; i < 500 && submissions === 0; i++) await new Promise(r => setTimeout(r, 5));
+    assert.equal(submissions, 1);
+    if (mode === 'pause') await service.pause(started.id);
+    else { await service.dispose(); service = new AgentService(d, port, { resolveModel: model(), fetch: gw.fetch, retryBaseMs: 1 }); }
+    let run = await service.get(started.id);
+    assert.equal(run.status, 'paused');
+    assert.equal(run.uncertainSubmissions?.length, 1, 'in-flight receipt settled as unknown');
+    assert.equal(run.queue.length, 0, 'the paid call is not left queued for re-execution');
+    await service.resume(started.id);
+    run = await settle(service, started.id, ['awaiting_approval', 'complete', 'failed', 'budget_exceeded']);
+    assert.equal(run.status, 'awaiting_approval', 'a resubmission needs explicit confirmation even with cost auto-approve');
+    assert.equal(submissions, 1);
+  } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
+});

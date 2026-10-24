@@ -114,6 +114,7 @@ export class AgentService {
       for (const run of await this.store.loadAll()) {
         for (const call of run.queue) call.execId ??= randomUUID();
         if (run.pending && !run.pending.execId) { const call = run.queue.find(item => item.id === run.pending!.callId); if (call) { run.pending.execId = call.execId; try { run.pending.argsHash = argsHash(run.id, call.name, JSON.parse(call.arguments || '{}')); } catch { /* re-asked on resume */ } } }
+        if (run.inFlight) { this.runs.set(run.id, run); await this.settleInFlight(run); if (run.status === 'awaiting_approval') run.status = 'paused'; }
         if (run.status === 'running' || run.status === 'waiting_task') { run.status = 'paused'; run.message = '应用重启时运行被中断，可点击「继续」从断点恢复'; await this.store.save(run); }
         this.runs.set(run.id, run);
       }
@@ -173,6 +174,18 @@ export class AgentService {
     if (execId !== pending.execId) throw Object.assign(new Error('审批已过期：待批准的步骤已变化，请刷新后重新确认'), { code: 'STALE_APPROVAL' });
     if (expectedArgsHash !== undefined && expectedArgsHash !== pending.argsHash) throw Object.assign(new Error('审批已过期：参数已变化'), { code: 'STALE_APPROVAL' });
   }
+  /** R03: a paid/export call that was in flight when the loop stopped (pause, cancel, dispose, crash) has an unknown outcome.
+   *  Record it, answer the model's tool call as unknown and drop it from the queue so resume never re-executes it;
+   *  later paid calls then require explicit approval (uncertainSubmissions). */
+  private async settleInFlight(run: AgentRun): Promise<boolean> {
+    const flight = run.inFlight; if (!flight) return false;
+    const entry = { execId: flight.execId, tool: flight.tool, at: now(), error: '运行中断时收费请求已发出，结果未知（可能已受理并计费）', attempts: 1 };
+    (run.uncertainSubmissions ??= []).push(entry); delete run.inFlight;
+    const call = run.queue.find(item => item.execId === flight.execId);
+    if (call) { run.queue = run.queue.filter(item => item !== call); run.messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ error: entry.error, submissionUncertain: true, hint: '系统没有重新提交。不要自行重复调用；等待用户确认。' }) }); }
+    chargeTool(run.usage, null, 'cost');
+    await this.store.trace(run.id, { event: 'submission.uncertain', reason: 'interrupted', ...entry }); await this.save(run); return true;
+  }
   private async settled(id: string) { const active = this.active.get(id); if (active) await active.promise.catch(() => {}); }
   private launch(run: AgentRun) {
     if (this.active.has(run.id)) return;
@@ -211,12 +224,14 @@ export class AgentService {
   async pause(id: string): Promise<PublicRun> {
     const run = await this.required(id); const active = this.active.get(id);
     active?.controller.abort(new Error('用户暂停')); await active?.promise.catch(() => {});
+    await this.settleInFlight(run);
     if (!TERMINAL.has(run.status) && run.status !== 'awaiting_approval') { run.status = 'paused'; run.message = '已暂停，可继续'; await this.store.trace(run.id, { event: 'run.pause' }); await this.save(run); }
     return this.public(run);
   }
   async cancel(id: string): Promise<PublicRun> {
     const run = await this.required(id); const active = this.active.get(id);
     active?.controller.abort(new Error('用户取消')); await active?.promise.catch(() => {});
+    await this.settleInFlight(run);
     if (!TERMINAL.has(run.status)) { run.status = 'cancelled'; run.message = '已取消'; delete run.pending; run.queue = []; await this.store.trace(run.id, { event: 'run.cancel' }); await this.save(run); }
     return this.public(run);
   }
@@ -239,6 +254,7 @@ export class AgentService {
     if (run.model.mode === 'plan-json') model = { ...model, config: { ...model.config, supportsTools: false } };
     run.model = { connectionId: model.connectionId, model: model.config.model, mode: model.config.supportsTools ? 'tools' : 'plan-json' };
     const meta = run as AgentRun & { maxReviewRounds?: number; allowImages?: boolean; dirty?: boolean };
+    await this.settleInFlight(run);
     while (true) {
       signal.throwIfAborted();
       if (run.waiting) { await this.awaitTask(run, signal); continue; }
@@ -341,9 +357,11 @@ export class AgentService {
     // F04: paid / export tools have side effects that cannot be proven idempotent, so they are submitted exactly once.
     const sideEffect = tool.risk === 'cost' || tool.risk === 'export';
     const work = () => tool.run({ ...args, __callId: call.execId }, this.context(run.id, run.projectId, signal, meta.allowImages === true));
+    if (sideEffect) { run.inFlight = { execId: call.execId!, tool: tool.name, argsHash: hash, startedAt: now() }; await this.save(run); }
     try { result = sideEffect ? await (async () => { step.attempts = 1; return work(); })() : await this.withRetry(run, step, work, signal); }
     catch (error) {
-      if (signal.aborted) throw error;
+      if (signal.aborted) throw error; // R03: the in-flight receipt stays persisted and is settled by pause/restart/resume
+      delete run.inFlight;
       // R04: decide on the adapter's structured submission state; only undeclared errors fall back to the transport classifier.
       const state = submissionOf(error) ?? (classify(error) === 'retry' ? 'unknown' : undefined);
       if (sideEffect && state === 'unknown') {
@@ -363,6 +381,7 @@ export class AgentService {
       respond(JSON.stringify({ error: message, hint: kind === 'conflict' ? '工程版本已变化：先调用 project_get 获取最新 revision 再重试' : kind === 'retry' ? '临时故障，已重试多次' : '请修正参数或换一种方法' }));
       await this.save(run); return 'next';
     }
+    delete run.inFlight; // outcome known (success); recorded below even if the run is being stopped
     signal.throwIfAborted();
     chargeTool(run.usage, result.cost, tool.risk); if (tool.risk === 'cost') await this.spend(run.projectId, tool.name, result.waitFor ? null : result.cost);
     if (tool.risk === 'write') meta.dirty = true;
