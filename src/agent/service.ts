@@ -8,7 +8,7 @@ import { activeTools, createTools } from './tools.ts';
 import type { AgentDocs, Capabilities, ToolContext } from './contracts.ts';
 import { join } from 'node:path';
 import { submissionOf } from './submission.ts';
-import { emptyLedger, emptyStory, normalizeCharacter, normalizeStyle, ProjectDocs, storyBrief, type Ledger, type QcReport, type Story } from './story.ts';
+import { emptyLedger, emptyStory, normalizeCharacter, normalizeStyle, ProjectDocs, storyBrief, anchorPrompt, type Ledger, type QcReport, type Story } from './story.ts';
 import { qualityCheck } from './tools.ts';
 
 export interface ResolvedAgentModel { config: ChatConfig; parameters: Record<string, unknown>; connectionId?: string; vision: boolean }
@@ -27,6 +27,45 @@ function canonical(value: unknown): string {
   return JSON.stringify(value) ?? 'null';
 }
 /** Approval binding: run + tool + canonical arguments. */
+/** PR1-R06: Story import contract shared by validation and import.
+ *  Required (absent or mistyped -> reject): version; character id/name/features/referenceAssetIds; shot id/summary/durationSeconds/characters
+ *  (each referencing a defined character). Defaultable fields of older documents (status, title, logline, targetSeconds, style.*,
+ *  consistency, character description, shot shotType/camera/dialogue/continueFromPrevious) are migrated to their empty values.
+ *  The migrated document is exercised by every consumer (storyBrief, anchorPrompt) before it is accepted. Returns null when invalid. */
+export function migrateStory(v: Record<string, unknown>): Story | null {
+  const obj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
+  const str = (x: unknown): x is string => typeof x === 'string';
+  const opt = (x: unknown, fallback: string) => x === undefined ? fallback : str(x) ? x : null;
+  const strs = (x: unknown): x is string[] => Array.isArray(x) && x.every(str);
+  const num = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x) && x >= 0;
+  if (!Number.isSafeInteger(v.version)) return null;
+  if (v.status !== undefined && v.status !== 'empty' && v.status !== 'approved') return null;
+  if (v.characters !== undefined && !Array.isArray(v.characters) || v.shots !== undefined && !Array.isArray(v.shots)) return null;
+  if (v.style !== undefined && !obj(v.style)) return null;
+  const st = (v.style ?? {}) as Record<string, unknown>;
+  const style = { look: opt(st.look, ''), palette: opt(st.palette, ''), typography: opt(st.typography, ''), motion: opt(st.motion, ''), negative: opt(st.negative, '') };
+  if (Object.values(style).some(x => x === null)) return null;
+  const characters: Story['characters'] = [];
+  for (const c of (v.characters ?? []) as unknown[]) {
+    if (!obj(c) || !str(c.id) || !c.id || !str(c.name) || !strs(c.features) || !strs(c.referenceAssetIds)) return null;
+    const description = opt(c.description, ''); if (description === null || c.voice !== undefined && !str(c.voice)) return null;
+    characters.push({ id: c.id, name: c.name, description, features: c.features, referenceAssetIds: c.referenceAssetIds, ...(str(c.voice) ? { voice: c.voice } : {}) });
+  }
+  const known = new Set(characters.map(c => c.id)); const shots: Story['shots'] = [];
+  for (const sh of (v.shots ?? []) as unknown[]) {
+    if (!obj(sh) || !str(sh.id) || !sh.id || !str(sh.summary) || !num(sh.durationSeconds) || !strs(sh.characters) || sh.characters.some(id => !known.has(id))) return null;
+    const shotType = opt(sh.shotType, ''), camera = opt(sh.camera, ''), dialogue = opt(sh.dialogue, '');
+    if (shotType === null || camera === null || dialogue === null || sh.shotId !== undefined && !str(sh.shotId) || sh.continueFromPrevious !== undefined && typeof sh.continueFromPrevious !== 'boolean') return null;
+    shots.push({ id: sh.id, ...(str(sh.shotId) ? { shotId: sh.shotId } : {}), summary: sh.summary, shotType, camera, durationSeconds: sh.durationSeconds, dialogue, characters: sh.characters, continueFromPrevious: sh.continueFromPrevious === true });
+  }
+  if (v.consistency !== undefined && !(obj(v.consistency) && Object.values(v.consistency).every(c => obj(c) && num(c.score)))) return null;
+  const title = opt(v.title, ''), logline = opt(v.logline, '');
+  if (title === null || logline === null || v.targetSeconds !== undefined && !num(v.targetSeconds) || v.approvedAt !== undefined && !str(v.approvedAt) || v.updatedAt !== undefined && !str(v.updatedAt)) return null;
+  const story: Story = { version: v.version as number, projectId: str(v.projectId) ? v.projectId : '', status: v.status === 'approved' ? 'approved' : 'empty', title, logline, targetSeconds: (v.targetSeconds as number | undefined) ?? 0,
+    style: style as Story['style'], characters, shots, ...(str(v.approvedAt) ? { approvedAt: v.approvedAt } : {}), updatedAt: str(v.updatedAt) ? v.updatedAt : new Date(0).toISOString(), consistency: (v.consistency ?? {}) as Story['consistency'] };
+  try { storyBrief({ ...story, status: 'approved' }); anchorPrompt(story, characters.map(c => c.id)); } catch { return null; }
+  return story;
+}
 export function argsHash(runId: string, tool: string, args: Record<string, unknown>): string { return createHash('sha256').update(runId + '\0' + tool + '\0' + canonical(args)).digest('hex'); }
 function sleep(ms: number, signal: AbortSignal) { return new Promise<void>((resolve, reject) => { const timer = setTimeout(() => { signal.removeEventListener('abort', stop); resolve(); }, ms); const stop = () => { clearTimeout(timer); reject(signal.reason); }; signal.addEventListener('abort', stop, { once: true }); }); }
 
@@ -66,10 +105,7 @@ export class AgentService {
     const optStr = (v: unknown) => v === undefined || str(v);
     const strs = (v: unknown) => v === undefined || Array.isArray(v) && v.every(str);
     const checks: Record<'story' | 'ledger' | 'qc', (v: Record<string, unknown>) => boolean> = {
-      story: v => (v.shots === undefined || Array.isArray(v.shots) && v.shots.every(s => obj(s) && str(s.id) && (s.durationSeconds === undefined || num(s.durationSeconds)) && strs(s.characters) && optStr(s.summary) && optStr(s.dialogue) && optStr(s.shotType) && optStr(s.camera) && optStr(s.shotId)))
-        && (v.characters === undefined || Array.isArray(v.characters) && v.characters.every(c => obj(c) && str(c.id) && str(c.name) && strs(c.features) && strs(c.referenceAssetIds) && optStr(c.description) && optStr(c.voice)))
-        && (v.style === undefined || obj(v.style)) && (v.consistency === undefined || obj(v.consistency) && Object.values(v.consistency).every(c => obj(c) && num(c.score)))
-        && optStr(v.title) && optStr(v.logline) && (v.targetSeconds === undefined || num(v.targetSeconds)) && (v.status === undefined || v.status === 'empty' || v.status === 'approved'),
+      story: v => migrateStory(v) !== null,
       ledger: v => (v.spent === undefined || num(v.spent)) && (v.unknownCostCalls === undefined || Number.isSafeInteger(v.unknownCostCalls) && (v.unknownCostCalls as number) >= 0)
         && (v.maxCost === undefined || v.maxCost === null || num(v.maxCost)) && optStr(v.currency)
         && (v.byTool === undefined || obj(v.byTool) && Object.values(v.byTool).every(t => obj(t) && Number.isSafeInteger(t.calls) && (t.calls as number) >= 0 && num(t.cost))),
@@ -83,7 +119,7 @@ export class AgentService {
   /** Restore agent data into a (new) project ID. All documents are validated first (nothing is written if any is invalid); projectId is rewritten. */
   async importDocs(projectId: string, docs: Partial<Record<'story' | 'ledger' | 'qc', unknown>>): Promise<void> {
     this.validateDocs(docs);
-    if (docs.story) await this.stories.put(projectId, { ...(docs.story as Story), projectId } as Story);
+    if (docs.story) await this.stories.put(projectId, { ...migrateStory(docs.story as Record<string, unknown>)!, projectId });
     if (docs.ledger) await this.ledgers.put(projectId, { ...emptyLedger(projectId), ...(docs.ledger as Ledger), projectId });
     if (docs.qc) await this.qcs.put(projectId, docs.qc as { version: number; report?: QcReport });
   }
@@ -402,8 +438,9 @@ export class AgentService {
       respond(JSON.stringify({ error: message, hint: kind === 'conflict' ? '工程版本已变化：先调用 project_get 获取最新 revision 再重试' : kind === 'retry' ? '临时故障，已重试多次' : '请修正参数或换一种方法' }));
       await this.save(run); return 'next';
     }
-    delete run.inFlight; // outcome known (success); recorded below even if the run is being stopped
-    signal.throwIfAborted();
+    // PR1-R03 single durable commit point: a known success (even one that arrives after pause/cancel aborted the signal) is
+    // charged, answered and dequeued in the same save that clears inFlight; only then is the stop request honoured.
+    delete run.inFlight;
     chargeTool(run.usage, result.cost, tool.risk); if (tool.risk === 'cost') await this.spend(run.projectId, tool.name, result.waitFor ? null : result.cost);
     if (tool.risk === 'write') meta.dirty = true;
     if (result.images?.length) {
@@ -411,8 +448,8 @@ export class AgentService {
       else result = { ...result, content: result.content + '（画面已截取；当前模型或设置不允许发送图片，请用 visual_review 或 render_check 检查）' };
     }
     await this.finishStep(run, step, { status: 'complete', summary: bound(result.content, 300) });
-    if (result.waitFor) { run.waiting = { ...result.waitFor, callId: call.id }; run.queue.shift(); run.status = 'waiting_task'; run.message = '等待生成任务完成'; await this.save(run); return 'next'; }
-    respond(result.content); await this.save(run); return 'next';
+    if (result.waitFor) { run.waiting = { ...result.waitFor, callId: call.id }; run.queue.shift(); run.status = 'waiting_task'; run.message = '等待生成任务完成'; await this.save(run); signal.throwIfAborted(); return 'next'; }
+    respond(result.content); await this.save(run); signal.throwIfAborted(); return 'next';
   }
 
   private async awaitTask(run: AgentRun, signal: AbortSignal): Promise<void> {

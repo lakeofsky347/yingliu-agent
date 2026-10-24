@@ -20,7 +20,8 @@ import type { GenRole } from '../agent/contracts.ts';
 import { ROLE_OUTPUT, ROLE_PROTOCOLS } from '../models/contracts.ts';
 import { pollTemplate, submitTemplate } from '../models/adapters/template.ts';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 
 export const ENDPOINTS=new Set(['catalog','current','create','open','save','import','source','saveSource','restoreSource','preview','generate','export','cancel','environment','reveal','apply','inspect','list','focus','audio','tts','history','undo','redo','rename','duplicate','archive','tasks','retry','packs.list','app.health','app.exportProject','app.importProject','providers.get','providers.save','providers.check','chat.history','chat.send','chat.cancel']);
 for(const endpoint of ['models.list','models.connection.save','models.connection.remove','models.model.save','models.model.remove','models.role.bind','models.check','media.generate','media.list','media.get','media.retry','media.pause','media.cancel','media.apply','video.clip.save','video.clip.remove','video.clip.extract'])ENDPOINTS.add(endpoint);
@@ -98,26 +99,54 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
       if(role==='speech'&&resolved.connection.protocol==='speech'){const project=(await backend.call('current',{projectId:id})).project;const shot=shotId??project?.shotOrder[0];if(!shot||!project?.shots.some(item=>item.id===shot))throw new Error('配音目标镜头不存在');const asset=await agentVoice(id,shot,prompt,signal,{});return {id:asset.id,name:asset.name,cost:null};}
       if(resolved.connection.protocol!=='async-task')throw new Error('该角色的模型协议不支持音频生成');
       const release=providers.registry.acquire(resolved.connection.id,resolved.model.id);
+      // PR1-R04: everything after the provider accepted the job (poll, download, import, asset registration) runs against a durable
+      // receipt keyed by the logical request. A repeat of the same request resumes from the receipt (re-poll / re-import) and never
+      // submits a new paid job; the receipt is removed only once the asset is registered or the provider definitively failed.
+      const receipts=join(dataDirectory,'agent-receipts'),key=createHash('sha256').update([id,role,resolved.connection.id,resolved.model.id,prompt,String(durationSeconds??'')].join('\0')).digest('hex').slice(0,40);
+      const receiptFile=join(receipts,key+'.json'),artifactFile=join(receipts,key+'.bin');
+      type Receipt={stage:'accepted'|'downloaded';jobId?:string;mime?:string;cost:number|null;at:string};
+      const writeAtomic=async(file:string,data:string|Uint8Array)=>{await mkdir(receipts,{recursive:true});const tmp=file+'.'+randomUUID()+'.tmp';await writeFile(tmp,data);await rename(tmp,file);};
+      const saveReceipt=(value:Receipt)=>writeAtomic(receiptFile,JSON.stringify(value));
+      const dropReceipt=async()=>{await rm(receiptFile,{force:true});await rm(artifactFile,{force:true});};
+      let receipt:Receipt|undefined;
+      try{receipt=JSON.parse(await readFile(receiptFile,'utf8')) as Receipt;}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw withSubmission(new Error('收费请求回执无法读取，已停止以免重复提交：'+(error instanceof Error?error.message:String(error))),'unknown');}
       try{
         const context={connection:resolved.connection,key:await providers.registry.credential(resolved.connection),signal,fetch:options.fetch};
-        let result=await submitTemplate(context,{clientRequestId:randomUUID(),model:resolved.model,prompt,duration:durationSeconds,parameters:{}},'audio').catch(error=>{throw withSubmission(error,signal.aborted?'unknown':sendOutcome(error));});
-        let bytes:Uint8Array,mime:string;let cost:number|null=null;
-        let jobId:string|undefined;try{
-        if('kind' in result){bytes=result.bytes;mime=result.mimeType;}
-        else{
-          const configuredWait=Number(resolved.model.parameters.maxWaitMs),deadline=Date.now()+(Number.isFinite(configuredWait)&&configuredWait>=1000?Math.min(configuredWait,3_600_000):Math.max(60000,resolved.connection.requestTimeoutMs*6));
-          jobId=result.jobId;
-          while(result.status==='queued'||result.status==='running'){if(Date.now()>deadline)throw withSubmission(new Error('音频生成等待超时；云端任务可能仍在执行（任务 '+result.jobId+'）'),'unknown',result.jobId);await new Promise(r=>setTimeout(r,Number(resolved.model.parameters.pollIntervalMs)||2000));signal.throwIfAborted();result=await pollTemplate(context,resolved.model,result.jobId,'audio');}
-          if(result.status!=='succeeded'||!result.artifacts?.length)throw withSubmission(new Error('音频生成失败：'+(result.error??result.status)),result.status==='failed'||result.status==='cancelled'?'failed':'unknown',result.jobId);
-          cost=typeof result.usage?.cost==='number'?result.usage.cost:null;const artifact=result.artifacts[0];
-          if(artifact.base64){bytes=Buffer.from(artifact.base64,'base64');mime=artifact.mimeType;}
-          else{const url=new URL(artifact.url!);if(url.protocol!=='https:'&&!(url.protocol==='http:'&&['127.0.0.1','localhost'].includes(url.hostname)))throw new Error('音频产物地址须为 HTTPS');
-            const response=await (options.fetch??fetch)(url.href,{signal});if(!response.ok)throw new Error('下载音频失败（HTTP '+response.status+'）');const buffer=new Uint8Array(await response.arrayBuffer());if(!buffer.length||buffer.length>64*1024*1024)throw new Error('音频为空或超过 64 MiB');bytes=buffer;mime=(response.headers.get('content-type')?.split(';')[0]||artifact.mimeType);}
+        let bytes:Uint8Array|undefined,mime='audio/mpeg';let cost:number|null=receipt?.cost??null;let jobId=receipt?.jobId;
+        if(!receipt){
+          const result=await submitTemplate(context,{clientRequestId:randomUUID(),model:resolved.model,prompt,duration:durationSeconds,parameters:{}},'audio').catch(error=>{throw withSubmission(error,signal.aborted?'unknown':sendOutcome(error));});
+          try{
+            if('kind' in result){bytes=result.bytes;mime=result.mimeType;await writeAtomic(artifactFile,bytes);receipt={stage:'downloaded',mime,cost:null,at:new Date().toISOString()};}
+            else{jobId=result.jobId;receipt={stage:'accepted',jobId,cost:null,at:new Date().toISOString()};}
+            await saveReceipt(receipt);
+          }catch(error){throw withSubmission(error,'unknown',jobId);}
         }
-        }catch(error){throw (error as {submission?:unknown})?.submission?error:withSubmission(error,'unknown',jobId);}// R04: anything after the provider accepted the request is an unknown outcome
-        if(!mime!.startsWith('audio/'))mime='audio/mpeg';
-        const snapshot=await backend.call('import',{projectId:id,name:(role==='music'?'音乐 · ':role==='sfx'?'音效 · ':'配音 · ')+prompt.slice(0,24),description:'由 '+resolved.model.name+' 生成',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});
-        const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error('音频导入失败');return {id:asset.id,name:asset.name,cost};
+        try{
+          if(receipt.stage==='accepted'){
+            const configuredWait=Number(resolved.model.parameters.maxWaitMs),deadline=Date.now()+(Number.isFinite(configuredWait)&&configuredWait>=1000?Math.min(configuredWait,3_600_000):Math.max(60000,resolved.connection.requestTimeoutMs*6));
+            let result=await pollTemplate(context,resolved.model,jobId!,'audio');
+            while(result.status==='queued'||result.status==='running'){if(Date.now()>deadline)throw withSubmission(new Error('音频生成等待超时；云端任务可能仍在执行（任务 '+jobId+'）'),'unknown',jobId);await new Promise(r=>setTimeout(r,Number(resolved.model.parameters.pollIntervalMs)||2000));signal.throwIfAborted();result=await pollTemplate(context,resolved.model,jobId!,'audio');}
+            if(result.status==='failed'||result.status==='cancelled'){await dropReceipt();throw withSubmission(new Error('音频生成失败：'+(result.error??result.status)),'failed',jobId);}
+            if(result.status!=='succeeded'||!result.artifacts?.length)throw withSubmission(new Error('音频生成失败：'+(result.error??result.status)),'unknown',jobId);
+            cost=typeof result.usage?.cost==='number'?result.usage.cost:null;const artifact=result.artifacts[0];
+            if(artifact.base64){bytes=Buffer.from(artifact.base64,'base64');mime=artifact.mimeType;}
+            else{const url=new URL(artifact.url!);if(url.protocol!=='https:'&&!(url.protocol==='http:'&&['127.0.0.1','localhost'].includes(url.hostname)))throw new Error('音频产物地址须为 HTTPS');
+              const response=await (options.fetch??fetch)(url.href,{signal});if(!response.ok)throw new Error('下载音频失败（HTTP '+response.status+'）');const buffer=new Uint8Array(await response.arrayBuffer());if(!buffer.length||buffer.length>64*1024*1024)throw new Error('音频为空或超过 64 MiB');bytes=buffer;mime=(response.headers.get('content-type')?.split(';')[0]||artifact.mimeType);}
+            await writeAtomic(artifactFile,bytes);receipt={...receipt,stage:'downloaded',mime,cost};await saveReceipt(receipt);
+          }
+          bytes??=new Uint8Array(await readFile(artifactFile));mime=receipt.mime??mime;
+        }catch(error){throw (error as {submission?:unknown})?.submission?error:withSubmission(error,'unknown',jobId);}
+        if(!mime.startsWith('audio/'))mime='audio/mpeg';
+        let lastError:unknown;
+        for(let attempt=0;attempt<3;attempt++){
+          try{
+            const snapshot=await backend.call('import',{projectId:id,name:(role==='music'?'音乐 · ':role==='sfx'?'音效 · ':'配音 · ')+prompt.slice(0,24),description:'由 '+resolved.model.name+' 生成',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});
+            const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error('音频导入失败');
+            await dropReceipt().catch(()=>{});return {id:asset.id,name:asset.name,cost};
+          }catch(error){lastError=error;if(signal.aborted)break;await new Promise(r=>setTimeout(r,50*(attempt+1)));}
+        }
+        const failure=new Error('音频已生成（可能已计费）并已保存回执，但登记进工程失败：'+(lastError instanceof Error?lastError.message:String(lastError))+'。再次发起相同请求会重试本地登记，不会重新提交');
+        throw withSubmission(failure,'unknown',jobId);
       }finally{release();}
     },
     vision:async(prompt,images,signal)=>{await providers.registry.resolve('vision');return workflowPort.text('vision',prompt,signal,{} as WorkflowRequest,images);},
