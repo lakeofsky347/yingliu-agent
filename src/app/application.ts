@@ -145,8 +145,8 @@ export async function createApplication(options:{dataDirectory:string;credential
         case 'agent.list':value={runs:await agent.list(typeof data.projectId==='string'?data.projectId:undefined)};break;
         case 'agent.get':value=await agent.get(String(data.runId));break;
         case 'agent.trace':value={events:await agent.trace(String(data.runId))};break;
-        case 'agent.approve':value=await agent.approve(String(data.runId),String(data.callId));break;
-        case 'agent.reject':value=await agent.reject(String(data.runId),String(data.callId),typeof data.reason==='string'?data.reason:'');break;
+        case 'agent.approve':value=await agent.approve(String(data.runId),String(data.callId),typeof data.execId==='string'?data.execId:undefined,typeof data.argsHash==='string'?data.argsHash:undefined);break;
+        case 'agent.reject':value=await agent.reject(String(data.runId),String(data.callId),typeof data.execId==='string'?data.execId:undefined,typeof data.reason==='string'?data.reason:'');break;
         case 'agent.resume':value=await agent.resume(String(data.runId));break;
         case 'agent.pause':value=await agent.pause(String(data.runId));break;
         case 'agent.cancel':value=await agent.cancel(String(data.runId));break;

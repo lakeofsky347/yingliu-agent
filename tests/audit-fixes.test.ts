@@ -77,12 +77,12 @@ test('F03: a reused provider call ID with different arguments needs a fresh appr
   try {
     const started = await service.start({ projectId: 'proj-1', goal: '配音' });
     let run = await settle(service, started.id, ['awaiting_approval']);
-    await service.approve(started.id, 'dup');
+    await service.approve(started.id, 'dup', (await service.get(started.id)).pending!.execId!);
     run = await settle(service, started.id, ['awaiting_approval', 'complete', 'failed']);
     assert.equal(run.status, 'awaiting_approval', 'second call with same provider ID must be approved again');
     assert.deepEqual(voices, ['第一段']);
     assert.ok(run.pending?.arguments.includes('第二段'));
-    await service.reject(started.id, 'dup');
+    await service.reject(started.id, 'dup', (await service.get(started.id)).pending!.execId!);
     run = await settle(service, started.id, ['complete', 'failed']);
     assert.deepEqual(voices, ['第一段']);
     assert.equal((run.approvals ?? []).length, 0, 'approval consumed');
@@ -219,5 +219,25 @@ test('R05: tools requested in the last allowed model turn still execute; the nex
     const run = await settle(service, started.id, ['budget_exceeded', 'complete', 'failed']);
     assert.equal(run.status, 'budget_exceeded'); assert.equal(run.usage.steps, 1); assert.equal(run.usage.toolCalls, 1); assert.equal(reads - before, 1);
     assert.equal(gw.requests.length, 1, 'no second model turn');
+  } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
+});
+
+test('R02: a stale/replayed approval for an earlier pending call that reused the provider call ID is rejected', async () => {
+  const d = await dir(); const voices: string[] = [];
+  const { port } = fakePort({ capabilities: async () => ({ roles: ['speech'] }), voice: async (_p, _s, text) => { voices.push(text); return { id: 'v' + voices.length, name: 'v' }; } });
+  const gw = toolGateway((_b, turn) => turn === 0 ? { toolCalls: [{ id: 'dup', name: 'generate_voice', arguments: { shotId: 'a', text: '第一段' } }] }
+    : turn === 1 ? { toolCalls: [{ id: 'dup', name: 'generate_voice', arguments: { shotId: 'a', text: '第二段' } }] } : done());
+  const service = new AgentService(d, port, { resolveModel: model(), fetch: gw.fetch, retryBaseMs: 1 });
+  try {
+    const started = await service.start({ projectId: 'proj-1', goal: '配音' });
+    const first = (await settle(service, started.id, ['awaiting_approval'])).pending!;
+    await assert.rejects(service.approve(started.id, 'dup'), /execId/, 'execId is mandatory');
+    await service.approve(started.id, 'dup', first.execId, first.argsHash);
+    const second = (await settle(service, started.id, ['awaiting_approval', 'complete'])).pending!;
+    assert.notEqual(second.execId, first.execId);
+    await assert.rejects(service.approve(started.id, 'dup', first.execId), /过期/, 'replayed first approval');
+    await assert.rejects(service.reject(started.id, 'dup', first.execId), /过期/);
+    await assert.rejects(service.approve(started.id, 'dup', second.execId, first.argsHash), /参数已变化/);
+    assert.deepEqual(voices, ['第一段']); assert.equal((await service.get(started.id)).status, 'awaiting_approval');
   } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
 });

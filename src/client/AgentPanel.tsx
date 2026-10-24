@@ -74,8 +74,8 @@ export function AgentPanel({controller,project}:{controller:StudioController;pro
         {run.pending&&<div className="vs-agent-approval" role="group" aria-label="待批准">
           <p><strong>{run.pending.tool}</strong>（{riskNames[run.pending.risk]}）：{run.pending.reason}</p>
           {run.pending.risk==='plan'?<PlanReview tool={run.pending.tool} args={run.pending.arguments}/>:<pre>{run.pending.arguments}</pre>}
-          <button className="vs-primary" disabled={busy} onClick={()=>void act(()=>controller.api.call('agent.approve',{runId:run.id,callId:run.pending!.callId}))}>批准</button>
-          <button disabled={busy} onClick={()=>void act(()=>controller.api.call('agent.reject',{runId:run.id,callId:run.pending!.callId,reason:''}))}>拒绝</button>
+          <button className="vs-primary" disabled={busy} onClick={()=>void act(()=>controller.api.call('agent.approve',{runId:run.id,callId:run.pending!.callId,execId:run.pending!.execId,argsHash:run.pending!.argsHash}))}>批准</button>
+          <button disabled={busy} onClick={()=>void act(()=>controller.api.call('agent.reject',{runId:run.id,callId:run.pending!.callId,execId:run.pending!.execId,reason:''}))}>拒绝</button>
         </div>}
         <div className="vs-agent-actions">
           {['running','waiting_task'].includes(run.status)&&<button disabled={busy} onClick={()=>void act(()=>controller.api.call('agent.pause',{runId:run.id}))}>暂停</button>}

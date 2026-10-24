@@ -62,7 +62,7 @@ test('hot activation: binding roles mid-run exposes generation tools on the next
     assert.equal(run.status, 'awaiting_approval', run.message); assert.equal(run.pending?.tool, 'generate_music');
     assert.deepEqual(run.active?.roles, ['video', 'music']); assert.ok(run.active?.tools.includes('generate_video'));
     assert.ok(!calls.some(c => c.startsWith('audio:')));
-    await service.approve(s.id, 'm1');
+    await service.approve(s.id, 'm1', (await service.get(s.id)).pending!.execId!);
     run = await settle(service, s.id, ['complete', 'failed']);
     assert.equal(run.status, 'complete'); assert.ok(calls.includes('audio:music:轻快钢琴')); assert.equal(run.usage.cost, 0.2);
     const caps2 = await service.capabilities(); assert.deepEqual(caps2.capabilities.roles, ['video', 'music']); assert.ok(caps2.selfMade.includes('静态插画'));
@@ -108,7 +108,7 @@ test('app integration: capabilities follow the registry; async music template ge
     await call('models.role.bind', { role: 'music', modelId: rm2.id });
     for (let i = 0; i < 500 && !['awaiting_approval', 'complete', 'failed'].includes(current.status); i++) { await new Promise(r => setTimeout(r, 10)); current = await call<PublicRun>('agent.get', { runId: run.id }); }
     assert.equal(current.status, 'awaiting_approval', current.message + JSON.stringify(current.steps.filter(s => s.error)));
-    await call('agent.approve', { runId: run.id, callId: 'gm' });
+    await call('agent.approve', { runId: run.id, callId: 'gm', execId: (await call<{ pending: { execId: string } }>('agent.get', { runId: run.id })).pending.execId });
     for (let i = 0; i < 500 && !['complete', 'failed'].includes(current.status); i++) { await new Promise(r => setTimeout(r, 10)); current = await call<PublicRun>('agent.get', { runId: run.id }); }
     assert.equal(current.status, 'complete', current.message + JSON.stringify(current.steps.filter(s => s.error)));
     const after = await call<StudioSnapshot>('current', { projectId: created.project!.id });

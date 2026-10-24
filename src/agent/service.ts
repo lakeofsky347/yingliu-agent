@@ -164,6 +164,14 @@ export class AgentService {
     this.launch(run); return this.public(run);
   }
   /** R08: a loop publishes paused/awaiting state just before it exits; callers acting on that state wait for it to finish. */
+  /** R02: decisions are bound to the host execution ID (and optionally the args hash) of the pending call; a stale or replayed
+   *  decision for an earlier call that reused the provider call ID is rejected instead of attaching to the current one. */
+  private checkPending(pending: AgentRun['pending'], execId?: string, expectedArgsHash?: string) {
+    if (!pending?.execId) return; // legacy pending records created before execution IDs
+    if (typeof execId !== 'string' || !execId) throw Object.assign(new Error('审批需要提供待批准步骤的 execId'), { code: 'EXEC_ID_REQUIRED' });
+    if (execId !== pending.execId) throw Object.assign(new Error('审批已过期：待批准的步骤已变化，请刷新后重新确认'), { code: 'STALE_APPROVAL' });
+    if (expectedArgsHash !== undefined && expectedArgsHash !== pending.argsHash) throw Object.assign(new Error('审批已过期：参数已变化'), { code: 'STALE_APPROVAL' });
+  }
   private async settled(id: string) { const active = this.active.get(id); if (active) await active.promise.catch(() => {}); }
   private launch(run: AgentRun) {
     if (this.active.has(run.id)) return;
@@ -174,20 +182,22 @@ export class AgentService {
     }).finally(() => { this.active.delete(run.id); });
     this.active.set(run.id, { controller, promise });
   }
-  async approve(id: string, callId: string): Promise<PublicRun> {
+  async approve(id: string, callId: string, execId?: string, expectedArgsHash?: string): Promise<PublicRun> {
     const run = await this.required(id); if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
     await this.settled(id); if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
+    this.checkPending(run.pending, execId, expectedArgsHash);
     if (run.pending.execId && run.pending.argsHash) (run.approvals ??= []).push({ execId: run.pending.execId, tool: run.pending.tool, argsHash: run.pending.argsHash });
     await this.store.trace(run.id, { event: 'approval', callId, execId: run.pending.execId, decision: 'approved', tool: run.pending.tool });
     const step = [...run.steps].reverse().find((s: RunStep) => s.kind === 'approval' && s.callId === callId); if (step) await this.finishStep(run, step, { status: 'complete', summary: '用户已批准' });
     delete run.pending; run.status = 'running'; run.message = '已批准，继续执行'; await this.save(run); this.launch(run); return this.public(run);
   }
-  async reject(id: string, callId: string, reason = ''): Promise<PublicRun> {
+  async reject(id: string, callId: string, execId?: string, reason = ''): Promise<PublicRun> {
     const run = await this.required(id); if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
     await this.settled(id); if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
+    this.checkPending(run.pending, execId);
     const tool = run.pending.tool; await this.store.trace(run.id, { event: 'approval', callId, decision: 'rejected', tool, reason });
     const step = [...run.steps].reverse().find((s: RunStep) => s.kind === 'approval' && s.callId === callId); if (step) await this.finishStep(run, step, { status: 'rejected', summary: '用户拒绝' + (reason ? '：' + reason : '') });
-    const execId = run.pending.execId; run.queue = execId ? run.queue.filter(call => call.execId !== execId) : run.queue.filter(call => call.id !== callId);
+    const pendingExec = run.pending.execId; run.queue = pendingExec ? run.queue.filter(call => call.execId !== pendingExec) : run.queue.filter(call => call.id !== callId);
     run.messages.push({ role: 'tool', tool_call_id: callId, content: JSON.stringify({ rejected: true, reason: reason.slice(0, 500) || '用户拒绝执行此操作，请换一种方式或说明原因' }) });
     delete run.pending; run.status = 'running'; run.message = '已拒绝，智能体调整方案'; await this.save(run); this.launch(run); return this.public(run);
   }
