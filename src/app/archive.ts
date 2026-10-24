@@ -85,7 +85,7 @@ async function extractArchive(input:{path?:string;dataBase64?:string},directory:
 }
 
 /** Optional agent-side data (story/ledger/QC) carried in agent/*.json so a backup restores budget and story state. */
-export interface AgentArchiveData { export(projectId:string):Promise<Partial<Record<'story'|'ledger'|'qc',unknown>>>; import(projectId:string,docs:Partial<Record<'story'|'ledger'|'qc',unknown>>):Promise<void> }
+export interface AgentArchiveData { export(projectId:string):Promise<Partial<Record<'story'|'ledger'|'qc',unknown>>>; import(projectId:string,docs:Partial<Record<'story'|'ledger'|'qc',unknown>>):Promise<void>; /** R07: throw if docs are invalid; called before the project is registered. */ validate?(docs:Partial<Record<'story'|'ledger'|'qc',unknown>>):void }
 export async function exportProjectArchive(backend:BackendPort,input:{projectId?:string;path?:string;limits?:ArchiveLimits},agent?:AgentArchiveData){
   const limits=resolveLimits(input.limits);
   const snapshot=await backend.call<StudioSnapshot>('current',{projectId:input.projectId});if(!snapshot.project||!snapshot.root)throw new Error('请先打开一个影片工程');
@@ -130,8 +130,12 @@ export async function importProjectArchive(backend:BackendPort,input:{path?:stri
     const sources=[];for(const shot of project.shots){const entry=files.get('sources/'+shot.id+'.json');if(!entry)throw new Error('工程包缺少镜头源码');sources.push({shotId:shot.id,source:JSON.parse(await readFile(entry.path,'utf8')) as SceneSource});}
     const assetFiles=[...new Set(project.assets.flatMap(assetPaths))].map(path=>{if(!allowed(path)||!path.startsWith('assets/'))throw new Error('素材路径无效');const entry=files.get(path);if(!entry)throw new Error('工程包缺少素材 '+path);return {path,localPath:entry.path};});
     const agentDocs:Partial<Record<'story'|'ledger'|'qc',unknown>>={};for(const name of ['story','ledger','qc'] as const){const entry=files.get('agent/'+name+'.json');if(entry)try{agentDocs[name]=JSON.parse(await readFile(entry.path,'utf8'));}catch{throw new Error('工程包中的智能体资料损坏：'+name);}}
+    const hasDocs=!!agent&&Object.keys(agentDocs).length>0;if(hasDocs)agent!.validate?.(agentDocs);
     const created=await backend.call<StudioSnapshot>('create',{project,sources,assetFiles});
-    if(agent&&Object.keys(agentDocs).length)await agent.import(created.project?.id??project.id,agentDocs);
+    if(hasDocs)try{await agent!.import(created.project?.id??project.id,agentDocs);}catch(error){
+      // R07: never leave a half-imported project active; the hub has no hard delete, so archive it (recoverable, hidden from the list)
+      await backend.call('archive',{projectId:created.project?.id??project.id,archived:true}).catch(()=>{});throw error;
+    }
     return created;
   }finally{await rm(directory,{recursive:true,force:true});}
 }

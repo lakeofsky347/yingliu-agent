@@ -154,3 +154,21 @@ test('R06: importDocs rejects structurally invalid story/ledger/QC documents and
     for(const docs of bad){await assert.rejects(agent.importDocs('p-'+bad.indexOf(docs),docs),/智能体资料损坏/,JSON.stringify(docs));assert.deepEqual(await agent.exportDocs('p-'+bad.indexOf(docs)),{},'nothing written for '+JSON.stringify(docs));}
   }finally{await f.close();}
 });
+test('R07: an archive with invalid agent docs is rejected before any project is registered',async()=>{
+  const {AgentService}=await import('../src/agent/service.ts');const f=await fixture();
+  try{
+    const agent=new AgentService(join(f.directory,'agent-runs'),{} as never,{dataDirectory:join(f.directory,'agent-data'),resolveModel:async()=>{throw new Error('unused');}} as never);
+    const hooks={export:(id:string)=>agent.exportDocs(id),import:(id:string,docs:Record<string,unknown>)=>agent.importDocs(id,docs),validate:(docs:Record<string,unknown>)=>agent.validateDocs(docs)};
+    const first=await f.backend.call<StudioSnapshot>('create',{title:'带剧本'});await agent.saveStory(first.project!.id,{logline:'x'},0);
+    const exported=await exportProjectArchive(f.backend,{projectId:first.project!.id},hooks);const files=unzipSync(Buffer.from(exported.dataBase64!,'base64'));
+    files['agent/story.json']=Buffer.from(JSON.stringify({version:1,shots:'broken',characters:[]}));
+    const manifest=JSON.parse(Buffer.from(files['manifest.json']!).toString('utf8'));manifest.files=Object.entries(files).filter(([n])=>n!=='manifest.json').map(([name,data])=>({name,bytes:data.length,sha256:createHash('sha256').update(data).digest('hex')}));files['manifest.json']=Buffer.from(JSON.stringify(manifest));
+    const count=async()=>(await f.backend.call<{projects:unknown[]}>('list',{includeArchived:true})).projects.length;const before=await count();
+    await assert.rejects(importProjectArchive(f.backend,{dataBase64:Buffer.from(zipSync(files)).toString('base64')},hooks),/智能体资料损坏/);
+    assert.equal(await count(),before,'no orphan project registered');
+    // a failure after registration rolls the project back (archived) instead of leaving a half-imported project visible
+    const failing={...hooks,import:async()=>{throw new Error('disk full');}};const okFiles=unzipSync(Buffer.from(exported.dataBase64!,'base64'));
+    await assert.rejects(importProjectArchive(f.backend,{dataBase64:Buffer.from(zipSync(okFiles)).toString('base64')},failing),/disk full/);
+    assert.equal((await f.backend.call<{projects:unknown[]}>('list',{})).projects.length,before,'rolled-back import is not left active');
+  }finally{await f.close();}
+});

@@ -122,7 +122,7 @@ export async function createApplication(options:{dataDirectory:string;credential
     },
     vision:async(prompt,images,signal)=>{await providers.registry.resolve('vision');return workflowPort.text('vision',prompt,signal,{} as WorkflowRequest,images);},
   };
-  const agentArchive={export:(projectId:string)=>agent.exportDocs(projectId),import:(projectId:string,docs:Partial<Record<'story'|'ledger'|'qc',unknown>>)=>agent.importDocs(projectId,docs)};
+  const agentArchive={export:(projectId:string)=>agent.exportDocs(projectId),import:(projectId:string,docs:Partial<Record<'story'|'ledger'|'qc',unknown>>)=>agent.importDocs(projectId,docs),validate:(docs:Partial<Record<'story'|'ledger'|'qc',unknown>>)=>agent.validateDocs(docs)};
   const agent=new AgentService(join(dataDirectory,'agent-runs'),agentPort,{
     fetch:options.fetch,dataDirectory:join(dataDirectory,'agent-data'),
     redact:async text=>{let value=text;for(const key of await knownKeys())value=redactKey(value,key);return value;},
