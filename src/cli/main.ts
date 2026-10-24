@@ -80,7 +80,6 @@ async function waitRun(ctx: Ctx, runId: string) {
   return run;
 }
 async function finishRun(ctx: Ctx, run: any) {
-  if (ctx.flags['no-wait']) return { data: runView(run), exit: EXIT.OK };
   const done = await waitRun(ctx, run.id);
   // Tools such as export_mp4 start a project task and return; keep the process alive until it settles so it is not killed on exit.
   const task = await waitIdle(ctx, done.projectId);
@@ -109,7 +108,7 @@ export const HELP = `yingliu — 映流智能体 headless CLI（详见 docs/CLI.
 全局：--json  --mock  --timeout <秒>  --lock-timeout <秒，默认 30>   数据目录：YINGLIU_DATA_DIR，工程目录：YINGLIU_PROJECTS
   doctor
   project create --title <t> [--topic <t>] | list [--include-archived] | get <id> | export-zip <id> --out <file> | import <file>
-  agent run --project <id> --goal <g> [--auto-approve read,write,plan] [--allow-paid --max-cost <n> [--auto-approve ...,cost,export]] [--max-steps n] [--max-review-rounds n] [--no-wait]
+  agent run --project <id> --goal <g> [--auto-approve read,write,plan] [--allow-paid --max-cost <n> [--auto-approve ...,cost,export]] [--max-steps n] [--max-review-rounds n]
   agent status <runId> [--trace] | resume <runId> | approve <runId> --call <callId> --exec <execId> [--args-hash h] | reject <runId> --call <callId> --exec <execId> [--reason r]
   story show <projectId> | qc show <projectId> [--run] | ledger show <projectId>
   render <projectId> | export mp4 <projectId> [--out <file>]
@@ -199,6 +198,8 @@ export async function runCli(argv: string[], io: { out: (s: string) => void; err
   };
   if (flags.help || !positional.length) { if (json) return emit(true, { help: HELP }, EXIT.OK); io.out(HELP + '\n'); return positional.length || flags.help ? EXIT.OK : EXIT.USAGE; }
   if (positional[0] === 'doctor') { const r = doctor(); return emit(true, r.data, r.exit); }
+  // C03: the CLI process is the only owner of a run (no resident service), so a run cannot outlive it; refuse instead of abandoning it.
+  if (flags['no-wait'] !== undefined) return emit(false, { code: 'USAGE', message: '不支持 --no-wait：CLI 没有常驻进程，命令退出后运行会被中断。请去掉 --no-wait 并用 --timeout <秒> 控制等待；超时后运行会暂停，可用 agent resume 继续' }, EXIT.USAGE);
   const dir = dataDirectory(); await mkdir(dir, { recursive: true });
   const secrets = new EnvSecrets(join(dir, 'cli-key-env.json')), mock = flags.mock === true;
   let app: App | undefined, release: (() => Promise<void>) | undefined; const unguard = mock ? installMockNetworkGuard() : undefined;

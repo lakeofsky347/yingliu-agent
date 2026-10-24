@@ -71,7 +71,7 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 - `--allow-paid --max-cost N`
 - `--max-steps N`
 - `--max-review-rounds N`
-- `--no-wait`：立即返回，不等运行结束
+- `--no-wait` 已不支持（返回 USAGE，exit 2）：CLI 没有常驻进程，命令退出后运行会被中断。用 `--timeout` 控制等待，超时后运行会暂停，可用 `agent resume` 继续
 
 **Run** 的结构：
 
