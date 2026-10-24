@@ -27,10 +27,12 @@ export function chargeTool(usage: Usage, cost: number | null | undefined, risk: 
   if (risk === 'cost') { if (cost === null || cost === undefined) usage.unknownCostCalls++; else usage.cost += cost; }
 }
 /** Returns a reason string when the next step must not proceed. */
-export function overBudget(budget: Budget, usage: Usage): string | null {
-  if (usage.steps >= budget.maxSteps) return `已达到最大步数 ${budget.maxSteps}`;
+/** scope 'model' gates the next model turn (all limits); scope 'tool' gates one tool execution and ignores the
+ *  model-side limits (steps, tokens) so tools requested by the last allowed model turn still run (R05). */
+export function overBudget(budget: Budget, usage: Usage, scope: 'model' | 'tool' = 'model'): string | null {
+  if (scope === 'model' && usage.steps >= budget.maxSteps) return `已达到最大步数 ${budget.maxSteps}`;
   if (usage.toolCalls >= budget.maxToolCalls) return `已达到最大工具调用次数 ${budget.maxToolCalls}`;
-  if (usage.inputTokens + usage.outputTokens >= budget.maxTokens) return `已达到 token 上限 ${budget.maxTokens}`;
+  if (scope === 'model' && usage.inputTokens + usage.outputTokens >= budget.maxTokens) return `已达到 token 上限 ${budget.maxTokens}`;
   if (budget.maxCost !== null && usage.cost >= budget.maxCost) return `已达到费用上限 ${budget.maxCost} ${budget.currency}`;
   return null;
 }

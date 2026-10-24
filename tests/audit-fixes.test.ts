@@ -208,3 +208,16 @@ test('R08: resume/approve issued the instant a paused/awaiting state is publishe
     assert.equal(run.status, 'awaiting_approval'); assert.equal(submissions, 1);
   } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
 });
+
+test('R05: tools requested in the last allowed model turn still execute; the next model turn is blocked', async () => {
+  const d = await dir(); const { port } = fakePort(); let reads = 0;
+  const counting = { ...port, snapshot: async (id: string) => { reads++; return port.snapshot(id); } };
+  const gw = toolGateway(() => ({ toolCalls: [{ name: 'project_get', arguments: {} }] }));
+  const service = new AgentService(d, counting, { resolveModel: model(), fetch: gw.fetch, retryBaseMs: 1 });
+  try {
+    const started = await service.start({ projectId: 'proj-1', goal: '读', budget: { maxSteps: 1 } }); const before = reads;
+    const run = await settle(service, started.id, ['budget_exceeded', 'complete', 'failed']);
+    assert.equal(run.status, 'budget_exceeded'); assert.equal(run.usage.steps, 1); assert.equal(run.usage.toolCalls, 1); assert.equal(reads - before, 1);
+    assert.equal(gw.requests.length, 1, 'no second model turn');
+  } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
+});

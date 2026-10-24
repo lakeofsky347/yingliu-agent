@@ -233,7 +233,7 @@ export class AgentService {
       if (run.waiting) { await this.awaitTask(run, signal); continue; }
       if (run.queue.length) {
         // F06: budget is checked before *every* tool execution, not only before the next model turn.
-        const limit = overBudget(run.budget, run.usage);
+        const limit = overBudget(run.budget, run.usage, 'tool');
         if (limit) { run.status = 'budget_exceeded'; run.message = '已停止：' + limit; await this.store.trace(run.id, { event: 'budget', reason: limit, usage: run.usage, pendingCalls: run.queue.map(c => c.name) }); await this.save(run); return; }
         const call = run.queue[0];
         const outcome = await this.runCall(run, call, model, signal);
