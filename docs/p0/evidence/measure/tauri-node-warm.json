@@ -1,0 +1,451 @@
+{
+  "summary": {
+    "mode": "tauri",
+    "runs": 10,
+    "idleMs": 10000,
+    "dropCaches": false,
+    "readyMedianMs": 681,
+    "readyP95Ms": 823,
+    "readyFailures": 0,
+    "s0PssMedianMiB": 498,
+    "s0PssP95MiB": 500.4,
+    "s0RssMedianMiB": 729
+  },
+  "host": {
+    "kernel": "Linux 6.12.94+",
+    "cpus": "8"
+  },
+  "measuredAt": "2026-10-24T07:53:52.357Z",
+  "samples": [
+    {
+      "run": 0,
+      "readyMs": 823,
+      "s0": {
+        "pssBytes": 524660736,
+        "rssBytes": 765452288,
+        "processes": [
+          {
+            "pid": 1972706,
+            "comm": "yingliu-shell-p",
+            "pss": 87335936,
+            "rss": 187891712
+          },
+          {
+            "pid": 1972716,
+            "comm": "yingliu-sidecar",
+            "pss": 122195968,
+            "rss": 125861888
+          },
+          {
+            "pid": 1972735,
+            "comm": "WebKitNetworkPr",
+            "pss": 31910912,
+            "rss": 74014720
+          },
+          {
+            "pid": 1972777,
+            "comm": "WebKitWebProces",
+            "pss": 283217920,
+            "rss": 377683968
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        "",
+        "(yingliu-shell-p0:1972706): dbind-WARNING **: 15:52:01.864: AT-SPI: Error retrieving accessibility bus address: org.freedesktop.DBus.Error.ServiceUnknown: The name org.a11y.Bus was not provided by any .service files",
+        "[p0-shell] sidecar ready in 334 ms profile=168ff4457cb88535eac0f0b77d63de0d origin=http://127.0.0.1:46101",
+        "[p0-shell] page-load-finished url=http://127.0.0.1:46101 pid=1972706",
+        ""
+      ]
+    },
+    {
+      "run": 1,
+      "readyMs": 694,
+      "s0": {
+        "pssBytes": 521731072,
+        "rssBytes": 764739584,
+        "processes": [
+          {
+            "pid": 1973109,
+            "comm": "yingliu-shell-p",
+            "pss": 87911424,
+            "rss": 189296640
+          },
+          {
+            "pid": 1973119,
+            "comm": "yingliu-sidecar",
+            "pss": 119288832,
+            "rss": 123056128
+          },
+          {
+            "pid": 1973135,
+            "comm": "WebKitNetworkPr",
+            "pss": 31826944,
+            "rss": 74285056
+          },
+          {
+            "pid": 1973177,
+            "comm": "WebKitWebProces",
+            "pss": 282703872,
+            "rss": 378101760
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        "",
+        "(yingliu-shell-p0:1973109): dbind-WARNING **: 15:52:13.016: AT-SPI: Error retrieving accessibility bus address: org.freedesktop.DBus.Error.ServiceUnknown: The name org.a11y.Bus was not provided by any .service files",
+        "[p0-shell] sidecar ready in 299 ms profile=8e98b71567057596f50e548f8e2e20df origin=http://127.0.0.1:38301",
+        "[p0-shell] page-load-finished url=http://127.0.0.1:38301 pid=1973109",
+        ""
+      ]
+    },
+    {
+      "run": 2,
+      "readyMs": 672,
+      "s0": {
+        "pssBytes": 522801152,
+        "rssBytes": 764559360,
+        "processes": [
+          {
+            "pid": 1973639,
+            "comm": "yingliu-shell-p",
+            "pss": 88037376,
+            "rss": 188907520
+          },
+          {
+            "pid": 1973649,
+            "comm": "yingliu-sidecar",
+            "pss": 119108608,
+            "rss": 122867712
+          },
+          {
+            "pid": 1973665,
+            "comm": "WebKitNetworkPr",
+            "pss": 32061440,
+            "rss": 74338304
+          },
+          {
+            "pid": 1973707,
+            "comm": "WebKitWebProces",
+            "pss": 283593728,
+            "rss": 378445824
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        "",
+        "(yingliu-shell-p0:1973639): dbind-WARNING **: 15:52:24.068: AT-SPI: Error retrieving accessibility bus address: org.freedesktop.DBus.Error.ServiceUnknown: The name org.a11y.Bus was not provided by any .service files",
+        "[p0-shell] sidecar ready in 283 ms profile=c0f90912c6e3a70d097f85603b64ee2f origin=http://127.0.0.1:41431",
+        "[p0-shell] page-load-finished url=http://127.0.0.1:41431 pid=1973639",
+        ""
+      ]
+    },
+    {
+      "run": 3,
+      "readyMs": 701,
+      "s0": {
+        "pssBytes": 522018816,
+        "rssBytes": 763977728,
+        "processes": [
+          {
+            "pid": 1974166,
+            "comm": "yingliu-shell-p",
+            "pss": 87923712,
+            "rss": 188858368
+          },
+          {
+            "pid": 1974189,
+            "comm": "yingliu-sidecar",
+            "pss": 118673408,
+            "rss": 122363904
+          },
+          {
+            "pid": 1974241,
+            "comm": "WebKitNetworkPr",
+            "pss": 32103424,
+            "rss": 74379264
+          },
+          {
+            "pid": 1974283,
+            "comm": "WebKitWebProces",
+            "pss": 283318272,
+            "rss": 378376192
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        "",
+        "(yingliu-shell-p0:1974166): dbind-WARNING **: 15:52:35.117: AT-SPI: Error retrieving accessibility bus address: org.freedesktop.DBus.Error.ServiceUnknown: The name org.a11y.Bus was not provided by any .service files",
+        "[p0-shell] sidecar ready in 284 ms profile=fd2a6a8de6f0fb6bb9aaea6e830f164f origin=http://127.0.0.1:42791",
+        "[p0-shell] page-load-finished url=http://127.0.0.1:42791 pid=1974166",
+        ""
+      ]
+    },
+    {
+      "run": 4,
+      "readyMs": 628,
+      "s0": {
+        "pssBytes": 521818112,
+        "rssBytes": 764911616,
+        "processes": [
+          {
+            "pid": 1974397,
+            "comm": "yingliu-shell-p",
+            "pss": 87854080,
+            "rss": 189259776
+          },
+          {
+            "pid": 1974407,
+            "comm": "yingliu-sidecar",
+            "pss": 119308288,
+            "rss": 122998784
+          },
+          {
+            "pid": 1974424,
+            "comm": "WebKitNetworkPr",
+            "pss": 31780864,
+            "rss": 74366976
+          },
+          {
+            "pid": 1974466,
+            "comm": "WebKitWebProces",
+            "pss": 282874880,
+            "rss": 378286080
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        "",
+        "(yingliu-shell-p0:1974397): dbind-WARNING **: 15:52:46.160: AT-SPI: Error retrieving accessibility bus address: org.freedesktop.DBus.Error.ServiceUnknown: The name org.a11y.Bus was not provided by any .service files",
+        "[p0-shell] sidecar ready in 266 ms profile=3faf7489c29433e7df4b9289b0707c84 origin=http://127.0.0.1:45055",
+        "[p0-shell] page-load-finished url=http://127.0.0.1:45055 pid=1974397",
+        ""
+      ]
+    },
+    {
+      "run": 5,
+      "readyMs": 665,
+      "s0": {
+        "pssBytes": 522409984,
+        "rssBytes": 764166144,
+        "processes": [
+          {
+            "pid": 1975008,
+            "comm": "yingliu-shell-p",
+            "pss": 87996416,
+            "rss": 189001728
+          },
+          {
+            "pid": 1975030,
+            "comm": "yingliu-sidecar",
+            "pss": 118488064,
+            "rss": 122249216
+          },
+          {
+            "pid": 1975046,
+            "comm": "WebKitNetworkPr",
+            "pss": 32060416,
+            "rss": 74285056
+          },
+          {
+            "pid": 1975088,
+            "comm": "WebKitWebProces",
+            "pss": 283865088,
+            "rss": 378630144
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        "",
+        "(yingliu-shell-p0:1975008): dbind-WARNING **: 15:52:57.140: AT-SPI: Error retrieving accessibility bus address: org.freedesktop.DBus.Error.ServiceUnknown: The name org.a11y.Bus was not provided by any .service files",
+        "[p0-shell] sidecar ready in 282 ms profile=65512d1020ba6271f816d7227397f179 origin=http://127.0.0.1:40191",
+        "[p0-shell] page-load-finished url=http://127.0.0.1:40191 pid=1975008",
+        ""
+      ]
+    },
+    {
+      "run": 6,
+      "readyMs": 698,
+      "s0": {
+        "pssBytes": 522193920,
+        "rssBytes": 763985920,
+        "processes": [
+          {
+            "pid": 1975691,
+            "comm": "yingliu-shell-p",
+            "pss": 87779328,
+            "rss": 188743680
+          },
+          {
+            "pid": 1975701,
+            "comm": "yingliu-sidecar",
+            "pss": 119329792,
+            "rss": 123031552
+          },
+          {
+            "pid": 1975730,
+            "comm": "WebKitNetworkPr",
+            "pss": 32041984,
+            "rss": 74194944
+          },
+          {
+            "pid": 1975772,
+            "comm": "WebKitWebProces",
+            "pss": 283042816,
+            "rss": 378015744
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        "",
+        "(yingliu-shell-p0:1975691): dbind-WARNING **: 15:53:08.180: AT-SPI: Error retrieving accessibility bus address: org.freedesktop.DBus.Error.ServiceUnknown: The name org.a11y.Bus was not provided by any .service files",
+        "[p0-shell] sidecar ready in 290 ms profile=f30919ee7ea46a778667b6e85ccf1e03 origin=http://127.0.0.1:34741",
+        "[p0-shell] page-load-finished url=http://127.0.0.1:34741 pid=1975691",
+        ""
+      ]
+    },
+    {
+      "run": 7,
+      "readyMs": 667,
+      "s0": {
+        "pssBytes": 522379264,
+        "rssBytes": 764391424,
+        "processes": [
+          {
+            "pid": 1976198,
+            "comm": "yingliu-shell-p",
+            "pss": 87950336,
+            "rss": 189112320
+          },
+          {
+            "pid": 1976208,
+            "comm": "yingliu-sidecar",
+            "pss": 119070720,
+            "rss": 122765312
+          },
+          {
+            "pid": 1976246,
+            "comm": "WebKitNetworkPr",
+            "pss": 32098304,
+            "rss": 74416128
+          },
+          {
+            "pid": 1976288,
+            "comm": "WebKitWebProces",
+            "pss": 283259904,
+            "rss": 378097664
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        "",
+        "(yingliu-shell-p0:1976198): dbind-WARNING **: 15:53:19.219: AT-SPI: Error retrieving accessibility bus address: org.freedesktop.DBus.Error.ServiceUnknown: The name org.a11y.Bus was not provided by any .service files",
+        "[p0-shell] sidecar ready in 285 ms profile=5d3882fd582c562b51f538cff2992176 origin=http://127.0.0.1:39331",
+        "[p0-shell] page-load-finished url=http://127.0.0.1:39331 pid=1976198",
+        ""
+      ]
+    },
+    {
+      "run": 8,
+      "readyMs": 740,
+      "s0": {
+        "pssBytes": 523232256,
+        "rssBytes": 765218816,
+        "processes": [
+          {
+            "pid": 1976576,
+            "comm": "yingliu-shell-p",
+            "pss": 87960576,
+            "rss": 189112320
+          },
+          {
+            "pid": 1976587,
+            "comm": "yingliu-sidecar",
+            "pss": 119740416,
+            "rss": 123506688
+          },
+          {
+            "pid": 1976623,
+            "comm": "WebKitNetworkPr",
+            "pss": 32149504,
+            "rss": 74379264
+          },
+          {
+            "pid": 1976704,
+            "comm": "WebKitWebProces",
+            "pss": 283381760,
+            "rss": 378220544
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        "",
+        "(yingliu-shell-p0:1976576): dbind-WARNING **: 15:53:30.284: AT-SPI: Error retrieving accessibility bus address: org.freedesktop.DBus.Error.ServiceUnknown: The name org.a11y.Bus was not provided by any .service files",
+        "[p0-shell] sidecar ready in 312 ms profile=ff5b7f3fd5e01ccf4c0334baf7868102 origin=http://127.0.0.1:40159",
+        "[p0-shell] page-load-finished url=http://127.0.0.1:40159 pid=1976576",
+        ""
+      ]
+    },
+    {
+      "run": 9,
+      "readyMs": 681,
+      "s0": {
+        "pssBytes": 521532416,
+        "rssBytes": 763367424,
+        "processes": [
+          {
+            "pid": 1977473,
+            "comm": "yingliu-shell-p",
+            "pss": 88055808,
+            "rss": 189108224
+          },
+          {
+            "pid": 1977493,
+            "comm": "yingliu-sidecar",
+            "pss": 118607872,
+            "rss": 122298368
+          },
+          {
+            "pid": 1977513,
+            "comm": "WebKitNetworkPr",
+            "pss": 32094208,
+            "rss": 74416128
+          },
+          {
+            "pid": 1977555,
+            "comm": "WebKitWebProces",
+            "pss": 282774528,
+            "rss": 377544704
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        "",
+        "(yingliu-shell-p0:1977473): dbind-WARNING **: 15:53:41.380: AT-SPI: Error retrieving accessibility bus address: org.freedesktop.DBus.Error.ServiceUnknown: The name org.a11y.Bus was not provided by any .service files",
+        "[p0-shell] sidecar ready in 291 ms profile=710693450c91711bd0d662b993eb609a origin=http://127.0.0.1:35393",
+        "[p0-shell] page-load-finished url=http://127.0.0.1:35393 pid=1977473",
+        ""
+      ]
+    }
+  ]
+}

@@ -1,0 +1,231 @@
+{
+  "summary": {
+    "mode": "sidecar",
+    "runs": 10,
+    "idleMs": 10000,
+    "dropCaches": false,
+    "readyMedianMs": 291,
+    "readyP95Ms": 413,
+    "readyFailures": 0,
+    "s0PssMedianMiB": 113.3,
+    "s0PssP95MiB": 128.4,
+    "s0RssMedianMiB": 116.8
+  },
+  "host": {
+    "kernel": "Linux 6.12.94+",
+    "cpus": "8"
+  },
+  "measuredAt": "2026-10-24T07:57:58.760Z",
+  "samples": [
+    {
+      "run": 0,
+      "readyMs": 343,
+      "s0": {
+        "pssBytes": 118226944,
+        "rssBytes": 121917440,
+        "processes": [
+          {
+            "pid": 1981671,
+            "comm": "yingliu-sidecar",
+            "pss": 118226944,
+            "rss": 121917440
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        ""
+      ]
+    },
+    {
+      "run": 1,
+      "readyMs": 291,
+      "s0": {
+        "pssBytes": 118657024,
+        "rssBytes": 122273792,
+        "processes": [
+          {
+            "pid": 1982090,
+            "comm": "yingliu-sidecar",
+            "pss": 118657024,
+            "rss": 122273792
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        ""
+      ]
+    },
+    {
+      "run": 2,
+      "readyMs": 292,
+      "s0": {
+        "pssBytes": 120079360,
+        "rssBytes": 123793408,
+        "processes": [
+          {
+            "pid": 1982345,
+            "comm": "yingliu-sidecar",
+            "pss": 120079360,
+            "rss": 123793408
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        ""
+      ]
+    },
+    {
+      "run": 3,
+      "readyMs": 278,
+      "s0": {
+        "pssBytes": 119308288,
+        "rssBytes": 122925056,
+        "processes": [
+          {
+            "pid": 1982436,
+            "comm": "yingliu-sidecar",
+            "pss": 119308288,
+            "rss": 122925056
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        ""
+      ]
+    },
+    {
+      "run": 4,
+      "readyMs": 278,
+      "s0": {
+        "pssBytes": 118800384,
+        "rssBytes": 122458112,
+        "processes": [
+          {
+            "pid": 1982537,
+            "comm": "yingliu-sidecar",
+            "pss": 118800384,
+            "rss": 122458112
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        ""
+      ]
+    },
+    {
+      "run": 5,
+      "readyMs": 413,
+      "s0": {
+        "pssBytes": 134620160,
+        "rssBytes": 138264576,
+        "processes": [
+          {
+            "pid": 1983821,
+            "comm": "yingliu-sidecar",
+            "pss": 134620160,
+            "rss": 138264576
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        ""
+      ]
+    },
+    {
+      "run": 6,
+      "readyMs": 271,
+      "s0": {
+        "pssBytes": 118930432,
+        "rssBytes": 122634240,
+        "processes": [
+          {
+            "pid": 1987087,
+            "comm": "yingliu-sidecar",
+            "pss": 118930432,
+            "rss": 122634240
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        ""
+      ]
+    },
+    {
+      "run": 7,
+      "readyMs": 300,
+      "s0": {
+        "pssBytes": 118459392,
+        "rssBytes": 122163200,
+        "processes": [
+          {
+            "pid": 1987515,
+            "comm": "yingliu-sidecar",
+            "pss": 118459392,
+            "rss": 122163200
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        ""
+      ]
+    },
+    {
+      "run": 8,
+      "readyMs": 288,
+      "s0": {
+        "pssBytes": 118364160,
+        "rssBytes": 122093568,
+        "processes": [
+          {
+            "pid": 1988295,
+            "comm": "yingliu-sidecar",
+            "pss": 118364160,
+            "rss": 122093568
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        ""
+      ]
+    },
+    {
+      "run": 9,
+      "readyMs": 311,
+      "s0": {
+        "pssBytes": 119225344,
+        "rssBytes": 122929152,
+        "processes": [
+          {
+            "pid": 1988447,
+            "comm": "yingliu-sidecar",
+            "pss": 119225344,
+            "rss": 122929152
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        ""
+      ]
+    }
+  ]
+}

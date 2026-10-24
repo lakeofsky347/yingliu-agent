@@ -1,0 +1,57 @@
+name: Tauri P0 spike
+
+on:
+  push:
+    branches: [spike/tauri-p0]
+  pull_request:
+    paths: ['src-tauri/**', 'src/sidecar/**', 'scripts/p0/**', '.github/workflows/tauri-p0.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.20.0'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux WebKitGTK deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev patchelf
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Build Node SEA sidecar
+        run: node scripts/p0/build-sidecar.mjs --runtime node
+      - name: Sidecar smoke (ready handshake + graceful shutdown)
+        shell: bash
+        run: |
+          dir=$(ls -d dist-p0/node-*)
+          bin="$dir/yingliu-sidecar"; [ -f "$bin.exe" ] && bin="$bin.exe"
+          root="$RUNNER_TEMP/p0 smoke 中文"
+          mkdir -p "$root"
+          node -e "const {spawn}=require('child_process');const [b,r,res]=process.argv.slice(1);const c=spawn(b,['--data-root',r+'/data','--projects-root',r+'/projects','--resource-root',res,'--mock']);let o='';c.stdout.on('data',d=>{o+=d;if(o.includes('\"ready\"')){console.log(o.replace(/\"token\":\"[^\"]+\"/,'\"token\":\"<redacted>\"'));c.stdin.write('{\"type\":\"shutdown\"}\n')}});c.stderr.pipe(process.stderr);c.on('exit',k=>process.exit(o.includes('\"ready\"')&&k===0?0:1));setTimeout(()=>{console.error('timeout');c.kill();process.exit(1)},60000)" "$bin" "$root" "$PWD/$dir/resources"
+      - name: Build Tauri shell (release, unsigned)
+        working-directory: src-tauri
+        run: cargo build --release --locked
+      - name: Sizes and hashes
+        shell: bash
+        run: |
+          mkdir -p p0-out
+          shell=src-tauri/target/release/yingliu-shell-p0; [ -f "$shell.exe" ] && shell="$shell.exe"
+          cp "$shell" p0-out/
+          cp -r dist-p0/node-* p0-out/sidecar
+          node -e "const fs=require('fs'),p=require('path'),c=require('crypto');const out=[];const w=d=>{for(const f of fs.readdirSync(d)){const q=p.join(d,f);const s=fs.statSync(q);s.isDirectory()?w(q):out.push({file:q,bytes:s.size,sha256:c.createHash('sha256').update(fs.readFileSync(q)).digest('hex')})}};w('p0-out');const total=out.reduce((a,b)=>a+b.bytes,0);fs.writeFileSync('p0-out/SIZES.json',JSON.stringify({os:process.platform,arch:process.arch,signed:false,totalBytes:total,files:out},null,2));console.log('total',total);out.filter(f=>f.bytes>1e6).forEach(f=>console.log(f.bytes,f.sha256,f.file))"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tauri-p0-unsigned-${{ matrix.os }}
+          path: p0-out
+          retention-days: 14

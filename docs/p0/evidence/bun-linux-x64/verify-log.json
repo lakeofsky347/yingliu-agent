@@ -1,0 +1,173 @@
+{
+  "release": "/workspace/yingliu-agent-verify/dist-p0/bun-linux-x64",
+  "manifest": {
+    "runtime": "bun",
+    "runtimeVersion": "1.4.2",
+    "binary": {
+      "path": "yingliu-sidecar",
+      "bytes": 89216480,
+      "sha256": "ca58d634a6d532e5bf41b929839aa4b4e86d4f3995a08a297ff4c9fe925db0b5"
+    },
+    "totalBytes": 91407511,
+    "commit": "c03828fb61a9b287460663cb91afeb730ed4cf3b"
+  },
+  "control": [
+    {
+      "type": "ready",
+      "protocolVersion": 1,
+      "resourceVersion": "p0-1",
+      "profileId": "3a06d511d294dd4e54cea50dc252b5c4",
+      "pid": 1950724,
+      "port": 33837,
+      "origin": "http://127.0.0.1:33837",
+      "token": "<redacted>",
+      "mock": true,
+      "readyMs": 18,
+      "runtime": "bun 1.4.2"
+    },
+    {
+      "type": "shutdown",
+      "ok": true,
+      "reason": "request"
+    }
+  ],
+  "steps": [
+    {
+      "t": 192,
+      "step": "install-path",
+      "ok": true,
+      "install": "/tmp/p0 验证 OB0S4g/映流 智能体 安装/sidecar",
+      "isolate": true,
+      "hidden": [
+        "/workspace/yingliu-agent-verify",
+        "/opt/yingliu-agent"
+      ]
+    },
+    {
+      "t": 479,
+      "step": "ready-handshake",
+      "ok": true,
+      "readyWallMs": 286,
+      "readyMs": 18,
+      "runtime": "bun 1.4.2",
+      "protocolVersion": 1
+    },
+    {
+      "t": 512,
+      "step": "token-required",
+      "ok": true
+    },
+    {
+      "t": 516,
+      "step": "editor-served",
+      "ok": true
+    },
+    {
+      "t": 518,
+      "step": "editor-csp-no-scene-frames",
+      "ok": true,
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http://localhost:*; media-src 'self' http://localhost:*; frame-src 'none'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    },
+    {
+      "t": 542,
+      "step": "project-create",
+      "ok": true,
+      "projectId": "film-9fe21868-cd0c-4304-ab5c-c5d788ba5b86",
+      "root": "/tmp/p0 验证 OB0S4g/用户 数据/projects/P0-验证-工程-film-9fe21868-cd0c-4304-ab5c-c5d788ba5b86",
+      "underProjectsRoot": true
+    },
+    {
+      "t": 544,
+      "step": "project-read",
+      "ok": true
+    },
+    {
+      "t": 557,
+      "step": "project-write",
+      "ok": true,
+      "revision": 1
+    },
+    {
+      "t": 776,
+      "step": "agent-run-mock-until-approval",
+      "ok": true,
+      "status": "awaiting_approval",
+      "tool": "export_mp4"
+    },
+    {
+      "t": 80011,
+      "step": "agent-run-complete-real-render",
+      "ok": true,
+      "status": "complete",
+      "task": {
+        "kind": "export",
+        "status": "complete"
+      },
+      "output": "/tmp/p0 验证 OB0S4g/用户 数据/projects/P0-验证-工程-film-9fe21868-cd0c-4304-ab5c-c5d788ba5b86/exports/9ecff3c5-1ebd-4abe-a86e-ede15dd89a1a/video.mp4",
+      "renderMs": 79234,
+      "chromiumSeen": true
+    },
+    {
+      "t": 81537,
+      "step": "mp4-full-decode",
+      "ok": true,
+      "video": {
+        "codec": "h264",
+        "w": 1920,
+        "h": 1080,
+        "fps": "30/1",
+        "frames": "900"
+      },
+      "duration": "30.000000",
+      "bytes": 141927
+    },
+    {
+      "t": 81600,
+      "step": "archive-export-import",
+      "ok": true,
+      "bytes": 6281,
+      "importedId": "film-8b7522d9-73ec-4558-822c-c9c7a5649a07",
+      "exported": true
+    },
+    {
+      "t": 82000,
+      "step": "cli-busy-same-profile",
+      "ok": true,
+      "exit": 9,
+      "code": "BUSY"
+    },
+    {
+      "t": 82269,
+      "step": "second-sidecar-busy",
+      "ok": true,
+      "exit": 9
+    },
+    {
+      "t": 82801,
+      "step": "graceful-shutdown",
+      "ok": true,
+      "exit": 0,
+      "shutdownMs": 514
+    },
+    {
+      "t": 82801,
+      "step": "no-leftover-children",
+      "ok": true,
+      "observedDescendants": [
+        "yingliu-sidecar",
+        "chrome",
+        "cat",
+        "ffmpeg",
+        "ffprobe"
+      ],
+      "alive": []
+    },
+    {
+      "t": 83208,
+      "step": "lock-released-after-exit",
+      "ok": true,
+      "exit": 0
+    }
+  ],
+  "stderr": ""
+}
