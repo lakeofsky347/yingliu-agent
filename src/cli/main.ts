@@ -14,7 +14,7 @@ import { MOCK_BASE_URL, mockFetch, installMockNetworkGuard } from './mock.ts';
 import { acquireOwner, BusyError } from './lock.ts';
 
 export const EXIT = { OK: 0, ERROR: 1, USAGE: 2, NOT_FOUND: 3, NEEDS_APPROVAL: 4, BUDGET: 5, ENVIRONMENT: 6, RUN_FAILED: 7, TIMEOUT: 8, BUSY: 9 } as const;
-export class CliError extends Error { constructor(public code: keyof typeof EXIT, message: string) { super(message); } }
+export class CliError extends Error { details?: Record<string, unknown>; constructor(public code: keyof typeof EXIT, message: string) { super(message); } }
 
 type Flags = Record<string, string | boolean>;
 export function parseArgs(argv: string[]): { positional: string[]; flags: Flags } {
@@ -79,17 +79,29 @@ async function waitRun(ctx: Ctx, runId: string) {
   }
   return run;
 }
-async function finishRun(ctx: Ctx, run: any) {
+/** C04: the command's result is the run merged with the project task it started (e.g. export_mp4). A failed/cancelled task makes
+ *  the command fail (RUN_FAILED, exit 7) even when the run itself completed; a completed export returns its output path. */
+export function mergeRunResult(view: ReturnType<typeof runView>, task: { kind: string; status: string; message?: string; error?: string } | undefined, output?: { id?: string; path?: string }) {
+  const taskView = task ? { kind: task.kind, status: task.status, message: task.message, error: task.error } : undefined;
+  if (task && (task.status === 'failed' || task.status === 'cancelled')) {
+    return { ok: false as const, error: { code: 'RUN_FAILED' as const, message: `运行关联的${task.kind === 'export' ? '导出' : ''}任务${task.status === 'failed' ? '失败' : '已取消'}：${task.error || task.message || task.status}`, run: view, task: taskView } };
+  }
+  return { ok: true as const, data: { ...view, ...(taskView ? { task: taskView } : {}), ...(task?.kind === 'export' && task.status === 'complete' && output?.path ? { output: { id: output.id, path: output.path } } : {}) } };
+}
+async function finishRun(ctx: Ctx, run: any, since: string) {
   const done = await waitRun(ctx, run.id);
   // Tools such as export_mp4 start a project task and return; keep the process alive until it settles so it is not killed on exit.
-  const task = await waitIdle(ctx, done.projectId);
-  return { data: { ...runView(done), ...(task ? { task: { kind: task.kind, status: task.status, message: task.message, error: task.error } } : {}) }, exit: runExit(done.status) };
+  const { task, snap } = await waitIdle(ctx, done.projectId);
+  const own = task && task.startedAt >= since ? task : undefined; // only a task started during this command belongs to this run
+  const merged = mergeRunResult(runView(done), own, snap?.project?.outputs?.at(-1));
+  if (!merged.ok) throw Object.assign(new CliError('RUN_FAILED', merged.error.message), { details: { run: merged.error.run, task: merged.error.task } });
+  return { data: merged.data, exit: runExit(done.status) };
 }
 async function waitIdle(ctx: Ctx, projectId: string) {
   const until = Date.now() + (num(ctx.flags, 'timeout') ?? 600) * 1000;
   while (true) {
-    const task = (await call(ctx, 'current', { projectId })).task;
-    if (!task || task.status !== 'running') return task ?? undefined;
+    const snap = await call(ctx, 'current', { projectId }), task = snap.task;
+    if (!task || task.status !== 'running') return { task: task ?? undefined, snap };
     if (Date.now() > until) throw new CliError('TIMEOUT', '等待工程任务超时：' + task.kind);
     await sleep(200);
   }
@@ -132,15 +144,16 @@ async function dispatch(ctx: Ctx, pos: string[]): Promise<{ data: unknown; exit?
         if (risks.some(r => r === 'cost' || r === 'export') && (f['allow-paid'] !== true || maxCost === undefined || !(maxCost > 0))) throw new CliError('USAGE', '自动批准 cost/export 需要同时提供 --allow-paid 和 --max-cost <正数>');
         const budget: Record<string, number> = {}; if (maxCost !== undefined) budget.maxCost = maxCost; const steps = num(f, 'max-steps'); if (steps !== undefined) budget.maxSteps = steps;
         const reviews = num(f, 'max-review-rounds');
+        const since = new Date().toISOString();
         const run = await call(ctx, 'agent.start', { projectId: str(f, 'project', true), goal: str(f, 'goal', true), autoApprove: risks, ...(Object.keys(budget).length ? { budget } : {}), ...(reviews !== undefined ? { maxReviewRounds: reviews } : {}) });
-        return finishRun(ctx, run);
+        return finishRun(ctx, run, since);
       }
       case 'status': { if (!arg) throw new CliError('USAGE', '用法：agent status <runId>'); const run = await call(ctx, 'agent.get', { runId: arg }); const data: Record<string, unknown> = runView(run); if (f.trace) data.trace = (await call(ctx, 'agent.trace', { runId: arg })).events; return { data, exit: EXIT.OK }; }
-      case 'resume': { if (!arg) throw new CliError('USAGE', '用法：agent resume <runId>'); return finishRun(ctx, await call(ctx, 'agent.resume', { runId: arg })); }
+      case 'resume': { if (!arg) throw new CliError('USAGE', '用法：agent resume <runId>'); const since = new Date().toISOString(); return finishRun(ctx, await call(ctx, 'agent.resume', { runId: arg }), since); }
       case 'approve': case 'reject': {
         if (!arg) throw new CliError('USAGE', `用法：agent ${sub} <runId> --call <callId> --exec <execId>`);
         const payload = { runId: arg, callId: str(f, 'call', true), execId: str(f, 'exec', true), ...(sub === 'approve' && str(f, 'args-hash') ? { argsHash: str(f, 'args-hash') } : {}), ...(sub === 'reject' ? { reason: str(f, 'reason') ?? '' } : {}) };
-        return finishRun(ctx, await call(ctx, 'agent.' + sub, payload));
+        const since = new Date().toISOString(); return finishRun(ctx, await call(ctx, 'agent.' + sub, payload), since);
       }
     } break;
     case 'story': if (sub === 'show' && arg) return { data: await call(ctx, 'story.get', { projectId: arg }) }; break;
@@ -214,6 +227,6 @@ export async function runCli(argv: string[], io: { out: (s: string) => void; err
     return emit(true, r.data, r.exit ?? EXIT.OK);
   } catch (error) {
     const e = error instanceof CliError ? error : new CliError('ERROR', error instanceof Error ? error.message : String(error));
-    return emit(false, { code: e.code, message: e.message }, EXIT[e.code]);
+    return emit(false, { code: e.code, message: e.message, ...(e.details ?? {}) }, EXIT[e.code]);
   } finally { await app?.dispose().catch(() => {}); await release?.(); unguard?.(); }
 }

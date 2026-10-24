@@ -27,7 +27,7 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 - `--timeout <秒>`：等待运行或任务的上限，默认 600。超时后运行会被暂停，可以用 `agent resume` 继续。
 - **单一数据所有者（C01）。** 每条命令在打开应用前，会对数据目录（`YINGLIU_DATA_DIR`）和工程目录（`YINGLIU_PROJECTS`）各加一把跨进程独占锁（`.yingliu-owner.lock`），命令结束才释放。其他进程最多等 `--lock-timeout` 秒（默认 30），超时返回 `BUSY`（exit 9），错误信息里写明占用者的 pid 和命令。同机上已退出进程留下的锁会被自动回收。我们选择了锁而不是常驻服务：不需要管理守护进程；代价是长时间的 `agent run` 会独占整个 profile，并行任务请使用不同的 `YINGLIU_DATA_DIR`。
 - 只读命令（`project list/get`、`agent status`、`story/ledger show`、`qc show`（不带 `--run`）、`models list`）以只读方式打开：不会结算中断的运行，不会恢复媒体任务，也不会改写状态。
-- 进程退出前会等工程任务（如 export_mp4 发起的导出）结束，避免任务被中途杀掉。
+- 进程退出前会等工程任务（如 export_mp4 发起的导出）结束，避免任务被中途杀掉。`agent run/resume/approve/reject` 的结果会合并本次命令期间启动的工程任务：任务失败或取消时返回 `ok:false`、`code: RUN_FAILED`（exit 7），并在 `error.run`、`error.task` 中附上详情；导出成功时 `data.output.path` 给出成片路径。
 
 ## 退出码
 
