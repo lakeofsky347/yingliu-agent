@@ -1,0 +1,24 @@
+[package]
+name = "yingliu-shell-p0"
+version = "0.0.1"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "P0 spike: Tauri 2 shell for 映流智能体 (spawns the Node sidecar; never runs scenes)"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
