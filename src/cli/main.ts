@@ -144,10 +144,10 @@ async function waitRunTasks(ctx: Ctx, projectId: string, refs: { id: string; kin
     await sleep(200);
   }
 }
-async function waitTask(ctx: Ctx, projectId: string, kind: string, taskId?: string) {
-  // Direct render/export callers also pin the submitted task, rather than accepting a different latest task of the same kind.
-  const id = taskId ?? (await call(ctx, 'current', { projectId })).task?.id;
-  if (!id) throw new CliError('RUN_FAILED', '提交后没有返回任务 ID');
+export async function waitTask(ctx: Ctx, projectId: string, kind: string, taskId: string | undefined) {
+  // Direct render/export callers pin the submitted task. Without its ID we cannot tell it from an older task, so fail closed.
+  const id = taskId;
+  if (!id) throw new CliError('RUN_FAILED', '提交后没有返回任务 ID；不会改用工程当前任务，请用 yingliu 任务记录核对');
   const { snap, tasks } = await waitRunTasks(ctx, projectId, [{ id, kind }]);
   return { snap, task: tasks[0]! };
 }
