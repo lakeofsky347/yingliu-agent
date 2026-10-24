@@ -241,3 +241,26 @@ test('R02: a stale/replayed approval for an earlier pending call that reused the
     assert.deepEqual(voices, ['第一段']); assert.equal((await service.get(started.id)).status, 'awaiting_approval');
   } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
 });
+
+test('R04: an adapter-declared unknown outcome (plain-text poll timeout with jobId) pauses the run; no automatic paid resubmission', async () => {
+  const { withSubmission } = await import('../src/agent/submission.ts');
+  const d = await dir(); let submissions = 0;
+  const { port } = fakePort({ capabilities: async () => ({ roles: ['music'] }), generateAudio: async () => { submissions++; throw withSubmission(new Error('音频生成等待超时；云端任务可能仍在执行'), 'unknown', 'job-7'); } });
+  const gw = toolGateway((_b, turn) => turn < 3 ? { toolCalls: [{ name: 'generate_music', arguments: { prompt: 'lofi', durationSeconds: 1 } }] } : done());
+  const service = new AgentService(d, port, { resolveModel: model(), fetch: gw.fetch, retryBaseMs: 1 });
+  try {
+    const started = await service.start({ projectId: 'proj-1', goal: '配乐', autoApprove: ['read', 'write', 'cost'] });
+    let run = await settle(service, started.id, ['paused', 'complete', 'failed']);
+    assert.equal(run.status, 'paused'); assert.equal(submissions, 1); assert.equal(run.uncertainSubmissions?.[0]?.jobId, 'job-7');
+    await service.resume(started.id);
+    run = await settle(service, started.id, ['awaiting_approval', 'complete', 'failed']);
+    assert.equal(run.status, 'awaiting_approval'); assert.equal(submissions, 1);
+  } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
+  // A definite provider rejection ('failed') is an ordinary tool error and does not pause.
+  const d2 = await dir(); let calls = 0;
+  const { port: p2 } = fakePort({ capabilities: async () => ({ roles: ['music'] }), generateAudio: async () => { calls++; throw withSubmission(new Error('content blocked'), 'failed', 'job-8'); } });
+  const gw2 = toolGateway((_b, turn) => turn < 1 ? { toolCalls: [{ name: 'generate_music', arguments: { prompt: 'x' } }] } : done());
+  const s2 = new AgentService(d2, p2, { resolveModel: model(), fetch: gw2.fetch, retryBaseMs: 1 });
+  try { const st = await s2.start({ projectId: 'proj-1', goal: 'x', autoApprove: ['read', 'write', 'cost'] }); const r = await settle(s2, st.id, ['paused', 'complete', 'failed']); assert.equal(r.status, 'complete'); assert.equal(calls, 1); assert.equal(r.uncertainSubmissions?.length ?? 0, 0); }
+  finally { await s2.dispose(); await rm(d2, { recursive: true, force: true }); }
+});

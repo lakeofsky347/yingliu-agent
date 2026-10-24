@@ -116,3 +116,19 @@ test('app integration: capabilities follow the registry; async music template ge
     assert.ok(media.requests.some(r => r.path === '/v1/models/meta%2Fmusicgen/predictions'));
   } finally { await app.dispose(); await media.close(); await rm(directory, { recursive: true, force: true }); }
 });
+
+test('R04: application music adapter reports a poll timeout as a structured unknown submission with the job ID', { skip: !hasFfprobe && 'ffprobe 不可用' }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-r04-'));
+  const media = await startTemplateGateway({ pollsBeforeDone: 1_000_000 });
+  const app = await createApplication({ dataDirectory: directory, credentials: new MemorySecrets() });
+  const call = async <T,>(endpoint: string, payload: unknown = {}) => { const r = await app.route(endpoint, payload); if (!r.ok) throw new Error(endpoint + ': ' + r.error.message); return r.value as T; };
+  try {
+    const rc = await call<{ id: string }>('models.connection.save', { name: 'music', protocol: 'async-task', baseUrl: media.url + '/v1', auth: 'none' });
+    const m = await call<{ id: string }>('models.model.save', { connectionId: rc.id, model: 'meta/musicgen', inputModalities: ['text'], outputModalities: ['audio'], parameters: { preset: 'replicate', pollIntervalMs: 5, maxWaitMs: 1000 } });
+    await call('models.role.bind', { role: 'music', modelId: m.id });
+    const created = await call<StudioSnapshot>('create', { blank: true, title: '超时' });
+    const agentPort = (app.agent as unknown as { port: AgentPort }).port;
+    const error = await agentPort.generateAudio!(created.project!.id, 'music', 'lofi', { signal: new AbortController().signal }).then(() => null, e => e);
+    assert.ok(error, 'must fail'); assert.equal(error.submission, 'unknown'); assert.match(String(error.jobId), /^rp-/);
+  } finally { await app.dispose(); await media.close(); await rm(directory, { recursive: true, force: true }); }
+});

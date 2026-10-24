@@ -7,6 +7,7 @@ import { RunStore } from './run-store.ts';
 import { activeTools, createTools } from './tools.ts';
 import type { AgentDocs, Capabilities, ToolContext } from './contracts.ts';
 import { join } from 'node:path';
+import { submissionOf } from './submission.ts';
 import { emptyLedger, emptyStory, normalizeCharacter, normalizeStyle, ProjectDocs, storyBrief, type Ledger, type QcReport, type Story } from './story.ts';
 import { qualityCheck } from './tools.ts';
 
@@ -343,9 +344,11 @@ export class AgentService {
     try { result = sideEffect ? await (async () => { step.attempts = 1; return work(); })() : await this.withRetry(run, step, work, signal); }
     catch (error) {
       if (signal.aborted) throw error;
-      const flagged = (error as { submissionUncertain?: unknown })?.submissionUncertain;
-      if (sideEffect && (flagged === true || (flagged !== false && classify(error) === 'retry'))) {
-        const message = errorText(error), entry = { execId: call.execId!, tool: tool.name, at: now(), error: message.slice(0, 500), attempts: 1 };
+      // R04: decide on the adapter's structured submission state; only undeclared errors fall back to the transport classifier.
+      const state = submissionOf(error) ?? (classify(error) === 'retry' ? 'unknown' : undefined);
+      if (sideEffect && state === 'unknown') {
+        const jobId = (error as { jobId?: unknown })?.jobId;
+        const message = errorText(error), entry = { execId: call.execId!, tool: tool.name, at: now(), error: message.slice(0, 500), attempts: 1, ...(typeof jobId === 'string' ? { jobId } : {}) };
         (run.uncertainSubmissions ??= []).push(entry);
         await this.store.trace(run.id, { event: 'submission.uncertain', ...entry });
         await this.finishStep(run, step, { status: 'failed', error: '提交结果未知，未自动重试：' + message });

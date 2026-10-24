@@ -7,6 +7,7 @@ import type { ChatInput, SecretStore } from './contracts.ts';
 import { foundationPacks } from './packs.ts';
 import { applicationHealth } from './health.ts';
 import { exportProjectArchive, importProjectArchive } from './archive.ts';
+import { sendOutcome, withSubmission } from '../agent/submission.ts';
 import { MediaTaskService } from '../jobs/media-tasks.ts';
 import type { MediaRequest } from '../jobs/contracts.ts';
 import type { ConnectionInput, ModelInput, ModelRole } from '../models/contracts.ts';
@@ -62,15 +63,15 @@ export async function createApplication(options:{dataDirectory:string;credential
     const before=(await backend.call('current',{projectId:id})).project;if(!before)throw new Error('工程不存在或未打开');
     const done=options.requestId?((before.extensions[ledgerKey]??{}) as Record<string,{assetId:string}>)[options.requestId]:undefined;
     if(done){const asset=before.assets.find(item=>item.id===done.assetId);if(asset)return {id:asset.id,name:asset.name,revision:before.revision};}
-    if(options.expectedRevision!==undefined&&options.expectedRevision!==before.revision)throw Object.assign(new Error('工程版本已变化（当前 '+before.revision+'），没有提交配音'),{code:'REVISION_CONFLICT',submissionUncertain:false});
-    if(!before.shots.some(item=>item.id===shotId))throw Object.assign(new Error('配音目标镜头不存在'),{submissionUncertain:false});
-    const asset=await workflowPort.voice(id,shotId,text,signal);
+    if(options.expectedRevision!==undefined&&options.expectedRevision!==before.revision)throw withSubmission(Object.assign(new Error('工程版本已变化（当前 '+before.revision+'），没有提交配音'),{code:'REVISION_CONFLICT'}),'preflight_failed');
+    if(!before.shots.some(item=>item.id===shotId))throw withSubmission(new Error('配音目标镜头不存在'),'preflight_failed');
+    const asset=await workflowPort.voice(id,shotId,text,signal).catch(error=>{throw withSubmission(error,(error as {submissionUncertain?:unknown})?.submissionUncertain===false?'preflight_failed':signal.aborted?'unknown':sendOutcome(error));});
     for(let attempt=0;;attempt++){
       const latest=(await backend.call('current',{projectId:id})).project!;const next=structuredClone(latest);
       if(!next.assets.some(item=>item.id===asset.id))next.assets.push(asset);
       if(options.requestId)next.extensions={...next.extensions,[ledgerKey]:{...((next.extensions[ledgerKey]??{}) as object),[options.requestId]:{assetId:asset.id}}};
       try{const committed=await workflowPort.commit(id,latest.revision,next,{},'智能体：登记配音素材');return {id:asset.id,name:asset.name,revision:committed.project?.revision};}
-      catch(error){if(attempt>=2||!/版本|revision/i.test(error instanceof Error?error.message:''))throw Object.assign(error instanceof Error?error:new Error(String(error)),{submissionUncertain:false,message:'配音已生成但登记进工程失败：'+(error instanceof Error?error.message:String(error))});}
+      catch(error){if(attempt>=2||!/版本|revision/i.test(error instanceof Error?error.message:'')){const failure=error instanceof Error?error:new Error(String(error));failure.message='配音已生成（可能已计费）但登记进工程失败：'+failure.message;throw withSubmission(failure,'unknown');}}
     }
   }
   const agentPort:AgentPort={
@@ -99,19 +100,22 @@ export async function createApplication(options:{dataDirectory:string;credential
       const release=providers.registry.acquire(resolved.connection.id,resolved.model.id);
       try{
         const context={connection:resolved.connection,key:await providers.registry.credential(resolved.connection),signal,fetch:options.fetch};
-        let result=await submitTemplate(context,{clientRequestId:randomUUID(),model:resolved.model,prompt,duration:durationSeconds,parameters:{}},'audio');
+        let result=await submitTemplate(context,{clientRequestId:randomUUID(),model:resolved.model,prompt,duration:durationSeconds,parameters:{}},'audio').catch(error=>{throw withSubmission(error,signal.aborted?'unknown':sendOutcome(error));});
         let bytes:Uint8Array,mime:string;let cost:number|null=null;
+        let jobId:string|undefined;try{
         if('kind' in result){bytes=result.bytes;mime=result.mimeType;}
         else{
-          const deadline=Date.now()+Math.max(60000,resolved.connection.requestTimeoutMs*6);
-          while(result.status==='queued'||result.status==='running'){if(Date.now()>deadline)throw new Error('音频生成等待超时；云端任务可能仍在执行');await new Promise(r=>setTimeout(r,Number(resolved.model.parameters.pollIntervalMs)||2000));signal.throwIfAborted();result=await pollTemplate(context,resolved.model,result.jobId,'audio');}
-          if(result.status!=='succeeded'||!result.artifacts?.length)throw new Error('音频生成失败：'+(result.error??result.status));
+          const configuredWait=Number(resolved.model.parameters.maxWaitMs),deadline=Date.now()+(Number.isFinite(configuredWait)&&configuredWait>=1000?Math.min(configuredWait,3_600_000):Math.max(60000,resolved.connection.requestTimeoutMs*6));
+          jobId=result.jobId;
+          while(result.status==='queued'||result.status==='running'){if(Date.now()>deadline)throw withSubmission(new Error('音频生成等待超时；云端任务可能仍在执行（任务 '+result.jobId+'）'),'unknown',result.jobId);await new Promise(r=>setTimeout(r,Number(resolved.model.parameters.pollIntervalMs)||2000));signal.throwIfAborted();result=await pollTemplate(context,resolved.model,result.jobId,'audio');}
+          if(result.status!=='succeeded'||!result.artifacts?.length)throw withSubmission(new Error('音频生成失败：'+(result.error??result.status)),result.status==='failed'||result.status==='cancelled'?'failed':'unknown',result.jobId);
           cost=typeof result.usage?.cost==='number'?result.usage.cost:null;const artifact=result.artifacts[0];
           if(artifact.base64){bytes=Buffer.from(artifact.base64,'base64');mime=artifact.mimeType;}
           else{const url=new URL(artifact.url!);if(url.protocol!=='https:'&&!(url.protocol==='http:'&&['127.0.0.1','localhost'].includes(url.hostname)))throw new Error('音频产物地址须为 HTTPS');
             const response=await (options.fetch??fetch)(url.href,{signal});if(!response.ok)throw new Error('下载音频失败（HTTP '+response.status+'）');const buffer=new Uint8Array(await response.arrayBuffer());if(!buffer.length||buffer.length>64*1024*1024)throw new Error('音频为空或超过 64 MiB');bytes=buffer;mime=(response.headers.get('content-type')?.split(';')[0]||artifact.mimeType);}
         }
-        if(!mime.startsWith('audio/'))mime='audio/mpeg';
+        }catch(error){throw (error as {submission?:unknown})?.submission?error:withSubmission(error,'unknown',jobId);}// R04: anything after the provider accepted the request is an unknown outcome
+        if(!mime!.startsWith('audio/'))mime='audio/mpeg';
         const snapshot=await backend.call('import',{projectId:id,name:(role==='music'?'音乐 · ':role==='sfx'?'音效 · ':'配音 · ')+prompt.slice(0,24),description:'由 '+resolved.model.name+' 生成',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});
         const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error('音频导入失败');return {id:asset.id,name:asset.name,cost};
       }finally{release();}

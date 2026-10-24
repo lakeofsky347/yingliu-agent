@@ -86,7 +86,7 @@ export interface AgentRun {
   approvals?: { execId: string; tool: string; argsHash: string }[];
   reviewRounds: number;
   /** Paid/side-effect submissions whose outcome is unknown (accepted-then-lost response). Never auto-resubmitted. */
-  uncertainSubmissions?: { execId: string; tool: string; at: string; error: string; attempts: number }[]; final?: string; error?: string;
+  uncertainSubmissions?: { execId: string; tool: string; at: string; error: string; attempts: number; jobId?: string }[]; final?: string; error?: string;
   /** Capabilities and tool names active at the latest model step. */
   active?: { roles: GenRole[]; tools: string[]; selfMade: string[] };
 }
