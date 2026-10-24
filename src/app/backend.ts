@@ -10,6 +10,8 @@ export interface AppBackendOptions {
   providers:ProviderHost;
   credentials:SecretStore;
   reveal?:(path:string)=>Promise<void>;
+  /** Project root directory; defaults to <dataDirectory>/projects. */
+  projectsDirectory?:string;
 }
 
 /** Native shell and conversation coordinator share this application backend. */
@@ -17,7 +19,7 @@ export class AppBackend implements BackendPort {
   private readonly hub:ProjectHub;
   constructor(options:AppBackendOptions){
     this.hub=new ProjectHub({llm:options.providers,credentials:options.credentials,reveal:options.reveal},
-      {baseDirectory:join(resolve(options.dataDirectory),'projects')});
+      {baseDirectory:options.projectsDirectory?resolve(options.projectsDirectory):join(resolve(options.dataDirectory),'projects')});
   }
   call<T=StudioSnapshot>(endpoint:string,payload:unknown={}):Promise<T>{return this.hub.call<T>(endpoint,payload);}
   route(endpoint:string,payload:unknown={}):Promise<RpcResult>{return this.hub.route(endpoint,payload);}

@@ -7,3 +7,4 @@ await cp('public/index.html', 'dist/ui/index.html');
 await build({ entryPoints: ['src/app/web-server.ts'], bundle: true, platform: 'node', format: 'esm', outfile: 'dist/web-server.mjs', packages: 'external', target: 'node22', logLevel: 'info' });
 await build({ entryPoints: ['src/desktop/main.ts'], bundle: true, platform: 'node', format: 'cjs', outfile: 'dist/desktop/main.cjs', packages: 'external', target: 'node22', logLevel: 'info' });
 await build({ entryPoints: ['src/desktop/preload.ts'], bundle: true, platform: 'node', format: 'cjs', outfile: 'dist/desktop/preload.cjs', external: ['electron'], target: 'node22', logLevel: 'info' });
+await build({ entryPoints: ['src/cli/bin.ts'], bundle: true, platform: 'node', format: 'esm', outfile: 'dist/cli.mjs', packages: 'external', target: 'node22', logLevel: 'info' });
