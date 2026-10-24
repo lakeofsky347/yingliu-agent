@@ -25,6 +25,8 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 - 失败：`{"ok":false,"error":{"code":"USAGE|NOT_FOUND|ERROR|...","message":"中文说明"}}`
 - 不加 `--json` 时，结果以可读 JSON 输出，错误写到 stderr。
 - `--timeout <秒>`：等待运行或任务的上限，默认 600。超时后运行会被暂停，可以用 `agent resume` 继续。
+- **单一数据所有者（C01）。** 每条命令在打开应用前，会对数据目录（`YINGLIU_DATA_DIR`）和工程目录（`YINGLIU_PROJECTS`）各加一把跨进程独占锁（`.yingliu-owner.lock`），命令结束才释放。其他进程最多等 `--lock-timeout` 秒（默认 30），超时返回 `BUSY`（exit 9），错误信息里写明占用者的 pid 和命令。同机上已退出进程留下的锁会被自动回收。我们选择了锁而不是常驻服务：不需要管理守护进程；代价是长时间的 `agent run` 会独占整个 profile，并行任务请使用不同的 `YINGLIU_DATA_DIR`。
+- 只读命令（`project list/get`、`agent status`、`story/ledger show`、`qc show`（不带 `--run`）、`models list`）以只读方式打开：不会结算中断的运行，不会恢复媒体任务，也不会改写状态。
 - 进程退出前会等工程任务（如 export_mp4 发起的导出）结束，避免任务被中途杀掉。
 
 ## 退出码
@@ -40,6 +42,7 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 | 6 | ENVIRONMENT | doctor 未通过，或导出缺少 Chromium/ffmpeg |
 | 7 | RUN_FAILED | 运行状态为 failed/cancelled，或导出任务失败 |
 | 8 | TIMEOUT | 等待超时（运行已暂停） |
+| 9 | BUSY | 该数据目录正被另一个 yingliu 进程占用（等待 `--lock-timeout` 秒后仍未释放） |
 
 ## 命令参考
 
@@ -88,4 +91,4 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 3. **`uncertainSubmissions` 非空时，表示云端可能已经受理并计费。** 系统不会自动重新提交，后续付费调用都需要人工批准。重新提交前先确认外部任务（jobId）的状态。
 4. **API Key 只通过环境变量提供。** `models add --api-key-env NAME` 只保存变量名（`$YINGLIU_DATA_DIR/cli-key-env.json`），不保存密钥本身，也不会打印。运行时从环境变量读取。
 5. 不要把 mock 结果当成真实模型验收；不要读取其他应用的凭据。
-6. 同一工程的写操作会排队，并检查 expectedRevision。不要并发运行两个写同一工程的 CLI 进程。
+6. 同一 profile 同一时刻只有一个 CLI 进程持有数据（见“单一数据所有者”）。收到 `BUSY` 时，应该等待后重试，不要删除锁文件。

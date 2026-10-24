@@ -11,8 +11,9 @@ import { createApplication } from '../app/application.ts';
 import { detectEnvironment } from '../host/renderer.ts';
 import type { SecretStore } from '../app/contracts.ts';
 import { MOCK_BASE_URL, mockFetch } from './mock.ts';
+import { acquireOwner, BusyError } from './lock.ts';
 
-export const EXIT = { OK: 0, ERROR: 1, USAGE: 2, NOT_FOUND: 3, NEEDS_APPROVAL: 4, BUDGET: 5, ENVIRONMENT: 6, RUN_FAILED: 7, TIMEOUT: 8 } as const;
+export const EXIT = { OK: 0, ERROR: 1, USAGE: 2, NOT_FOUND: 3, NEEDS_APPROVAL: 4, BUDGET: 5, ENVIRONMENT: 6, RUN_FAILED: 7, TIMEOUT: 8, BUSY: 9 } as const;
 export class CliError extends Error { constructor(public code: keyof typeof EXIT, message: string) { super(message); } }
 
 type Flags = Record<string, string | boolean>;
@@ -27,6 +28,11 @@ export function parseArgs(argv: string[]): { positional: string[]; flags: Flags 
   return { positional, flags };
 }
 const BOOL = new Set(['json', 'mock', 'no-wait', 'allow-paid', 'trace', 'force', 'help', 'include-archived', 'run', 'yes']);
+/** C01: commands that only read. They open the profile with recovery disabled, so they never settle, resume or rewrite state. */
+export function isReadOnly(pos: string[], f: Flags): boolean {
+  const [g, s] = pos;
+  return (g === 'project' && (s === 'list' || s === 'get')) || (g === 'agent' && s === 'status') || ((g === 'story' || g === 'ledger') && s === 'show') || (g === 'qc' && s === 'show' && f.run !== true) || (g === 'models' && s === 'list');
+}
 const str = (f: Flags, k: string, required = false): string | undefined => { const v = f[k]; if (typeof v === 'string' && v) return v; if (required) throw new CliError('USAGE', `缺少参数 --${k}`); return undefined; };
 const num = (f: Flags, k: string): number | undefined => { const v = str(f, k); if (v === undefined) return undefined; const n = Number(v); if (!Number.isFinite(n)) throw new CliError('USAGE', `--${k} 必须是数字`); return n; };
 
@@ -100,7 +106,7 @@ async function waitTask(ctx: Ctx, projectId: string, kind: string) {
 }
 
 export const HELP = `yingliu — 映流智能体 headless CLI（详见 docs/CLI.md）
-全局：--json  --mock  --timeout <秒>   数据目录：YINGLIU_DATA_DIR，工程目录：YINGLIU_PROJECTS
+全局：--json  --mock  --timeout <秒>  --lock-timeout <秒，默认 30>   数据目录：YINGLIU_DATA_DIR，工程目录：YINGLIU_PROJECTS
   doctor
   project create --title <t> [--topic <t>] | list [--include-archived] | get <id> | export-zip <id> --out <file> | import <file>
   agent run --project <id> --goal <g> [--auto-approve read,write,plan] [--allow-paid --max-cost <n> [--auto-approve ...,cost,export]] [--max-steps n] [--max-review-rounds n] [--no-wait]
@@ -195,15 +201,18 @@ export async function runCli(argv: string[], io: { out: (s: string) => void; err
   if (positional[0] === 'doctor') { const r = doctor(); return emit(true, r.data, r.exit); }
   const dir = dataDirectory(); await mkdir(dir, { recursive: true });
   const secrets = new EnvSecrets(join(dir, 'cli-key-env.json')), mock = flags.mock === true;
-  let app: App | undefined;
+  let app: App | undefined, release: (() => Promise<void>) | undefined;
   try {
-    app = await createApplication({ dataDirectory: dir, ...(process.env.YINGLIU_PROJECTS ? { projectsDirectory: resolve(process.env.YINGLIU_PROJECTS) } : {}), credentials: secrets, ...(mock ? { fetch: mockFetch() } : {}) });
+    const projects = process.env.YINGLIU_PROJECTS ? resolve(process.env.YINGLIU_PROJECTS) : join(dir, 'projects'), readOnly = isReadOnly(positional, flags);
+    const lockSeconds = flags['lock-timeout'] === undefined ? 30 : Number(flags['lock-timeout']); if (!Number.isFinite(lockSeconds) || lockSeconds < 0) throw new CliError('USAGE', '--lock-timeout 必须是非负数字');
+    try { release = await acquireOwner([dir, projects], positional.slice(0, 2).join(' '), lockSeconds * 1000); } catch (e) { if (e instanceof BusyError) throw new CliError('BUSY', e.message); throw e; }
+    app = await createApplication({ dataDirectory: dir, projectsDirectory: projects, credentials: secrets, ...(mock ? { fetch: mockFetch() } : {}), ...(readOnly ? { recover: false } : {}) });
     const ctx: Ctx = { app, secrets, flags, mock };
-    if (mock) await ensureMockModels(ctx);
+    if (mock && !readOnly) await ensureMockModels(ctx);
     const r = await dispatch(ctx, positional);
     return emit(true, r.data, r.exit ?? EXIT.OK);
   } catch (error) {
     const e = error instanceof CliError ? error : new CliError('ERROR', error instanceof Error ? error.message : String(error));
     return emit(false, { code: e.code, message: e.message }, EXIT[e.code]);
-  } finally { await app?.dispose().catch(() => {}); }
+  } finally { await app?.dispose().catch(() => {}); await release?.(); }
 }

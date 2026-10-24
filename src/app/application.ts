@@ -33,14 +33,14 @@ export class MemorySecrets implements SecretStore {
   async set(ref:string,value:string){this.values.set(ref,value);}
   async delete(ref:string){this.values.delete(ref);}
 }
-export async function createApplication(options:{dataDirectory:string;projectsDirectory?:string;credentials:SecretStore;reveal?:(path:string)=>Promise<void>;fetch?:typeof fetch}){
+export async function createApplication(options:{dataDirectory:string;projectsDirectory?:string;credentials:SecretStore;reveal?:(path:string)=>Promise<void>;fetch?:typeof fetch;recover?:boolean}){
   const dataDirectory=resolve(options.dataDirectory);
   const providers=new ProviderManager(dataDirectory,options.credentials,options.fetch?{fetch:options.fetch}:{});await providers.initialize();
   const backend=new AppBackend({...options,dataDirectory,providers:providers.host()});
   const conversation=new ConversationService(backend,providers,dataDirectory);
   await backend.call('catalog');
   const media=new MediaTaskService(dataDirectory,providers.registry,backend.mediaPort());
-  await media.recover();
+  if(options.recover!==false)await media.recover();
   const workflowPort:WorkflowPort={
     snapshot:id=>backend.call('current',{projectId:id}),source:(id,shotId)=>backend.call('source',{projectId:id,shotId}),
     commit:(id,expectedRevision,project,sources,label)=>backend.call('apply',{projectId:id,expectedRevision,project,sources:Object.entries(sources).map(([shotId,source])=>({shotId,source})),label}),
@@ -153,7 +153,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
   };
   const agentArchive={export:(projectId:string)=>agent.exportDocs(projectId),import:(projectId:string,docs:Partial<Record<'story'|'ledger'|'qc',unknown>>)=>agent.importDocs(projectId,docs),validate:(docs:Partial<Record<'story'|'ledger'|'qc',unknown>>)=>agent.validateDocs(docs)};
   const agent=new AgentService(join(dataDirectory,'agent-runs'),agentPort,{
-    fetch:options.fetch,dataDirectory:join(dataDirectory,'agent-data'),
+    fetch:options.fetch,dataDirectory:join(dataDirectory,'agent-data'),...(options.recover===false?{recover:false}:{}),
     redact:async text=>{let value=text;for(const key of await knownKeys())value=redactKey(value,key);return value;},
     resolveModel:async()=>{
       const resolved=await providers.registry.resolve('director'),parameters=resolved.model.parameters as Record<string,unknown>;

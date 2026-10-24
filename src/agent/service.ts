@@ -15,7 +15,9 @@ export interface ResolvedAgentModel { config: ChatConfig; parameters: Record<str
 export interface AgentServiceOptions {
   resolveModel(): Promise<ResolvedAgentModel>;
   fetch?: typeof fetch; tools?: AgentTool[]; redact?: (text: string) => Promise<string>;
-  contextChars?: number; pollMs?: number; dataDirectory?: string; retryBaseMs?: number; maxRetries?: number; maxReviewRounds?: number;
+  contextChars?: number; pollMs?: number;
+  /** C01: false opens the store read-only (no settling of in-flight receipts, no status rewrite). Default true. */
+  recover?: boolean; dataDirectory?: string; retryBaseMs?: number; maxRetries?: number; maxReviewRounds?: number;
 }
 const TERMINAL = new Set(['complete', 'failed', 'cancelled', 'budget_exceeded']);
 const DEFAULT_AUTO: ToolRisk[] = ['read', 'write'];
@@ -26,7 +28,6 @@ function canonical(value: unknown): string {
   if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonical((value as Record<string, unknown>)[key])).join(',') + '}';
   return JSON.stringify(value) ?? 'null';
 }
-/** Approval binding: run + tool + canonical arguments. */
 /** PR1-R06: Story import contract shared by validation and import.
  *  Required (absent or mistyped -> reject): version; character id/name/features/referenceAssetIds; shot id/summary/durationSeconds/characters
  *  (each referencing a defined character). Defaultable fields of older documents (status, title, logline, targetSeconds, style.*,
@@ -66,6 +67,7 @@ export function migrateStory(v: Record<string, unknown>): Story | null {
   try { storyBrief({ ...story, status: 'approved' }); anchorPrompt(story, characters.map(c => c.id)); } catch { return null; }
   return story;
 }
+/** Approval binding: run + tool + canonical arguments. */
 export function argsHash(runId: string, tool: string, args: Record<string, unknown>): string { return createHash('sha256').update(runId + '\0' + tool + '\0' + canonical(args)).digest('hex'); }
 function sleep(ms: number, signal: AbortSignal) { return new Promise<void>((resolve, reject) => { const timer = setTimeout(() => { signal.removeEventListener('abort', stop); resolve(); }, ms); const stop = () => { clearTimeout(timer); reject(signal.reason); }; signal.addEventListener('abort', stop, { once: true }); }); }
 
@@ -169,6 +171,7 @@ export class AgentService {
   initialize(): Promise<void> {
     return this.initialized ??= (async () => {
       for (const run of await this.store.loadAll()) {
+        if (this.options.recover === false) { this.runs.set(run.id, run); continue; }
         for (const call of run.queue) call.execId ??= randomUUID();
         if (run.pending && !run.pending.execId) { const call = run.queue.find(item => item.id === run.pending!.callId); if (call) { run.pending.execId = call.execId; try { run.pending.argsHash = argsHash(run.id, call.name, JSON.parse(call.arguments || '{}')); } catch { /* re-asked on resume */ } } }
         if (run.inFlight) { this.runs.set(run.id, run); await this.settleInFlight(run); if (run.status === 'awaiting_approval') run.status = 'paused'; }
