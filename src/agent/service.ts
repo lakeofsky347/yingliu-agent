@@ -163,6 +163,8 @@ export class AgentService {
     this.runs.set(run.id, run); await this.store.trace(run.id, { event: 'run.start', goal, budget, autoApprove }); await this.save(run);
     this.launch(run); return this.public(run);
   }
+  /** R08: a loop publishes paused/awaiting state just before it exits; callers acting on that state wait for it to finish. */
+  private async settled(id: string) { const active = this.active.get(id); if (active) await active.promise.catch(() => {}); }
   private launch(run: AgentRun) {
     if (this.active.has(run.id)) return;
     const controller = new AbortController();
@@ -174,6 +176,7 @@ export class AgentService {
   }
   async approve(id: string, callId: string): Promise<PublicRun> {
     const run = await this.required(id); if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
+    await this.settled(id); if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
     if (run.pending.execId && run.pending.argsHash) (run.approvals ??= []).push({ execId: run.pending.execId, tool: run.pending.tool, argsHash: run.pending.argsHash });
     await this.store.trace(run.id, { event: 'approval', callId, execId: run.pending.execId, decision: 'approved', tool: run.pending.tool });
     const step = [...run.steps].reverse().find((s: RunStep) => s.kind === 'approval' && s.callId === callId); if (step) await this.finishStep(run, step, { status: 'complete', summary: '用户已批准' });
@@ -181,6 +184,7 @@ export class AgentService {
   }
   async reject(id: string, callId: string, reason = ''): Promise<PublicRun> {
     const run = await this.required(id); if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
+    await this.settled(id); if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
     const tool = run.pending.tool; await this.store.trace(run.id, { event: 'approval', callId, decision: 'rejected', tool, reason });
     const step = [...run.steps].reverse().find((s: RunStep) => s.kind === 'approval' && s.callId === callId); if (step) await this.finishStep(run, step, { status: 'rejected', summary: '用户拒绝' + (reason ? '：' + reason : '') });
     const execId = run.pending.execId; run.queue = execId ? run.queue.filter(call => call.execId !== execId) : run.queue.filter(call => call.id !== callId);
@@ -188,7 +192,8 @@ export class AgentService {
     delete run.pending; run.status = 'running'; run.message = '已拒绝，智能体调整方案'; await this.save(run); this.launch(run); return this.public(run);
   }
   async resume(id: string): Promise<PublicRun> {
-    const run = await this.required(id); if (!['paused', 'failed', 'waiting_task'].includes(run.status) || this.active.has(id)) throw new Error('当前状态不能继续');
+    const run = await this.required(id); if (!['paused', 'failed', 'waiting_task'].includes(run.status)) throw new Error('当前状态不能继续');
+    await this.settled(id); if (!['paused', 'failed', 'waiting_task'].includes(run.status) || this.active.has(id)) throw new Error('当前状态不能继续');
     if (run.status === 'failed' && !run.queue.length) run.messages.push({ role: 'user', content: '上一步失败：' + (run.error ?? '') + '。请根据当前工程重新判断并继续。' });
     run.status = run.waiting ? 'waiting_task' : 'running'; delete run.error; run.message = '从断点继续'; await this.store.trace(run.id, { event: 'run.resume' }); await this.save(run); this.launch(run); return this.public(run);
   }

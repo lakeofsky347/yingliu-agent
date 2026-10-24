@@ -191,3 +191,20 @@ test('F07: template cancel trusts the reported status instead of assuming cancel
   const done = await cancelTemplate(ctx({ status: 'succeeded', output: 'https://example.invalid/a.mp4' }), model, 'j1');
   assert.equal(done.status, 'succeeded'); assert.equal(done.artifacts?.length, 1);
 });
+
+test('R08: resume/approve issued the instant a paused/awaiting state is published waits for the old loop instead of failing', async () => {
+  const d = await dir(); let submissions = 0;
+  const { port } = fakePort({ capabilities: async () => ({ roles: ['speech'] }), voice: async () => { submissions++; throw new TypeError('fetch failed'); } });
+  const gw = toolGateway((_b, turn) => turn < 2 ? { toolCalls: [{ name: 'generate_voice', arguments: { shotId: 'a', text: '旁白' } }] } : done());
+  const service = new AgentService(d, port, { resolveModel: model(), fetch: gw.fetch, retryBaseMs: 1 });
+  try {
+    let resumed: Promise<unknown> | undefined;
+    service.subscribe(event => { if (event.type === 'run' && event.run.status === 'paused' && !resumed) resumed = service.resume(event.run.id); });
+    const started = await service.start({ projectId: 'proj-1', goal: '配音', autoApprove: ['read', 'write', 'cost'] });
+    await settle(service, started.id, ['paused', 'awaiting_approval', 'complete', 'failed']);
+    while (!resumed) await new Promise(r => setImmediate(r));
+    await resumed; // synchronously during publication: active loop still registered
+    const run = await settle(service, started.id, ['awaiting_approval', 'complete', 'failed']);
+    assert.equal(run.status, 'awaiting_approval'); assert.equal(submissions, 1);
+  } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
+});
