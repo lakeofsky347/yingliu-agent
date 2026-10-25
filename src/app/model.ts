@@ -1,3 +1,4 @@
+import { fetch } from '../host/http.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
