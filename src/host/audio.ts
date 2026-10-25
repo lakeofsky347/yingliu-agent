@@ -1,3 +1,4 @@
+import { fetch } from './http.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {existsSync,createReadStream,createWriteStream} from 'node:fs';

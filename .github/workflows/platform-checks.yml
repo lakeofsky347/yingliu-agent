@@ -31,6 +31,8 @@ jobs:
           node --input-type=module -e "import {mkdtemp,writeFile,symlink,realpath,rm} from 'node:fs/promises'; import {tmpdir} from 'node:os'; import {join} from 'node:path'; const root=await mkdtemp(join(tmpdir(),'yingliu-symlink-')); try { const target=join(root,'target.txt'); const link=join(root,'link.txt'); await writeFile(target,'fixture'); await symlink(target,link,'file'); if(await realpath(link)!==await realpath(target)) throw new Error('File symlink did not resolve to fixture'); } finally { await rm(root,{recursive:true,force:true}); }"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: npm ci
+      - name: Prepare pinned Electron for native security regression
+        run: node node_modules/electron/install.js
       - run: npm run typecheck
       - run: npm test
       - run: npm run package:app

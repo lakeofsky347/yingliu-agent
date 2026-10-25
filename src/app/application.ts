@@ -1,3 +1,4 @@
+import { fetch } from '../host/http.ts';
 import { resolve } from 'node:path';
 import { AppBackend } from './backend.ts';
 import { ProviderManager } from './model.ts';

@@ -1,3 +1,4 @@
+import { fetch } from '../../host/http.ts';
 import type { ProviderConnection, ModelDefinition } from '../contracts.ts';
 import type { MediaArtifact, MediaOperation, RemoteJob } from '../../jobs/contracts.ts';
 
