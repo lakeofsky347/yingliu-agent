@@ -269,8 +269,8 @@ export class StudioService {
   private async performRpc(endpoint:string,payload:unknown):Promise<RpcResult>{
     try{
       await this.initialized;if(this.disposed)throw new Error('应用服务已停止');const data=(payload??{}) as any;
-      if(['save','apply','saveSource','restoreSource','undo','redo','rename','retry','job.retry','video.clip.save','video.clip.remove','video.clip.extract'].includes(endpoint))this.assertRevision(data,true);
-      else if(['import','audio','generate','export','preview'].includes(endpoint)&&data.expectedRevision!==undefined)this.assertRevision(data);
+      if(['save','apply','saveSource','restoreSource','undo','redo','rename','retry','job.retry','import','audio','video.clip.save','video.clip.remove','video.clip.extract'].includes(endpoint))this.assertRevision(data,true);
+      else if(['generate','export','preview'].includes(endpoint)&&data.expectedRevision!==undefined)this.assertRevision(data);
       switch(endpoint){
         case 'catalog':this.providers=await Promise.all(this.ctx.llm.listProviders().map(async p=>{try{return {...p,models:await this.ctx.llm.listModels(p.id)};}catch(error){return {...p,models:[],error:error instanceof Error?error.message:'模型目录读取失败'};}}));break;
         case 'current':break;

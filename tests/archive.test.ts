@@ -56,7 +56,7 @@ test('ZIP expansion is bounded before importing',async()=>{
 test('project-local file symlinks are refused before exporting',async context=>{
   const f=await fixture();try{
     const snapshot=await f.backend.call<StudioSnapshot>('create',{title:'符号链接边界'});const outside=join(f.directory,'outside.bin');await writeFile(outside,'must stay outside');
-    const imported=await f.backend.call<StudioSnapshot>('import',{projectId:snapshot.project!.id,name:'fixture.png',mime:'image/png',dataBase64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='});const asset=imported.project!.assets[0]!;
+    const imported=await f.backend.call<StudioSnapshot>('import',{projectId:snapshot.project!.id,expectedRevision:snapshot.project!.revision,name:'fixture.png',mime:'image/png',dataBase64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='});const asset=imported.project!.assets[0]!;
     await rm(join(snapshot.root!,asset.path!));if(!await createFileSymlinkOrSkip(context,outside,join(snapshot.root!,asset.path!)))return;
     await assert.rejects(exportProjectArchive(f.backend,{projectId:snapshot.project!.id}),/符号|symlink|越界|本项目|路径/i);
   }finally{await f.close();}

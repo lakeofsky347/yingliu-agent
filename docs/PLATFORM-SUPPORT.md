@@ -1,5 +1,7 @@
 # 映流 Studio 操作系统适配进度
 
+> 本文保留 2026-10-08 的 Studio 平台适配记录。应用现为映流智能体，当前依赖以 `package-lock.json` 为准；2026-10-27 核对的主线 `5ff743e` 三平台 CI 均成功，见 [Platform checks 40169024170](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40169024170)。本轮施工及验收见 [工作区施工计划](DEVELOPMENT-PLAN-2026-10-27.md)。下文旧环境、包名和“未在远端执行”均属于当时状态。
+
 平台基线记录日期：2026-10-08（Asia/Shanghai），对应版本 0.2.0；0.3.0 的新增验证见 [多模态验收](ACCEPTANCE-MULTIMODAL.md)。Windows/macOS/Linux 的基础平台代码已实现；目标系统的原生窗口、系统钥匙环和安装验收需分别完成。
 
 [首轮环境基线](platform-baseline.json)保留适配前结果；本轮实现与验证见 [platform-adaptation.json](platform-adaptation.json)。已有 macOS arm64 验收见 [ACCEPTANCE.md](ACCEPTANCE.md)，不能替代本轮改动的 macOS 回归。

@@ -24,6 +24,7 @@
     "verify": "node --import tsx scripts/verify-app.ts",
     "verify:models": "node --import tsx scripts/verify-model-ui.ts",
     "verify:film": "node --import tsx scripts/verify-multimodal-film.ts",
+    "verify:editor": "node --import tsx scripts/verify-editor-safety.ts",
     "cli": "node bin/yingliu.mjs",
     "setup:cli": "bash scripts/setup-cli.sh"
   },

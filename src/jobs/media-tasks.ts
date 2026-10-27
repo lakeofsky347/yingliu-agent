@@ -3,7 +3,7 @@ import {mkdir,readFile,readdir,rename,open,rm,stat,realpath} from 'node:fs/promi
 import {createReadStream} from 'node:fs';
 import {join,resolve,sep} from 'node:path';
 import {cancelVideo as gatewayCancel,generateImage as openaiImage,getVideo as gatewayGet,lookupVideo as gatewayLookup,submitVideo as gatewaySubmit,type AdapterContext,type AdapterInput} from '../models/adapters/media.ts';
-import {cancelTemplate,pollTemplate,submitTemplate} from '../models/adapters/template.ts';
+import {cancelTemplate,pollTemplate,resolveTemplate,submitTemplate} from '../models/adapters/template.ts';
 import type {RemoteJob as Job} from './contracts.ts';
 // Protocol dispatch: images / video-gateway keep their native adapters; async-task uses the configurable template adapter.
 const outputOf=(operation:string):'image'|'video'=>operation==='text-to-image'?'image':'video';
@@ -112,6 +112,16 @@ export class MediaTaskService {
     else if(remote.status==='succeeded'){task.metrics??={};task.metrics.remoteCompletedAt??=new Date().toISOString();if(task.metrics.submittedAt)task.metrics.generationMs=Date.parse(task.metrics.remoteCompletedAt)-Date.parse(task.metrics.submittedAt);task.phase='downloading';task.message='生成完成，正在获取素材';}
     else {task.phase=remote.status;task.message=remote.status==='queued'?'云端排队中':'云端生成中';}
   }
+  private canReuseSuccessfulResult(task:MediaTask):boolean {
+    if(task.remoteStatus!=='succeeded'||!task.artifacts?.length)return false;
+    // Embedded results are already durable. Synchronous templates use a local
+    // request ID as a receipt, not a remotely queryable job ID; retry only the
+    // saved artifact. Real asynchronous URL results may still refresh by job ID.
+    if(task.artifacts.every(artifact=>typeof artifact.base64==='string'))return true;
+    if(task.connection.protocol!=='async-task')return false;
+    const template=resolveTemplate(task.model.parameters);
+    return template.responseType==='binary'||template.idPath==='';
+  }
   private async run(task:MediaTask,signal:AbortSignal):Promise<void>{try{
     signal.throwIfAborted();let remote:RemoteJob|null=null;
     if(task.phase==='pending'){
@@ -119,7 +129,7 @@ export class MediaTaskService {
       const input:AdapterInput={clientRequestId:task.clientRequestId,model:task.model,operation:task.operation,prompt:task.prompt,inputs,parameters:task.parameters};
       remote=task.operation==='text-to-image'?await generateImage(context,input):await submitVideo(context,input);
       this.applyRemote(task,remote);await this.persist(task);
-    }else if(task.operation!=='text-to-image'||task.connection.protocol==='async-task'&&task.remoteJobId){
+    }else if(!this.canReuseSuccessfulResult(task)&&(task.operation!=='text-to-image'||task.connection.protocol==='async-task'&&task.remoteJobId)){
       remote=task.remoteJobId?await getVideo(await this.context(task,signal),task.remoteJobId):await lookupVideo(await this.context(task,signal),task.clientRequestId);
       if(!remote){task.phase='unknown';task.observation='paused';task.message='未查到提交结果；没有重新发起计费请求';await this.persist(task);return;}this.applyRemote(task,remote);await this.persist(task);
     }else if(!task.artifacts?.length){task.phase='unknown';task.observation='paused';task.message='生图提交结果未确认，兼容接口不支持查单；请核对服务记录';await this.persist(task);return;}

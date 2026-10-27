@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "application": "映流智能体",
+  "version": "0.5.0",
+  "checkedDate": "2026-10-27",
+  "timezone": "Asia/Singapore",
+  "baseCommit": "5ff743eaf0a076de10551f2ca7ab72a3485bc1bc",
+  "branch": "codex/workspace-improvements-20261027",
+  "scope": "并发运行、项目预算、编辑草稿、工程版本保护、媒体恢复与最终本机包验收",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "runtime": {
+    "electron": "44.9.3",
+    "undici": "7.30.1",
+    "credentialBackend": "macos_keychain",
+    "credentialFixture": "仅合成凭据"
+  },
+  "checks": {
+    "typecheck": "PASS",
+    "build": "PASS",
+    "unitAndIntegration": { "status": "PASS", "total": 348, "passed": 348, "failed": 0, "skipped": 0 },
+    "editorChromium": { "status": "PASS", "passed": 8, "pageErrors": 0, "report": "artifacts/acceptance-editor-safety/report.json" },
+    "relocatedNativePackage": { "status": "PASS", "passed": 19, "skipped": 0, "guiVerified": true, "report": "artifacts/acceptance-v03/package-verification.json" },
+    "packagedNativeFilm": { "status": "PASS", "passed": 21, "report": "artifacts/acceptance-v03/verification.json" },
+    "diffWhitespace": "PASS"
+  },
+  "film": {
+    "durationSeconds": 6,
+    "fps": { "num": 24, "den": 1 },
+    "frameCount": 144,
+    "videoCodec": "h264",
+    "pixelFormat": "yuv420p",
+    "audioCodec": "aac",
+    "audioChannels": 2,
+    "audioSampleRate": 48000,
+    "audioSource": "合成验收音，非真实配音模型",
+    "ffprobe": "PASS",
+    "fullDecode": "PASS",
+    "nativePlayback": "PASS",
+    "arbitrarySeek": "PASS",
+    "coldReload": "PASS"
+  },
+  "recovery": {
+    "backupRestore": "PASS",
+    "nativeRestart": "PASS",
+    "undoRedo": "PASS",
+    "encryptedSyntheticCredentialPersistence": "PASS",
+    "infiniteLoopSceneIsolationAndReset": "PASS",
+    "successfulMediaRetryAndRestartWithoutResubmission": "PASS"
+  },
+  "boundaries": {
+    "modelEvidence": "隔离本机网关、内存响应与测试回执 fixture",
+    "realProvider": "NOT_CHECKED",
+    "realBilling": "NOT_CHECKED",
+    "humanFullViewingAndListening": "NOT_CHECKED",
+    "crossMachineInstallation": "NOT_CHECKED",
+    "distributionSigning": "macOS ad-hoc，未公证",
+    "remoteCi": "按施工分支对应提交的 GitHub Actions 单独核对"
+  },
+  "excludedFromSourceControl": ["本地工程", "凭据", "日志", "截图", "成片", "应用包"]
+}

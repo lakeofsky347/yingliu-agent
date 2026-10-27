@@ -13,8 +13,10 @@ createRoot(mount).render(<App controller={controller} api={api}/>);
 void controller.load();
 const flush=()=>{void controller.flush();};
 window.addEventListener('pagehide',flush);
+// Electron owns its native save/discard close flow; browser tabs need their own unload guard.
+if(!window.yingliu)window.addEventListener('beforeunload',event=>{if(controller.hasUnsavedChanges){event.preventDefault();event.returnValue='';}});
 window.addEventListener('blur',flush);
 window.yingliu?.onBeforeClose?.(async()=>{
   await controller.flush();
-  return controller.hasUnsavedChanges?{ok:false,message:controller.hasSourceDraft?'前端源码尚未保存，请在源码面板点击「保存源码」后再关闭。':controller.getSnapshot().error||'影片修改尚未保存。请处理保存错误后再关闭。'}:{ok:true};
+  return controller.hasUnsavedChanges?{ok:false,message:controller.unsavedMessage}:{ok:true};
 });
