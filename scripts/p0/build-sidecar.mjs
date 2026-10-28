@@ -6,9 +6,21 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { cp, mkdir, readFile, readdir, rm, stat, writeFile, copyFile, chmod } from 'node:fs/promises';
 import { join, resolve, relative } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
+/** Every invocation rebuilds editor resources, even when an older app.js already exists. */
+export async function prepareUiResources({ projectRoot = process.cwd(), targetDirectory, execute = execFileSync }) {
+  const root = resolve(projectRoot), destination = join(resolve(targetDirectory), 'resources', 'ui');
+  execute(process.execPath, [join(root, 'scripts', 'build.mjs')], { cwd: root, stdio: 'inherit' });
+  await rm(destination, { recursive: true, force: true });
+  await mkdir(join(resolve(targetDirectory), 'resources'), { recursive: true });
+  await cp(join(root, 'dist', 'ui'), destination, { recursive: true });
+}
+
+async function main() {
 const args = process.argv.slice(2), opt = (k, d) => { const i = args.indexOf('--' + k); return i >= 0 ? args[i + 1] : d; };
 const runtime = opt('runtime', 'node'), outRoot = resolve(opt('out', 'dist-p0'));
+if (!['node', 'bun'].includes(runtime)) throw new Error('未知runtime：' + runtime);
 const exe = process.platform === 'win32' ? '.exe' : '';
 const target = join(outRoot, `${runtime}-${process.platform}-${process.arch}`);
 const work = join(outRoot, `.work-${runtime}`);
@@ -16,8 +28,7 @@ await rm(target, { recursive: true, force: true }); await rm(work, { recursive: 
 await mkdir(join(target, 'resources'), { recursive: true }); await mkdir(work, { recursive: true });
 
 // UI resources (trusted editor) — same bundle the Electron build ships.
-if (!(await stat('dist/ui/app.js').catch(() => null))) execFileSync(process.execPath, ['scripts/build.mjs'], { stdio: 'inherit' });
-await cp('dist/ui', join(target, 'resources', 'ui'), { recursive: true });
+await prepareUiResources({ targetDirectory: target });
 
 const binary = join(target, 'yingliu-sidecar' + exe);
 const started = Date.now();
@@ -65,3 +76,5 @@ const manifest = { schemaVersion: 1, runtime, runtimeVersion: runtime === 'node'
 await writeFile(join(target, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 await rm(work, { recursive: true, force: true });
 console.log(JSON.stringify({ target, binaryBytes: manifest.binary.bytes, totalBytes: manifest.totalBytes, sha256: manifest.binary.sha256 }));
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await main();

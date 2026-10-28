@@ -4,12 +4,13 @@
  * host talks to it through a one-line JSON ready/shutdown handshake on stdio. See docs/p0/CONTRACTS.md.
  */
 import { createHash } from 'node:crypto';
-import { realpath, mkdir, access } from 'node:fs/promises';
+import { realpath, access } from 'node:fs/promises';
 import { join, resolve, isAbsolute } from 'node:path';
 import { createInterface } from 'node:readline';
-import { createApplication, MemorySecrets } from '../app/application.ts';
+import { createApplication, MemorySecrets, type Application } from '../app/application.ts';
+import { drainOwned, type OwnerLease } from '../app/ownership.ts';
 import { startUiServer } from '../app/ui-server.ts';
-import { acquireOwner, BusyError } from '../cli/lock.ts';
+import { acquireOwnerLease, BusyError, LockConfigError } from '../cli/lock.ts';
 import { installMockNetworkGuard, mockFetch } from '../cli/mock.ts';
 
 export const PROTOCOL_VERSION = 1;
@@ -40,29 +41,44 @@ export async function profileIdentity(dataRoot: string): Promise<string> {
 }
 
 async function main() {
-  const started = performance.now();
-  const options = parseSidecarArgs(process.argv.slice(2));
+  const started = performance.now(), options = parseSidecarArgs(process.argv.slice(2));
   await access(join(options.resourceRoot, 'ui', 'index.html')).catch(() => { throw new SidecarError('STARTUP', '资源缺失：' + join(options.resourceRoot, 'ui', 'index.html')); });
-  await mkdir(options.dataRoot, { recursive: true }); await mkdir(options.projectsRoot, { recursive: true });
-  // Owner lock BEFORE createApplication: initialize/recover must never run as a second writer.
-  let release: () => Promise<void>;
-  try { release = await acquireOwner([options.dataRoot, options.projectsRoot], 'sidecar', options.lockTimeoutMs); }
-  catch (e) { if (e instanceof BusyError) throw new SidecarError('BUSY', e.message); if (e instanceof Error && /YINGLIU_LOCK_PORT/.test(e.message)) throw new SidecarError('CONFIG', e.message); throw e; }
-  const unguard = options.mock ? installMockNetworkGuard() : undefined;
-  const application = await createApplication({ dataDirectory: options.dataRoot, projectsDirectory: options.projectsRoot, credentials: new MemorySecrets(), ...(options.mock ? { fetch: mockFetch(), resumeRemoteTasks: false } : {}) });
-  const server = await startUiServer(application, join(options.resourceRoot, 'ui'), options.port, { sceneFrames: false });
-  let closing: Promise<void> | undefined;
-  const shutdown = (reason: string) => closing ??= (async () => {
-    let ok = true; try { await application.dispose(); } catch { ok = false; }
-    try { await server.close(); } catch { ok = false; }
-    try { await release(); } catch { ok = false; }
-    unguard?.(); emit({ type: 'shutdown', ok, reason }); process.exit(ok ? 0 : 1);
-  })();
-  process.on('SIGINT', () => void shutdown('SIGINT')); process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  const abort = new AbortController();
+  let ownership: OwnerLease | undefined, application: Application | undefined, server: Awaited<ReturnType<typeof startUiServer>> | undefined, unguard: (() => void) | undefined;
+  let reason: string | undefined, releaseStop!: () => void, cleaning: Promise<void> | undefined;
+  const stopped = new Promise<void>(resolve => { releaseStop = resolve; });
+  const shutdown = (value: string) => { if (!reason) { reason = value; abort.abort(new Error('sidecar正在关闭')); releaseStop(); } };
+  const interrupt = () => shutdown('SIGINT'), terminate = () => shutdown('SIGTERM');
+  process.on('SIGINT', interrupt); process.on('SIGTERM', terminate);
   const lines = createInterface({ input: process.stdin });
-  lines.on('line', line => { try { if (JSON.parse(line).type === 'shutdown') void shutdown('request'); } catch { /* ignore malformed control lines */ } });
-  lines.on('close', () => void shutdown('stdin-closed')); // host died or closed the pipe
-  emit({ type: 'ready', protocolVersion: PROTOCOL_VERSION, resourceVersion: RESOURCE_VERSION, profileId: await profileIdentity(options.dataRoot), pid: process.pid, port: Number(new URL(server.origin).port), origin: server.origin, token: server.token, mock: options.mock, readyMs: Math.round(performance.now() - started), runtime: (globalThis as { Bun?: { version: string } }).Bun ? 'bun ' + (globalThis as unknown as { Bun: { version: string } }).Bun.version : 'node ' + process.version });
+  lines.on('line', line => { try { if (JSON.parse(line).type === 'shutdown') shutdown('request'); } catch { /* malformed control input grants no capability */ } });
+  lines.on('close', () => { if (!cleaning) shutdown('stdin-closed'); });
+  const cleanup = () => cleaning ??= (async () => {
+    try { await drainOwned([() => application?.dispose(), () => server?.close()]); }
+    finally {
+      try { await ownership?.release(); }
+      finally { unguard?.(); lines.close(); process.removeListener('SIGINT', interrupt); process.removeListener('SIGTERM', terminate); }
+    }
+  })();
+  try {
+    // Borrow the entrypoint's shared lease. createApplication must never acquire the same ports a second time.
+    try { ownership = await acquireOwnerLease([options.dataRoot, options.projectsRoot], 'sidecar', options.lockTimeoutMs, { signal: abort.signal }); }
+    catch (error) { if (error instanceof BusyError) throw new SidecarError('BUSY', error.message); if (error instanceof LockConfigError) throw new SidecarError('CONFIG', error.message); throw error; }
+    abort.signal.throwIfAborted();
+    unguard = options.mock ? installMockNetworkGuard() : undefined;
+    application = await createApplication({ dataDirectory: options.dataRoot, projectsDirectory: options.projectsRoot, credentials: new MemorySecrets(), ownership, ...(options.mock ? { fetch: mockFetch(), resumeRemoteTasks: false } : {}) });
+    abort.signal.throwIfAborted();
+    server = await startUiServer(application, join(options.resourceRoot, 'ui'), options.port, { sceneFrames: false });
+    const profileId = await profileIdentity(options.dataRoot); abort.signal.throwIfAborted();
+    emit({ type: 'ready', protocolVersion: PROTOCOL_VERSION, resourceVersion: RESOURCE_VERSION, profileId, pid: process.pid, port: Number(new URL(server.origin).port), origin: server.origin, token: server.token, mock: options.mock, readyMs: Math.round(performance.now() - started), runtime: (globalThis as { Bun?: { version: string } }).Bun ? 'bun ' + (globalThis as unknown as { Bun: { version: string } }).Bun.version : 'node ' + process.version });
+    await stopped; await cleanup(); emit({ type: 'shutdown', ok: true, reason }); process.exit(0);
+  } catch (error) {
+    let failure: unknown;
+    try { await cleanup(); } catch (cleanupError) { failure = cleanupError; }
+    if (reason) { emit({ type: 'shutdown', ok: !failure, reason }); process.exit(failure ? 1 : 0); }
+    if (failure) throw new SidecarError('STARTUP', 'sidecar清理失败：' + (failure instanceof Error ? failure.message : String(failure)));
+    throw error;
+  }
 }
 
 main().catch(error => {

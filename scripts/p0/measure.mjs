@@ -1,68 +1,104 @@
-// P0 resource measurement (Linux). Cold start (process spawn → editor page load finished) ×N and S0 idle PSS of the full
-// process tree (smaps_rollup Pss; RSS recorded only as auxiliary). Raw samples go to --out as JSON.
-// Usage: node scripts/p0/measure.mjs --mode electron --app artifacts/yingliu-agent-linux-x64 --runs 10 --out docs/p0/evidence/baseline-electron.json
-//        node scripts/p0/measure.mjs --mode tauri --app src-tauri/target/release/yingliu-shell-p0 --sidecar dist-p0/node-linux-x64/yingliu-sidecar --runs 10 --out ...
-//        node scripts/p0/measure.mjs --mode sidecar --sidecar dist-p0/node-linux-x64/yingliu-sidecar --runs 10 --out ...
-// Requires DISPLAY (e.g. Xvfb) for electron/tauri.
+// Linux PSS测量。三种模式的ready判据明确分层，不把WebView load、React挂载和后台握手当成同一冷启动指标。
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
+import { createServer } from 'node:net';
+import { ownedTree, stillOwned, killOwned, sleep, withTimeout } from './process-evidence.mjs';
+import { READY_CRITERIA, EDITOR_READY_EXPRESSION, clearCacheEvidence, summarizeSamples } from './measurement-policy.mjs';
 
-const args = process.argv.slice(2), opt = (k, d) => { const i = args.indexOf('--' + k); return i >= 0 ? args[i + 1] : d; };
-const mode = opt('mode'), runs = Number(opt('runs', 10)), idleMs = Number(opt('idle-ms', 10000)), out = resolve(opt('out'));
-const app = opt('app') && resolve(opt('app')), sidecar = opt('sidecar') && resolve(opt('sidecar'));
-const dropCaches = args.includes('--drop-caches');
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-function tree(pid) {
-  const rows = spawnSync('ps', ['-eo', 'pid=,ppid=,comm=']).stdout.toString().trim().split('\n').map(l => l.trim().split(/\s+/));
-  const kids = new Map(); for (const [p, pp, c] of rows) { if (!kids.has(pp)) kids.set(pp, []); kids.get(pp).push([p, c]); }
-  const all = []; const walk = (p, c) => { all.push({ pid: Number(p), comm: c }); for (const [k, kc] of kids.get(String(p)) ?? []) walk(k, kc); };
-  walk(pid, rows.find(r => r[0] === String(pid))?.[2] ?? '?'); return all;
+async function freePort() { const server = createServer(); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); const port = server.address().port; await new Promise(resolve => server.close(resolve)); return port; }
+export function parseRollup(text) {
+  const field = name => { const value = text.match(new RegExp('^' + name + ':\\s+(\\d+)', 'm')); if (!value) throw new Error('缺少' + name); return Number(value[1]) * 1024; };
+  return { pss: field('Pss'), rss: field('Rss') };
 }
 async function memory(pid) {
-  let pss = 0, rss = 0; const procs = [];
-  for (const p of tree(pid)) { try { const t = await readFile(`/proc/${p.pid}/smaps_rollup`, 'utf8'); const k = n => Number(t.match(new RegExp('^' + n + ':\\s+(\\d+)', 'm'))?.[1] ?? 0) * 1024; pss += k('Pss'); rss += k('Rss'); procs.push({ ...p, pss: k('Pss'), rss: k('Rss') }); } catch {} }
-  return { pssBytes: pss, rssBytes: rss, processes: procs };
+  const processes = await ownedTree(pid), sampled = [], missing = [];
+  for (const processInfo of processes) {
+    try {
+      const text = await readFile(`/proc/${processInfo.pid}/smaps_rollup`, 'utf8');
+      sampled.push({ ...processInfo, ...parseRollup(text) });
+    } catch { if ((await stillOwned([processInfo])).length) missing.push(processInfo.pid); }
+  }
+  if (!sampled.length || missing.length) throw new Error('PSS测量缺失，样本无效：' + missing.join(','));
+  return { pssBytes: sampled.reduce((sum, row) => sum + row.pss, 0), rssBytes: sampled.reduce((sum, row) => sum + row.rss, 0), processes: sampled };
 }
-async function once(i) {
-  if (dropCaches) spawnSync('sudo', ['sh', '-c', 'sync; echo 3 > /proc/sys/vm/drop_caches']);
-  const data = await mkdtemp(join(tmpdir(), 'p0-measure-'));
-  let cmd, env = { ...process.env, YINGLIU_DATA_DIR: data }, cdp;
-  if (mode === 'electron') { cdp = 29000 + i; cmd = [join(app, 'yingliu-agent'), '--remote-debugging-port=' + cdp, '--no-sandbox']; }
-  else if (mode === 'tauri') { cmd = [app]; env = { ...env, YINGLIU_SIDECAR: sidecar }; }
-  else if (mode === 'sidecar') cmd = [sidecar, '--data-root', join(data, 'data'), '--projects-root', join(data, 'projects'), '--resource-root', join(dirname(sidecar), 'resources')];
-  const t0 = performance.now();
-  const child = spawn(cmd[0], cmd.slice(1), { env, stdio: ['pipe', 'pipe', 'pipe'] });
-  let readyMs, err = '';
-  const lines = l => { if (mode === 'tauri' && /page-load-finished url=http:\/\/127\.0\.0\.1/.test(l) && readyMs === undefined) readyMs = performance.now() - t0; if (mode === 'sidecar' && l.startsWith('{"type":"ready"') && readyMs === undefined) readyMs = performance.now() - t0; };
-  createInterface({ input: child.stderr }).on('line', l => { err += l + '\n'; lines(l); }); createInterface({ input: child.stdout }).on('line', lines);
-  const deadline = performance.now() + 60000;
-  if (mode === 'electron') {
-    // Editor ready = top page on the loopback editor origin with readyState complete and the React root mounted.
+async function electronReady(port) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/json`, { signal: AbortSignal.timeout(1000) });
+    const pages = await response.json(), page = pages.find(page => page.type === 'page' && /^http:\/\/127\.0\.0\.1:\d+/.test(page.url)); if (!page?.webSocketDebuggerUrl) return false;
+    return await withTimeout(new Promise(resolve => {
+      const socket = new WebSocket(page.webSocketDebuggerUrl);
+      socket.onopen = () => socket.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression: EDITOR_READY_EXPRESSION, returnByValue: true } }));
+      socket.onmessage = message => { let value; try { value = JSON.parse(message.data); } catch { socket.close(); resolve(false); return; } if (value.id !== 1) return; socket.close(); resolve(value.result?.result?.value === true); };
+      socket.onerror = () => { socket.close(); resolve(false); };
+      setTimeout(() => socket.close(), 1900).unref?.();
+    }), 2000, '编辑器挂载检查');
+  } catch { return false; }
+}
+export async function measureOnce(options, run) {
+  const cache = clearCacheEvidence({ requested: options.dropCaches, command: options.cacheClearCommand, args: options.cacheClearArgs });
+  const sample = { run, valid: false, readyCriterion: READY_CRITERIA[options.mode].id, cache, readyMs: null, s0: null, exitedWithin15s: false, leftovers: [] };
+  if (cache.requested && !cache.succeeded) return { ...sample, error: cache.error };
+  if (process.platform !== 'linux') return { ...sample, error: '本脚本只在Linux读取/proc PSS，未将其他平台的缺失读数记为0' };
+  const data = await mkdtemp(join(tmpdir(), 'p0-measure-')); let child, exited, captured = [], stderr = '', readyMs;
+  const readers = [];
+  try {
+    const env = { ...process.env, YINGLIU_DATA_DIR: join(data, 'data'), YINGLIU_PROJECTS: join(data, 'projects') }; let command, cdp;
+    if (options.mode === 'electron') { cdp = await freePort(); command = [join(options.app, 'yingliu-agent'), '--remote-debugging-port=' + cdp]; }
+    else if (options.mode === 'tauri') { command = [options.app]; env.YINGLIU_SIDECAR = options.sidecar; }
+    else command = [options.sidecar, '--data-root', join(data, 'data'), '--projects-root', join(data, 'projects'), '--resource-root', join(dirname(options.sidecar), 'resources')];
+    const t0 = performance.now(); child = spawn(command[0], command.slice(1), { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    exited = new Promise(resolve => { child.once('close', (code, signal) => resolve({ code, signal })); });
+    let spawnError; child.once('error', error => { spawnError = error; });
+    function line(text) {
+      if (readyMs !== undefined) return;
+      if (options.mode === 'tauri' && /page-load-finished url=http:\/\/127\.0\.0\.1:\d+/.test(text)) readyMs = performance.now() - t0;
+      if (options.mode === 'sidecar') try { const value = JSON.parse(text); if (value.type === 'error') spawnError = new Error('sidecar启动失败'); if (value.type === 'ready' && value.protocolVersion === 1 && value.pid === child.pid) readyMs = performance.now() - t0; } catch {}
+    }
+    const output = createInterface({ input: child.stdout }), errors = createInterface({ input: child.stderr }); readers.push(output, errors);
+    output.on('line', line); errors.on('line', text => { stderr = (stderr + text + '\n').slice(-8192); line(text); });
+    const deadline = performance.now() + (options.readyTimeoutMs ?? 60_000);
     while (readyMs === undefined && performance.now() < deadline) {
-      try {
-        const targets = await (await fetch(`http://127.0.0.1:${cdp}/json`)).json(); const page = targets.find(t => t.type === 'page' && t.url.startsWith('http://127.0.0.1'));
-        if (page) { const ok = await new Promise(res => { const ws = new WebSocket(page.webSocketDebuggerUrl); ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression: "document.readyState==='complete'&&!!document.querySelector('#root')&&document.querySelector('#root').childElementCount>0", returnByValue: true } })); ws.onmessage = m => { const v = JSON.parse(m.data); ws.close(); res(v.result?.result?.value === true); }; ws.onerror = () => res(false); }); if (ok) readyMs = performance.now() - t0; }
-      } catch {}
+      if (spawnError) throw spawnError; if (child.exitCode !== null || child.signalCode !== null) throw new Error('ready前进程已退出');
+      if (options.mode === 'electron' && await electronReady(cdp)) readyMs = performance.now() - t0;
       if (readyMs === undefined) await sleep(25);
     }
-  } else while (readyMs === undefined && performance.now() < deadline) await sleep(10);
-  await sleep(idleMs);
-  const mem = await memory(child.pid);
-  if (mode === 'sidecar') child.stdin.write('{"type":"shutdown"}\n'); else child.kill('SIGTERM');
-  const exited = await Promise.race([new Promise(r => child.on('exit', () => r(true))), sleep(15000).then(() => false)]);
-  if (!exited) child.kill('SIGKILL');
-  await sleep(300); const leftovers = mem.processes.filter(p => { try { process.kill(p.pid, 0); return true; } catch { return false; } });
-  for (const p of leftovers) try { process.kill(p.pid, 'SIGKILL'); } catch {}
-  await rm(data, { recursive: true, force: true }).catch(() => {});
-  return { run: i, readyMs: readyMs === undefined ? null : Math.round(readyMs), s0: { pssBytes: mem.pssBytes, rssBytes: mem.rssBytes, processes: mem.processes }, exitedWithin15s: exited, leftovers: leftovers.map(p => p.comm), stderrTail: err.split('\n').filter(l => !/token/i.test(l)).slice(-5) };
+    if (readyMs === undefined) throw new Error('未达到本模式ready判据；未采集S0');
+    sample.readyMs = Math.round(readyMs);
+    // The S0 clock always starts at the recorded criterion; failed readiness never advances to idle measurement.
+    await sleep(options.idleMs);
+    captured = await ownedTree(child.pid); sample.s0 = await memory(child.pid);
+    if (options.mode === 'sidecar') child.stdin.write('{"type":"shutdown"}\n'); else child.kill('SIGTERM');
+    await withTimeout(exited, 15_000, '被测应用退出'); sample.exitedWithin15s = true;
+    await sleep(300); sample.leftovers = (await stillOwned(captured)).map(row => row.comm);
+    if (sample.leftovers.length) throw new Error('退出后仍有自有进程，样本无效');
+    sample.valid = true;
+  } catch (error) { sample.error = error instanceof Error ? error.message : String(error); }
+  finally {
+    if (child && child.exitCode === null && child.signalCode === null) {
+      if (!captured.length) try { captured = await ownedTree(child.pid); } catch {}
+      child.kill('SIGKILL'); if (exited) try { await withTimeout(exited, 5000, '强制回收测量进程'); } catch (error) { sample.valid = false; sample.error = error.message; }
+    }
+    try { await killOwned(captured); } catch (error) { sample.valid = false; sample.error = '自有进程清理未完成：' + error.message; }
+    for (const reader of readers) reader.close();
+    sample.stderrTail = stderr.split('\n').filter(line => line && !/token|authorization|api.key/i.test(line)).slice(-5);
+    await rm(data, { recursive: true, force: true });
+  }
+  return sample;
 }
-const samples = []; for (let i = 0; i < runs; i++) { const s = await once(i); samples.push(s); console.log(JSON.stringify({ run: i, readyMs: s.readyMs, pssMiB: +(s.s0.pssBytes / 2 ** 20).toFixed(1), rssMiB: +(s.s0.rssBytes / 2 ** 20).toFixed(1), procs: s.s0.processes.length, leftovers: s.leftovers })); }
-const q = (a, p) => { const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.ceil(p * s.length) - 1)]; };
-const ready = samples.map(s => s.readyMs).filter(v => v !== null), pss = samples.map(s => s.s0.pssBytes);
-const summary = { mode, runs, idleMs, dropCaches, readyMedianMs: q(ready, 0.5), readyP95Ms: q(ready, 0.95), readyFailures: runs - ready.length, s0PssMedianMiB: +(q(pss, 0.5) / 2 ** 20).toFixed(1), s0PssP95MiB: +(q(pss, 0.95) / 2 ** 20).toFixed(1), s0RssMedianMiB: +(q(samples.map(s => s.s0.rssBytes), 0.5) / 2 ** 20).toFixed(1) };
-console.log(JSON.stringify(summary));
-await mkdir(dirname(out), { recursive: true });
-await writeFile(out, JSON.stringify({ summary, host: { kernel: spawnSync('uname', ['-sr']).stdout.toString().trim(), cpus: spawnSync('nproc').stdout.toString().trim() }, measuredAt: new Date().toISOString(), samples }, null, 2));
+export async function runMeasurement(options) {
+  if (!READY_CRITERIA[options.mode] || !Number.isSafeInteger(options.runs) || options.runs < 1 || options.runs > 100 || !Number.isSafeInteger(options.idleMs) || options.idleMs < 0) throw new Error('mode/runs/idle-ms无效');
+  if (options.mode !== 'sidecar' && !options.app || options.mode !== 'electron' && !options.sidecar) throw new Error('被测模式缺少--app或--sidecar');
+  const samples = []; for (let run = 0; run < options.runs; run++) { const sample = await measureOnce(options, run); samples.push(sample); console.log(JSON.stringify({ run, valid: sample.valid, readyCriterion: sample.readyCriterion, readyMs: sample.readyMs, error: sample.error })); }
+  return { schemaVersion: 2, status: samples.every(sample => sample.valid) ? 'PASS' : 'FAIL', summary: summarizeSamples(options.mode, samples, options.idleMs), measuredAt: new Date().toISOString(), host: { platform: process.platform, kernel: spawnSync('uname', ['-sr'], { encoding: 'utf8' }).stdout?.trim() ?? null }, samples };
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const args = process.argv.slice(2), option = (key, fallback) => { const index = args.indexOf('--' + key); return index >= 0 ? args[index + 1] : fallback; };
+  if (!option('out')) throw new Error('需要--out保存新的原始测量记录');
+  const options = { mode: option('mode'), runs: Number(option('runs', 10)), idleMs: Number(option('idle-ms', 10_000)), app: option('app') && resolve(option('app')), sidecar: option('sidecar') && resolve(option('sidecar')), dropCaches: args.includes('--drop-caches'), cacheClearCommand: option('cache-clear-command'), cacheClearArgs: option('cache-clear-args') ? JSON.parse(option('cache-clear-args')) : [] };
+  if (!Array.isArray(options.cacheClearArgs) || options.cacheClearArgs.some(value => typeof value !== 'string')) throw new Error('--cache-clear-args须为字符串数组JSON');
+  const report = await runMeasurement(options), out = resolve(option('out')); await mkdir(dirname(out), { recursive: true }); await writeFile(out, JSON.stringify(report, null, 2) + '\n'); process.exitCode = report.status === 'PASS' ? 0 : 1;
+}

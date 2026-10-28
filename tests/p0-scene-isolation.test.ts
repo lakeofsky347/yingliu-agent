@@ -9,7 +9,7 @@ import { findBrowserExecutable } from '../src/host/tool-environment.ts';
 import { runScene } from '../src/sandbox/scene-worker.ts';
 
 const browserPath = process.env.YINGLIU_TEST_BROWSER ?? findBrowserExecutable();
-const skip = !browserPath ? '未找到 Chrome/Chromium，宿主实测跳过（记为未测）' : false;
+const skip = process.platform==='win32'?'Windows 独立场景执行在 JobObject 验收前明确拒绝；另有零spawn前置回归':!browserPath ? '未找到 Chrome/Chromium，宿主实测跳过（记为未测）' : false;
 
 async function receivers() {
   const hits: string[] = [];

@@ -1,10 +1,11 @@
 name: Tauri P0 spike
+# 范围仅为 Node SEA 构建、stdio 冒烟与 Rust 编译，不代表 Tauri 原生界面或性能验收。
 
 on:
   push:
-    branches: [spike/tauri-p0]
+    branches: [spike/tauri-p0, codex/tauri-p0-hardening-20261028]
   pull_request:
-    paths: ['src-tauri/**', 'src/sidecar/**', 'scripts/p0/**', '.github/workflows/tauri-p0.yml']
+    paths: ['src-tauri/**', 'src/sidecar/**', 'src/migration/**', 'src/sandbox/**', 'scripts/p0/**', 'tests/p0-*.test.ts', 'tests/fixtures/p0-*', '.github/workflows/tauri-p0.yml']
   workflow_dispatch:
 
 permissions:
