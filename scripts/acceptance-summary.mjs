@@ -26,11 +26,34 @@ const version=value=>typeof value==='string'?safeLabel(value.split(/\r?\n/)[0]).
 function taskDiagnostic(value){
   if(!value||typeof value!=='object')return undefined;
   const result={};
-  const fields={expected:['complete','ready'],actual:['failed','cancelled','running','no_new_task','wrong_project','wrong_task','not_ready','unknown'],taskKind:['preview','export','audio','storyboard','scenes','modify','unknown'],diagnosticCategory:['FRAME_NOT_REPEATABLE','WAIT_TIMEOUT','SANDBOX_UNAVAILABLE','TASK_FAILED','TASK_IDENTITY_MISMATCH']};
+  const fields={expected:['complete','ready'],actual:['failed','cancelled','running','no_new_task','wrong_project','wrong_task','not_ready','unknown'],taskKind:['preview','export','audio','storyboard','scenes','modify','unknown'],diagnosticCategory:['FRAME_NOT_REPEATABLE','WAIT_TIMEOUT','SANDBOX_UNAVAILABLE','TASK_FAILED','TASK_IDENTITY_MISMATCH','UI_ACTION_FAILED']};
   for(const [key,allowed]of Object.entries(fields))if(allowed.includes(value[key]))result[key]=value[key];
   for(const key of ['taskRevision','projectRevision'])if(Number.isSafeInteger(value[key])&&value[key]>=0)result[key]=value[key];
   if(Array.isArray(value.render))result.render=value.render.slice(0,12).map(renderDiagnostic).filter(Boolean);
+  const sourceUi=sourceUiDiagnostic(value.sourceUi);if(sourceUi)result.sourceUi=sourceUi;
   return Object.keys(result).length?result:undefined;
+}
+function sourceUiDiagnostic(value){
+  if(!value||typeof value!=='object'||!['CAPTURED','TIMEOUT','UNAVAILABLE'].includes(value.captureStatus))return undefined;
+  const result={captureStatus:value.captureStatus};
+  if(['source','preview','environment','other','none'].includes(value.selectedTab))result.selectedTab=value.selectedTab;
+  if(['editor','loading','empty','other'].includes(value.sourcePanel))result.sourcePanel=value.sourcePanel;
+  for(const key of ['shotCount','tabCount','buttonCount','textboxCount'])if(Number.isSafeInteger(value[key])&&value[key]>=0&&value[key]<=10000)result[key]=value[key];
+  if(Number.isSafeInteger(value.selectedShotIndex)&&value.selectedShotIndex>=-1&&value.selectedShotIndex<=10000)result.selectedShotIndex=value.selectedShotIndex;
+  for(const key of ['firstShotSelected','sourceDirty','studioDisabled'])if(typeof value[key]==='boolean')result[key]=value[key];
+  if(Number.isSafeInteger(value.pageScrollY)&&Math.abs(value.pageScrollY)<=1000000)result.pageScrollY=value.pageScrollY;
+  if(value.viewport&&['width','height'].every(key=>Number.isSafeInteger(value.viewport[key])&&value.viewport[key]>0&&value.viewport[key]<=32768))result.viewport=Object.fromEntries(['width','height'].map(key=>[key,value.viewport[key]]));
+  if(value.controls&&typeof value.controls==='object'){
+    result.controls={};for(const name of ['firstShot','sourceTab','htmlEditor','saveSource']){
+      const control=value.controls[name];if(!control||typeof control!=='object')continue;const entry={};
+      if(Number.isSafeInteger(control.count)&&control.count>=0&&control.count<=10000)entry.count=control.count;
+      for(const key of ['disabled','visible','inViewport'])if(typeof control[key]==='boolean')entry[key]=control[key];
+      if(['missing','hidden','outside','none','self','other'].includes(control.hitTest))entry.hitTest=control.hitTest;
+      if(control.bounds&&['x','y','width','height'].every(key=>Number.isSafeInteger(control.bounds[key])&&Math.abs(control.bounds[key])<=1000000)&&control.bounds.width>=0&&control.bounds.height>=0)entry.bounds=Object.fromEntries(['x','y','width','height'].map(key=>[key,control.bounds[key]]));
+      result.controls[name]=entry;
+    }
+  }
+  return result;
 }
 function renderDiagnostic(value){
   if(!value||typeof value!=='object'||!['backward','cold'].includes(value.phase))return undefined;

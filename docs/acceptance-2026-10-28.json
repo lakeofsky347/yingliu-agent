@@ -6,7 +6,7 @@
   "timezone": "Asia/Singapore",
   "branch": "codex/workspace-improvements-20261027",
   "validationSource": {
-    "baseCommit": "07b291884cb74f92cb446644c69bb2d402d0d6da",
+    "baseCommit": "ea7a8285ab6cb9f3d0b9d3d4608a97a032322f15",
     "workingTreeDirty": true
   },
   "local": {
@@ -16,27 +16,26 @@
     "build": "PASS",
     "package": "PASS",
     "tests": {
-      "total": 477,
-      "passed": 477,
+      "total": 489,
+      "passed": 489,
       "failed": 0,
       "skipped": 0
     },
     "platformAcceptance": {
-      "status": "FAIL",
-      "checkedAt": "2026-10-28T10:44:35.696Z",
-      "preflight": "5/5 PASS",
-      "relocatedPackageGui": "20/20 PASS",
-      "native": "4 passed then WAIT_TIMEOUT",
-      "failedLocation": "after capture: 02-model-settings.png",
-      "exactUiCause": "UNCONFIRMED",
-      "sourceModels": "11/11 PASS",
-      "sourceFilm": "7/7 PASS",
-      "sourceEditor": "8/8 PASS",
+      "status": "PASS",
+      "checkedAt": "2026-10-28T11:19:03.529Z",
+      "totalChecks": 73,
+      "preflight": 5,
+      "relocatedPackageGui": 20,
+      "packagedNativeFilm": 22,
+      "sourceModelAndCostUi": 11,
+      "sourceMultimodalFilm": 7,
+      "sourceEditorSafety": 8,
       "credentialBackend": "macos_keychain",
       "encryptionAvailable": true,
       "rendererOsSandbox": true,
       "temporaryDataCleanup": "PASS",
-      "followUp": "同包原生专项采证中，不自动重试或记PASS"
+      "singleRun": true
     },
     "providerEvidence": "仅本机网关、内存响应与合成凭据；未调用真实计费 API",
     "workflowDurabilityCases": 74,
@@ -94,11 +93,21 @@
       "baselineAndCandidateAvailable": true,
       "clearAndReadPixelsEqual": true,
       "hardwareAcceleration": "NOT_CHECKED"
+    },
+    "runtimePublicationCases": {
+      "passed": 5,
+      "failedBeforeFix": 4,
+      "actualLocalhostHttp": true
+    },
+    "sourceEditorReadinessCases": {
+      "passed": 3,
+      "failedBeforeFix": 1,
+      "realReactChromium": true
     }
   },
   "remoteAcceptance": {
     "candidatePending": true,
-    "note": "合成阶段屏障后Windows仍有最大1级通道差，保持严格失败；无界面软件合成候选477项回归、重建包和WebGL能力专项通过，等待对应三平台CI"
+    "note": "Windows软件合成已通过严格manual preview/ready，源码界面超时已补加载屏障与分步诊断；本机489+单次73通过，待对应提交三平台CI"
   },
   "separateExperimentalBranch": "codex/tauri-p0-hardening-20261028",
   "notVerified": [

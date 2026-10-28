@@ -14,6 +14,7 @@ import { browserRuntime, runtimeHtml } from '../runtime/browser.js';
 import {AudioMixer, type AudioMix} from './audio.js';
 import {inspectToolEnvironment, type ToolEnvironmentOptions} from './tool-environment.js';
 import {compareFramePng} from './frame-comparison.js';
+import {writeDurableFile} from '../agent/durable-file.js';
 
 export interface FrameCapture { frame:number; shotId:string; path:string; sha256:string }
 export interface RenderIssue { shotId?:string; frame?:number; message:string;comparison?:ReturnType<typeof compareFramePng>&{phase:'backward'|'cold';frame:number;expectedHash:string;actualHash:string;fontsStatus:'loaded'|'loading'|'unavailable';fontFaces:number;deviceScaleFactor:number} }
@@ -45,6 +46,7 @@ function stopChild(child:ChildProcess):void {
 async function projectServer(root:string):Promise<ProjectServer> {
   const absoluteRoot=path.resolve(root);
   const server=createServer(async(req,res)=>{
+    let file:Awaited<ReturnType<typeof fs.open>>|undefined;
     try {
       if(!['GET','HEAD'].includes(req.method??'')){res.writeHead(405);res.end();return;}
       // A loopback listener is insufficient if a foreign website can send a forged Host header.
@@ -53,12 +55,14 @@ async function projectServer(root:string):Promise<ProjectServer> {
       const pathname=decodeURIComponent(new URL(req.url??'/','http://'+host).pathname);
       const relative=pathname.replace(/^\//,'')||'index.html';
       // Scene code may read render resources, never editor state, journals or source history.
-      const allowed=relative==='index.html'||/^runtime\/(?:frame\.mjs|spec\.json|scenes\/[\w-]+\.mjs|audio\/mix-[\w-]+\.wav)$/.test(relative)||
+      const allowed=relative==='index.html'||/^runtime\/(?:frame(?:-[a-f0-9]{64})?\.mjs|spec(?:-[a-f0-9]{64})?\.json|scenes\/[\w-]+\.mjs|audio\/mix-[\w-]+\.wav)$/.test(relative)||
         /^assets\/[\w./-]+$/.test(relative)||/^\.studio\/inspection\/[\w-]+\.png$/.test(relative)||/^exports\/[\w-]+\/video\.mp4$/.test(relative);
       if(!allowed){res.writeHead(403);res.end('Resource is private');return;}
       const full=await projectPath(absoluteRoot,relative),type=mime[path.extname(full).toLowerCase()];
       if(!type){res.writeHead(415);res.end('Unsupported file type');return;}
-      const stat=await fs.stat(full);if(!stat.isFile())throw new Error('File expected');
+      // Match headers and bytes to one inode even if prepare atomically replaces
+      // the public path while this request is in flight.
+      file=await fs.open(full,'r');const stat=await file.stat();if(!stat.isFile())throw new Error('File expected');
       const headers:Record<string,string|number>={'Content-Type':type,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff',
         'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; worker-src 'none'"};
       const media=type==='video/mp4'||type.startsWith('audio/');if(media)headers['Accept-Ranges']='bytes';
@@ -73,9 +77,9 @@ async function projectServer(root:string):Promise<ProjectServer> {
       }
       headers['Content-Length']=Math.max(0,end-start+1);res.writeHead(status,headers);
       if(req.method==='HEAD'){res.end();return;}
-      const file=await fs.open(full,'r');
-      const stream=file.createReadStream({start,end,autoClose:true});stream.on('error',()=>res.destroy());res.on('close',()=>stream.destroy());stream.pipe(res);
+      const stream=file.createReadStream({start,end,autoClose:true});file=undefined;stream.on('error',()=>res.destroy());res.on('close',()=>stream.destroy());stream.pipe(res);
     }catch { if(!res.headersSent)res.writeHead(404);res.end('Not found'); }
+    finally{if(file)try{await file.close();}catch{res.destroy();}}
   });
   await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',()=>{server.off('error',reject);resolve();});});
   const address=server.address();if(!address||typeof address==='string')throw new Error('Unable to bind preview server');
@@ -132,13 +136,22 @@ export class VideoRenderer {
       try{
         const source=await this.store.readSource(root,shot,project.revision);safeId(shot.id);
         // ESM modules are files served under a restrictive self-only CSP; no privileged APIs are exposed.
-        await fs.writeFile(await projectPath(root,'runtime/scenes/'+shot.id+'.mjs'),source.js);
-        sources.push({id:shot.id,html:source.html,css:source.css,moduleUrl:'./scenes/'+shot.id+'.mjs'});
+        const moduleName=shot.id+'-'+hash(source.js)+'.mjs';
+        await writeDurableFile(await projectPath(root,'runtime/scenes/'+moduleName),source.js);
+        // Keep the legacy address complete for older cached runtime documents.
+        await writeDurableFile(await projectPath(root,'runtime/scenes/'+shot.id+'.mjs'),source.js);
+        sources.push({id:shot.id,html:source.html,css:source.css,moduleUrl:'./scenes/'+moduleName});
       }catch(error){const e=error as Error&RenderIssue;e.shotId=shot.id;throw e;}
     }
-    await fs.writeFile(await projectPath(root,'runtime/frame.mjs'),browserRuntime);
-    await fs.writeFile(await projectPath(root,'runtime/spec.json'),json({spec,sources}));
-    await fs.writeFile(await projectPath(root,'index.html'),runtimeHtml(spec.target.width,spec.target.height));
+    const manifest=json({spec,sources}),runtimeName='frame-'+hash(browserRuntime)+'.mjs',specName='spec-'+hash(manifest)+'.json';
+    await writeDurableFile(await projectPath(root,'runtime/'+runtimeName),browserRuntime);
+    await writeDurableFile(await projectPath(root,'runtime/'+specName),manifest);
+    await writeDurableFile(await projectPath(root,'runtime/frame.mjs'),browserRuntime);
+    await writeDurableFile(await projectPath(root,'runtime/spec.json'),manifest);
+    // index.html is the publication point. Its immutable manifest and modules
+    // already exist in full; an old document keeps its old complete graph while
+    // another preview/check prepares a new revision in the same project.
+    await writeDurableFile(await projectPath(root,'index.html'),runtimeHtml(spec.target.width,spec.target.height,{runtimeUrl:'./runtime/'+runtimeName,specUrl:'./runtime/'+specName}));
     return spec;
   }
   private async openPage(url:string,spec:VideoSpec,settings:EnvironmentSettings,issues:RenderIssue[],signal?:AbortSignal):Promise<{browser:Browser;page:Page;removeAbort:()=>void}> {
