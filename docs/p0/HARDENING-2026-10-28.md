@@ -70,6 +70,8 @@ Rust `SidecarProcess` 从 spawn 开始持有子进程；缺管道、首行错误
 
 此前主线在用户手动处理系统钥匙串后，新包于 `2026-10-28T11:19:03.529Z` 取得单次完整本机 73/73 通过，包含此前无限循环恢复、Keychain 与 sandbox 路径；这是当时主线 Electron 本机验收。`accfdf3` 的三平台快速矩阵已通过（Actions run 40679330829），三平台 Electron 原生媒体验收也已通过（run 40679330857）。这些旧提交证据不替代当前诊断候选自己的原生验收。
 
+当前主线 `0f26d9a` 的三平台快速矩阵已通过（Actions run 40683701636），同一干净提交的 Electron 原生媒体验收三平台也全部成功（run 40683701661：macOS 73、Windows 73、Linux 74 项）。主线本机完整 498/498、类型检查、构建与搬迁包布局检查已通过；新增诊断后的 GUI 结果以这次远端干净提交为证，不标成本轮重新执行的本机 73 项。
+
 独立分支前一提交 `2cb084b` 的专用 SEA/stdio/Rust 三平台与通用快速三平台已通过，但继承的 Windows Electron 原生验收失败：package 的 revision 4 预览任务为 `TASK_FAILED`，native 在聊天重试等待处超时；models、film、editor 已通过。现有脱敏摘要没有具体 IO code 或 syscall，不能判定 Windows 根因，也不将其记为通过。本次 `0f26d9a` 同步诊断用于下一次实际 CI 取证；本次独立分支提交的专用、快速及原生结果都须按新提交核对。本轮没有执行 Tauri 原生窗口验收，P0 中断恢复演练也不替代该验收。
 
 本轮没有执行 sudo/drop_caches、真实计费 API、真实旧凭据迁移、Tauri 原生 GUI 验收、Windows JobObject 验收、干净目标机安装、发行签名/公证或新的 Linux 冷启动/PSS 同口径性能比较。历史 P0 报告和 evidence 保留为历史记录，不用本轮加固追认旧性能数字。
