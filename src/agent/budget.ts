@@ -1,4 +1,5 @@
 import type { Budget, ToolRisk, Usage } from './contracts.ts';
+import { configuredTokenCost } from '../shared/model-cost.ts';
 
 export const DEFAULT_BUDGET: Budget = { maxSteps: 24, maxToolCalls: 60, maxTokens: 400_000, maxCost: null, currency: 'CNY' };
 export function budgetFrom(input: Partial<Budget> = {}): Budget {
@@ -13,10 +14,8 @@ export function budgetFrom(input: Partial<Budget> = {}): Budget {
 export function emptyUsage(currency: string): Usage { return { steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, cost: 0, unknownCostCalls: 0, currency }; }
 
 /** Price per million tokens from model parameters (pricePerMInput / pricePerMOutput). Unknown → null. */
-export function tokenCost(parameters: Record<string, unknown>, input: number, output: number): number | null {
-  const a = Number(parameters.pricePerMInput), b = Number(parameters.pricePerMOutput);
-  if (!Number.isFinite(a) || !Number.isFinite(b) || a < 0 || b < 0) return null;
-  return (input * a + output * b) / 1_000_000;
+export function tokenCost(parameters: Record<string, unknown>, input: number, output: number, currency='CNY'): number | null {
+  return configuredTokenCost(parameters,input,output,currency);
 }
 export function chargeModel(usage: Usage, input: number, output: number, cost: number | null): void {
   usage.inputTokens += input; usage.outputTokens += output;

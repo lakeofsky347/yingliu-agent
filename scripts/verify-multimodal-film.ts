@@ -15,8 +15,8 @@ import type {WorkflowRecord} from '../src/workflows/contracts.ts';
 import type {MediaTask} from '../src/jobs/contracts.ts';
 import type {StudioSnapshot,SceneSource} from '../src/shared/types.ts';
 
-const execute=promisify(execFile),environment=detectEnvironment();
-const output=resolve('artifacts/acceptance-v03/multimodal-film-'+Date.now()),temporary=await mkdtemp(join(tmpdir(),'yingliu-film-acceptance-'));
+const execute=promisify(execFile),environment=detectEnvironment(process.env.CHROME_PATH?{browserPath:process.env.CHROME_PATH}:{});
+const output=resolve(process.env.YINGLIU_ACCEPTANCE_OUTPUT||'artifacts/acceptance-v03/multimodal-film-'+Date.now()),temporary=await mkdtemp(join(tmpdir(),'yingliu-film-acceptance-'));
 await mkdir(output,{recursive:true});
 const checks:{name:string;status:'PASS';details?:unknown}[]=[],requests:{method:string;path:string;model?:string;authenticated:boolean;imageCount?:number;imageBytes?:number}[]=[];
 const workflows:WorkflowRecord[]=[];let app:Application|undefined,baseUrl='';

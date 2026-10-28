@@ -142,7 +142,11 @@ export class AgentService {
   ledger(projectId: string) { return this.ledgers.get(projectId); }
   setProjectBudget(projectId: string, maxCost: number | null, currency?: string): Promise<Ledger> {
     if (maxCost !== null && (!Number.isFinite(maxCost) || maxCost < 0)) throw new Error('费用上限须为非负数，或留空表示不限');
-    return this.ledgers.update(projectId, current => ({ ...current, maxCost, ...(currency ? { currency: currency.slice(0, 8) } : {}), updatedAt: now() }));
+    if(currency!==undefined&&!/^[A-Z]{3}$/.test(currency))throw new Error('账本币种须为三个大写字母');
+    return this.ledgers.update(projectId, current => {
+      if(currency!==undefined&&currency!==current.currency&&(current.spent!==0||current.unknownCostCalls>0||Object.values(current.byTool).some(entry=>entry.cost!==0)))throw new Error('已有花费或未知费用记录，不能直接更改账本币种');
+      return {...current,maxCost,...(currency?{currency}:{}),updatedAt:now()};
+    });
   }
   async lastQc(projectId: string) { return (await this.qcs.get(projectId)).report ?? null; }
   async runQc(projectId: string, signal = new AbortController().signal): Promise<QcReport> { return qualityCheck(this.context('qc', projectId, signal, false)); }
@@ -418,8 +422,10 @@ export class AgentService {
         }, signal);
       } catch (error) { if (signal.aborted) throw error; await this.finishStep(run, step, { status: 'failed', error: errorText(error) }); throw error; }
       run.usage.steps++;
-      const cost = tokenCost(model.parameters, turn.usage.inputTokens, turn.usage.outputTokens); chargeModel(run.usage, turn.usage.inputTokens, turn.usage.outputTokens, cost); if (cost) await this.spend(run.projectId, 'director', cost);
-      await this.store.trace(run.id, { event: 'model', mode: turn.mode, finish: turn.finish, usage: turn.usage, cost, content: bound(turn.content, 4000), toolCalls: turn.toolCalls });
+      const ledger = await this.ledgers.get(run.projectId);
+      const cost = turn.usageKnown && ledger.currency === run.usage.currency ? tokenCost(model.parameters, turn.usage.inputTokens, turn.usage.outputTokens, run.usage.currency) : null;
+      chargeModel(run.usage, turn.usage.inputTokens, turn.usage.outputTokens, cost); await this.spend(run.projectId, 'director', cost);
+      await this.store.trace(run.id, { event: 'model', mode: turn.mode, finish: turn.finish, usage: turn.usage, usageKnown:turn.usageKnown, cost, content: bound(turn.content, 4000), toolCalls: turn.toolCalls });
       run.messages.push({ role: 'assistant', content: turn.content || null, ...(turn.toolCalls.length ? { tool_calls: turn.toolCalls.map(call => ({ id: call.id, type: 'function' as const, function: { name: call.name, arguments: call.arguments } })) } : {}) });
       await this.finishStep(run, step, { status: 'complete', summary: turn.toolCalls.length ? '计划调用：' + turn.toolCalls.map(call => call.name).join(', ') : bound(turn.content, 200) });
       if (turn.toolCalls.length) { run.queue = turn.toolCalls.map(call => ({ ...call, execId: randomUUID() })); await this.save(run); continue; }

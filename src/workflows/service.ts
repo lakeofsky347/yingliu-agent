@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { writeDurableFile } from '../agent/durable-file.ts';
+import { safeRelativeProjectPath } from '../core/project-paths.ts';
 import { defaultSceneSource, validateProject } from '../core/index.ts';
 import { normalizeStoryboard, parseModelJson, parseSceneSource } from '../host/generator.ts';
 import type { Asset, SceneSource, VideoProject } from '../shared/types.ts';
@@ -13,6 +15,19 @@ interface StoredWorkflow extends WorkflowRecord {
   baseline?:VideoProject; plan?:ShotPlan[]; assets?:Record<string,Asset[]>;
   initialization?:{project:VideoProject;plan:ShotPlan[]};
   candidate?:WorkflowCandidate & {expectedRevision:number};adoptionRevision?:number;
+  successes?:Record<string,SuccessReceipt>;
+}
+interface SuccessReceipt {
+  version:1;workflowId:string;stepId:string;key:string;kind:'text'|'speech';
+  output?:string;asset?:Asset;modelCall?:WorkflowModelCall;
+}
+type Checkpoint='record'|'created'|'speech-submission'|'success-receipt'|'speech-complete'|'candidate'|'before-commit'|'after-commit';
+export interface WorkflowPersistenceEvent {
+  phase:'before-write'|'after-write';checkpoint:Checkpoint;workflowId:string;stepId?:string;successKind?:SuccessReceipt['kind'];record:WorkflowRecord;
+}
+export interface WorkflowServiceOptions {
+  /** Trusted, constructor-only fault injection. Never accepted through RPC or workflow requests. */
+  onPersistPhase?:(event:WorkflowPersistenceEvent)=>Promise<void>|void;
 }
 const message=(error:unknown)=>error instanceof Error?error.message:String(error);
 function delay(signal:AbortSignal):Promise<void>{return new Promise((accept,reject)=>{const timer=setTimeout(()=>{signal.removeEventListener('abort',stop);accept();},250);const stop=()=>{clearTimeout(timer);reject(signal.reason);};signal.addEventListener('abort',stop,{once:true});if(signal.aborted)stop();});}
@@ -37,7 +52,7 @@ export class WorkflowService {
   private stepStarts=new Map<string,number>();
   private writes=Promise.resolve();private initialized?:Promise<void>;private stopped=false;
   private readonly directory:string;
-  constructor(directory:string,private media:MediaTaskService,private port:WorkflowPort){this.directory=join(directory,'workflows');}
+  constructor(directory:string,private media:MediaTaskService,private port:WorkflowPort,private options:WorkflowServiceOptions={}){this.directory=join(directory,'workflows');}
   private initialize(){return this.initialized??=(async()=>{
     await mkdir(this.directory,{recursive:true});
     for(const name of await readdir(this.directory)){
@@ -48,20 +63,54 @@ export class WorkflowService {
       this.records.set(record.id,record);
     }
   })();}
-  private public(record:StoredWorkflow):WorkflowRecord {const {baseline,plan,assets,initialization,candidate,adoptionRevision,...value}=structuredClone(record);return value;}
-  private persist(record:StoredWorkflow){for(const step of record.steps)if(step.status!=='running')this.finishStep(step);record.updatedAt=new Date().toISOString();const snapshot=structuredClone(record);const work=this.writes.then(async()=>{const destination=join(this.directory,record.id+'.json'),temporary=destination+'.tmp-'+randomUUID();await writeFile(temporary,JSON.stringify(snapshot,null,2)+'\n',{mode:0o600});await rename(temporary,destination);});this.writes=work.catch(()=>{});return work;}
+  private public(record:StoredWorkflow):WorkflowRecord {const {baseline,plan,assets,initialization,candidate,adoptionRevision,successes,...value}=structuredClone(record);return value;}
+  private writeCheckpoint(record:StoredWorkflow,file:string,value:unknown,checkpoint:Checkpoint,stepId?:string,successKind?:SuccessReceipt['kind']){
+    const data=JSON.stringify(value,null,2)+'\n',event={checkpoint,workflowId:record.id,stepId,successKind,record:this.public(record)};
+    const work=this.writes.then(async()=>{
+      await this.options.onPersistPhase?.({...event,phase:'before-write'});
+      await writeDurableFile(file,data);
+      await this.options.onPersistPhase?.({...event,phase:'after-write'});
+    });this.writes=work.catch(()=>{});return work;
+  }
+  private persist(record:StoredWorkflow,checkpoint:Checkpoint='record'){
+    for(const step of record.steps)if(step.status!=='running')this.finishStep(step);record.updatedAt=new Date().toISOString();
+    return this.writeCheckpoint(record,join(this.directory,record.id+'.json'),record,checkpoint);
+  }
+  private successFile(record:StoredWorkflow,step:WorkflowStep,key:string){
+    if(!/^[a-zA-Z0-9_-]{1,100}$/.test(record.id)||!/^[a-zA-Z0-9_-]{1,100}$/.test(step.id)||!/^[a-f0-9]{64}$/.test(key))throw new Error('协作成功回执 ID 无效');
+    return join(this.directory,'receipts',record.id,step.id+'-'+key+'.json');
+  }
+  private async success(record:StoredWorkflow,step:WorkflowStep,key:string,kind:SuccessReceipt['kind']):Promise<SuccessReceipt|undefined>{
+    const cached=record.successes?.[key];let receipt:SuccessReceipt;
+    if(cached)receipt=structuredClone(cached);
+    else try{receipt=JSON.parse(await readFile(this.successFile(record,step,key),'utf8'));}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return;throw Object.assign(new Error('协作成功回执无法读取，已停止以免重复调用：'+message(error)),{code:'WORKFLOW_RECEIPT_INVALID'});}
+    const asset=receipt?.asset;
+    if(!receipt||receipt.version!==1||receipt.workflowId!==record.id||receipt.stepId!==step.id||receipt.key!==key||receipt.kind!==kind
+      ||kind==='text'&&(typeof receipt.output!=='string'||!receipt.modelCall||receipt.modelCall.status!=='complete')
+      ||kind==='speech'&&(!asset||asset.kind!=='audio'||typeof asset.id!=='string'||typeof asset.name!=='string'||typeof asset.path!=='string'||!asset.path.startsWith('assets/')||!safeRelativeProjectPath(asset.path)||!Number.isFinite(asset.duration)||asset.duration!<=0))throw Object.assign(new Error('协作成功回执损坏，已保留原文件并停止以免重复调用'),{code:'WORKFLOW_RECEIPT_INVALID'});
+    (record.successes??={})[key]=structuredClone(receipt);return receipt;
+  }
+  private saveSuccess(record:StoredWorkflow,step:WorkflowStep,receipt:SuccessReceipt){
+    // Keep the returned result in memory before I/O. A later primary checkpoint
+    // may preserve it even if this independent receipt write reports an error.
+    (record.successes??={})[receipt.key]=structuredClone(receipt);
+    return this.writeCheckpoint(record,this.successFile(record,step,receipt.key),receipt,'success-receipt',step.id,receipt.kind);
+  }
   private beginStep(step:WorkflowStep){
     if(step.status==='complete')return;step.status='running';step.startedAt=new Date().toISOString();delete step.finishedAt;delete step.durationMs;this.stepStarts.set(step.id,performance.now());
   }
   private finishStep(step:WorkflowStep){
     const started=this.stepStarts.get(step.id);if(started===undefined)return;step.finishedAt=new Date().toISOString();step.durationMs=Math.max(0,Math.round(performance.now()-started));this.stepStarts.delete(step.id);
   }
-  private async text(record:StoredWorkflow,step:WorkflowStep,role:'director'|'scene'|'vision',prompt:string,signal:AbortSignal,images?:{bytes:Uint8Array;mime:string}[]){
-    const call:WorkflowModelCall={role,startedAt:new Date().toISOString(),status:'running'};step.modelCalls??=[];step.modelCalls.push(call);await this.persist(record);
-    const started=performance.now();call.startedAt=new Date().toISOString();
-    try{const result=await this.port.text(role,prompt,signal,record.request,images);call.status='complete';return result;}
-    catch(error){call.status='failed';throw error;}
-    finally{call.finishedAt=new Date().toISOString();call.durationMs=Math.max(0,Math.round(performance.now()-started));await this.persist(record);}
+  private async text(record:StoredWorkflow,step:WorkflowStep,role:'director'|'scene'|'vision',prompt:string,signal:AbortSignal,images?:{bytes:Uint8Array;mime:string}[],validate?:(output:string)=>void){
+    const key=createHash('sha256').update(JSON.stringify([step.id,role,prompt,images?.map(image=>[image.mime,createHash('sha256').update(image.bytes).digest('hex')])])).digest('hex');
+    const success=await this.success(record,step,key,'text');
+    if(success){validate?.(success.output!);const existing=step.modelCalls?.find(call=>success.modelCall!.id?call.id===success.modelCall!.id:call.role===success.modelCall!.role&&call.startedAt===success.modelCall!.startedAt);if(existing)Object.assign(existing,success.modelCall);else(step.modelCalls??=[]).push(structuredClone(success.modelCall!));return success.output!;}
+    const call:WorkflowModelCall={id:randomUUID(),role,startedAt:new Date().toISOString(),status:'running'};step.modelCalls??=[];step.modelCalls.push(call);await this.persist(record);
+    const started=performance.now();call.startedAt=new Date().toISOString();let returned=false;
+    try{signal.throwIfAborted();const result=await this.port.text(role,prompt,signal,record.request,images);validate?.(result);returned=true;call.status='complete';call.finishedAt=new Date().toISOString();call.durationMs=Math.max(0,Math.round(performance.now()-started));await this.saveSuccess(record,step,{version:1,workflowId:record.id,stepId:step.id,key,kind:'text',output:result,modelCall:structuredClone(call)});return result;}
+    catch(error){if(!returned)call.status='failed';throw error;}
+    finally{call.finishedAt??=new Date().toISOString();call.durationMs??=Math.max(0,Math.round(performance.now()-started));await this.persist(record);}
   }
   private async required(id:string){await this.initialize();const value=this.records.get(id);if(!value)throw new Error('协作任务不存在');return value;}
   async list(projectId?:string){await this.initialize();return [...this.records.values()].filter(item=>!projectId||item.projectId===projectId).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).map(item=>this.public(item));}
@@ -96,7 +145,9 @@ export class WorkflowService {
     const snapshot=await this.port.snapshot(input.projectId);if(!snapshot.project||snapshot.project.revision!==input.expectedRevision)throw Object.assign(new Error('工程版本已变化，请刷新后制作'),{code:'REVISION_CONFLICT'});
     if(input.shotIds?.some(id=>!snapshot.project!.shots.some(shot=>shot.id===id)))throw new Error('所选镜头不存在');
     const now=new Date().toISOString(),record:StoredWorkflow={version:1,id:randomUUID(),projectId:input.projectId,request:structuredClone(input),status:'running',message:'导演正在规划',createdAt:now,updatedAt:now,startRevision:input.expectedRevision,steps:[],usage:{cost:null,generatedTasks:0},baseline:structuredClone(snapshot.project),assets:{}};
-    this.records.set(record.id,record);await this.persist(record);this.start(record);return this.public(record);
+    this.records.set(record.id,record);
+    try{await this.persist(record,'created');}catch(error){record.status='failed';record.error=message(error);record.message='制作记录保存失败，尚未调用模型';await this.persist(record).catch(()=>{});throw error;}
+    this.start(record);return this.public(record);
     });
   }
   private start(record:StoredWorkflow){if(this.running.has(record.id)||this.stopped)return;const controller=new AbortController();const promise=this.execute(record,controller.signal).finally(()=>this.running.delete(record.id));this.running.set(record.id,{controller,promise});void promise.catch(()=>{});}
@@ -134,7 +185,13 @@ export class WorkflowService {
     this.checkTaskBudget(record,selected.length||1);
     const step=this.step(record,'plan');this.beginStep(step);await this.persist(record);
     const prompt=JSON.stringify({request:record.request.prompt,project:{title:project.title,topic:project.topic,targetDuration:project.targetDuration,target:project.target},shots:selected,output:selected.length?{shots:[{shotId:'必须使用给定镜头ID',prompt:'该镜头画面制作要求',narration:'旁白文字'}]}:{shots:[{title:'镜头标题',intent:'目标',durationSeconds:6,params:{text:'屏幕标题'},prompt:'画面制作要求',narration:'旁白文字'}]},instruction:'输出严格JSON，只安排选定镜头。空工程生成1–12个镜头。不要输出API地址或凭据。'});
-    const value=parseModelJson(await this.text(record,step,'director',prompt,signal));signal.throwIfAborted();
+    const validatePlan=(output:string)=>{
+      const value=parseModelJson(output);
+      if(!Array.isArray(value.shots)||value.shots.length<1||value.shots.length>12)throw new Error('导演须返回 1–12 个镜头计划');
+      if(!project.shots.length)normalizeStoryboard(value,project);
+      else{const ids=new Set(selected.map(shot=>shot.id)),planned=value.shots.map((shot:Record<string,unknown>)=>String(shot?.shotId??''));if(planned.length!==ids.size||new Set(planned).size!==ids.size||planned.some((id:string)=>!ids.has(id)))throw new Error('导演计划必须保留本轮所有镜头 ID');}
+    };
+    const value=parseModelJson(await this.text(record,step,'director',prompt,signal,undefined,validatePlan));signal.throwIfAborted();
     if(!Array.isArray(value.shots)||value.shots.length<1||value.shots.length>12)throw new Error('导演须返回 1–12 个镜头计划');
     if(!project.shots.length){
       const next=structuredClone(project);next.shots=normalizeStoryboard(value,next);next.shotOrder=next.shots.map(shot=>shot.id);delete next.extensions.graphEdges;next.shots.forEach((shot,index)=>{next.graph.positions[shot.id]=[420+index*340,160];});
@@ -154,7 +211,7 @@ export class WorkflowService {
         const project=record.baseline!,shot=project.shots.find(item=>item.id===plan.shotId)!;
         const current=await this.port.source(record.projectId,plan.shotId);
         const prompt=JSON.stringify({request:plan.prompt,shot,target:project.target,assets:project.assets.filter(asset=>shot.assetIds.includes(asset.id)||shot.referenceIds.includes(asset.id)),current,contract:'输出严格JSON {html,css,js}；JS导出render(ctx)，按ctx.localFrame/time独立求值，使用ctx.params。无外网、Node、IPC。ctx.hasVideo为true时宿主已绘制视频底图，只叠加文字图形，不用不透明全屏背景遮住底图，也不自行启动video播放。所有用户未要求修改的字段保持。'});
-        step.source=parseSceneSource(await this.text(record,step,'scene',prompt,signal));
+        step.source=parseSceneSource(await this.text(record,step,'scene',prompt,signal,undefined,output=>{parseSceneSource(output);}));
       }else{
         let task:MediaTask;
         if(step.taskId){task=await this.media.get(step.taskId);if(!['ready','complete'].includes(task.phase))task=await this.media.retry(step.taskId);}
@@ -174,12 +231,16 @@ export class WorkflowService {
   }
   private async voice(record:StoredWorkflow,plan:ShotPlan,signal:AbortSignal){
     if(!record.request.narration)return;const step=this.step(record,'speech',plan.shotId);if(step.status==='complete')return;
+    const key=createHash('sha256').update(JSON.stringify([step.id,plan.shotId,plan.narration])).digest('hex'),success=await this.success(record,step,key,'speech');
+    if(success){record.assets??={};record.assets[step.id]=[success.asset!];step.assetIds=[success.asset!.id];step.submissionUncertain=false;step.status='complete';step.message='已恢复成功配音回执';await this.persist(record,'speech-complete');return;}
     if(step.submissionUncertain)throw new Error('上次配音提交结果待确认，不能自动重复合成；请检查供应商记录后明确新建制作');
-    this.beginStep(step);step.submissionUncertain=true;await this.persist(record);
-    try{if(!plan.narration.trim())throw Object.assign(new Error('导演未提供该镜头旁白'),{submissionUncertain:false});
-      const asset=await this.port.voice(record.projectId,plan.shotId,plan.narration,signal);
-      record.assets![step.id]=[asset];step.assetIds=[asset.id];step.submissionUncertain=false;step.status='complete';step.message='配音已就绪';await this.persist(record);signal.throwIfAborted();
-    }catch(error){if(!step.assetIds?.length){step.status=signal.aborted?'pending':'failed';step.submissionUncertain=(error as {submissionUncertain?:boolean})?.submissionUncertain!==false;}step.message=message(error);await this.persist(record);throw error;}
+    this.beginStep(step);step.submissionUncertain=true;let submitted=false;
+    try{await this.persist(record,'speech-submission');signal.throwIfAborted();if(!plan.narration.trim())throw Object.assign(new Error('导演未提供该镜头旁白'),{submissionUncertain:false});
+      submitted=true;const asset=await this.port.voice(record.projectId,plan.shotId,plan.narration,signal);
+      record.assets![step.id]=[asset];step.assetIds=[asset.id];step.submissionUncertain=false;step.status='complete';step.message='配音已就绪';this.finishStep(step);
+      await this.saveSuccess(record,step,{version:1,workflowId:record.id,stepId:step.id,key,kind:'speech',asset:structuredClone(asset)});
+      await this.persist(record,'speech-complete');signal.throwIfAborted();
+    }catch(error){if(!step.assetIds?.length){step.status=signal.aborted?'pending':'failed';step.submissionUncertain=submitted&&(error as {submissionUncertain?:boolean})?.submissionUncertain!==false;}step.message=message(error);await this.persist(record);throw error;}
   }
   private async updateUsage(record:StoredWorkflow){
     let total=0,known=true,currency:string|undefined,count=0;
@@ -236,14 +297,14 @@ export class WorkflowService {
     await this.reconcile(record);if(record.committedRevision!==undefined)return;
     const latest=(await this.port.snapshot(record.projectId)).project!;
     if(latest.revision!==expectedRevision||!explicit&&expectedRevision!==record.startRevision)throw Object.assign(new Error('工程版本冲突；候选结果不会覆盖新修改'),{code:'REVISION_CONFLICT'});
-    if(record.candidate?.expectedRevision!==expectedRevision){record.candidate=this.buildCandidate(record,latest,expectedRevision);await this.persist(record);}
+    if(record.candidate?.expectedRevision!==expectedRevision){record.candidate=this.buildCandidate(record,latest,expectedRevision);await this.persist(record,'candidate');}
     const candidate=record.candidate!;
     // Review the exact durable candidate before changing the project head. A restarted
     // review may reuse its receipt only while this candidate and base revision match.
     await this.review(record,signal,candidate);signal.throwIfAborted();
     if((await this.port.snapshot(record.projectId)).project?.revision!==expectedRevision)throw Object.assign(new Error('工程在候选审片期间已变化；请确认采用最新版本后重新审片'),{code:'REVISION_CONFLICT'});
-    const step=this.step(record,'commit');this.beginStep(step);await this.persist(record);
-    const saved=await this.port.commit(record.projectId,expectedRevision,candidate.project,candidate.sources,'采用协作制作结果');record.committedRevision=saved.project!.revision;step.status='complete';step.message='结果已保存为工程 v'+record.committedRevision;await this.persist(record);
+    const step=this.step(record,'commit');this.beginStep(step);await this.persist(record,'before-commit');signal.throwIfAborted();
+    const saved=await this.port.commit(record.projectId,expectedRevision,candidate.project,candidate.sources,'采用协作制作结果');record.committedRevision=saved.project!.revision;step.status='complete';step.message='结果已保存为工程 v'+record.committedRevision;await this.persist(record,'after-commit');
   }
   private async review(record:StoredWorkflow,signal:AbortSignal,candidate?:WorkflowCandidate){if(!record.request.review)return;
     const step=this.step(record,'review'),candidateHash=candidate?createHash('sha256').update(JSON.stringify(candidate)).digest('hex'):undefined;

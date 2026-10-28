@@ -1,0 +1,75 @@
+name: Native and media acceptance
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-media:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Install pinned Electron runtime
+        run: node node_modules/electron/install.js
+      - name: Install Chrome with media codecs and browser dependencies
+        run: node node_modules/playwright-core/cli.js install --with-deps chrome
+      - name: Install Linux media, display and Secret Service
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg xvfb xauth dbus-x11 gnome-keyring libsecret-1-0 libglib2.0-bin fonts-noto-cjk
+      - name: Permit the Electron user-namespace sandbox on the isolated Linux runner
+        if: runner.os == 'Linux'
+        run: |
+          # Ubuntu AppArmor can block sandbox namespaces for the relocated Electron path.
+          # Configure this disposable CI host; never add --no-sandbox to the application.
+          if test -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Install macOS media tools
+        if: runner.os == 'macOS'
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then brew install ffmpeg; fi
+      - name: Install Windows media tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install ffmpeg --no-progress -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - run: npm run typecheck
+      - run: npm run package:app
+      - name: Run Linux native, relocated package and media acceptance
+        if: runner.os == 'Linux'
+        run: dbus-run-session -- bash scripts/ci-linux-acceptance.sh
+      - name: Run macOS and Windows native, relocated package and media acceptance
+        if: runner.os != 'Linux'
+        run: node scripts/run-platform-acceptance.mjs
+      - name: Ensure setup failures have an explicit summary
+        if: always()
+        run: node scripts/ensure-acceptance-summary.mjs
+      - name: Upload only allowlisted acceptance summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-summary-${{ matrix.os }}
+          path: artifacts/platform-acceptance/*.json
+          if-no-files-found: error
+          retention-days: 14

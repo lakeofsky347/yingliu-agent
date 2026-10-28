@@ -24,7 +24,7 @@ test('R2-08: denied mock audio is preflight_failed, never reaches fetch or creat
     const directorModel = await call<{ id: string }>('models.model.save', { connectionId: director.id, model: 'director', parameters: { pricePerMInput: 0, pricePerMOutput: 0 } });
     await call('models.role.bind', { role: 'director', modelId: directorModel.id });
     const music = await call<{ id: string }>('models.connection.save', { name: 'external music', protocol: 'async-task', baseUrl: 'https://provider.invalid/v1', auth: 'none' });
-    const musicModel = await call<{ id: string }>('models.model.save', { connectionId: music.id, model: 'music', outputModalities: ['audio'], parameters: { preset: 'replicate' } });
+    const musicModel = await call<{ id: string }>('models.model.save', { connectionId: music.id, model: 'fixture/music', outputModalities: ['audio'], parameters: { preset: 'replicate' } });
     await call('models.role.bind', { role: 'music', modelId: musicModel.id });
     const project = (await call<StudioSnapshot>('create', { blank: true, title: 'mock submission boundary' })).project!;
     const port = (app.agent as unknown as { port: AgentPort }).port;

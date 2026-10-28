@@ -1,14 +1,20 @@
 import {_electron as electron,type ElectronApplication,type Page} from 'playwright-core';
 import {createServer} from 'node:http';
-import {mkdir,readFile,writeFile,copyFile} from 'node:fs/promises';
+import {mkdir,mkdtemp,readFile,writeFile,copyFile,rm} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {release} from 'node:os';
+import {release,tmpdir} from 'node:os';
+import {inspectNativeSandbox} from './acceptance-sandbox.mjs';
+import {findBrowserExecutable} from '../src/host/tool-environment.ts';
 import assert from 'node:assert/strict';
 import {mockCompletionBody} from '../tests/model-gateway.ts';
 import {defaultSceneSource} from '../src/core/index.ts';
 import type {StudioSnapshot,VideoProject} from '../src/shared/types.ts';
-const root=resolve('.'),out=join(root,'artifacts/acceptance-v03'),data=join(root,'.local/acceptance-v03-'+Date.now());await mkdir(out,{recursive:true});
+const root=resolve('.'),out=resolve(process.env.YINGLIU_ACCEPTANCE_OUTPUT||join(root,'artifacts/acceptance-v03'));
+const data=process.env.YINGLIU_VERIFY_DATA_DIR?resolve(process.env.YINGLIU_VERIFY_DATA_DIR):await mkdtemp(join(tmpdir(),'yingliu-native-acceptance-'));
+if(process.env.YINGLIU_VERIFY_DATA_DIR)await mkdir(data,{recursive:false});
+await mkdir(out,{recursive:true});
+const browserPath=process.env.CHROME_PATH||findBrowserExecutable();assert.ok(browserPath,'原生验收需要真实 Chrome/Chromium，可设置 CHROME_PATH');
 const checks:{name:string;status:string;[key:string]:unknown}[]=[];const record=(name:string,details:Record<string,unknown>={})=>{checks.push({name,status:'PASS',...details});console.log('PASS '+name);};
 const platformName=({darwin:'macOS',win32:'Windows',linux:'Linux'} as Record<string,string>)[process.platform]??process.platform;
 let nativeAcceptance:'PASS'|'FAIL'|'NOT_CHECKED'='NOT_CHECKED',nativeRuntime:Record<string,unknown>|undefined;
@@ -18,8 +24,17 @@ const gateway=createServer(async(req,res)=>{if(req.url==='/v1/models'){res.setHe
   if(failNext){failNext=false;res.writeHead(503,{'Content-Type':'application/json'});res.end(JSON.stringify({error:'Synthetic temporary provider failure'}));return;}
   try{const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));res.setHeader('Content-Type','application/json');res.end(JSON.stringify(mockCompletionBody(body)));}catch(error){res.writeHead(500);res.end(String(error));}
 });await new Promise<void>(accept=>gateway.listen(0,'127.0.0.1',accept));const port=(gateway.address() as {port:number}).port;
-const env:Record<string,string>={...Object.fromEntries(Object.entries(process.env).filter(([,value])=>typeof value==='string')),YINGLIU_DATA_DIR:data};delete env.ELECTRON_RUN_AS_NODE;let native:ElectronApplication|undefined;let page!:Page;
-async function launch(){native=await electron.launch({...(process.env.YINGLIU_VERIFY_EXECUTABLE?{executablePath:process.env.YINGLIU_VERIFY_EXECUTABLE,args:[]}:{args:[process.env.YINGLIU_VERIFY_APP||root]}),env,timeout:45000});nativeRuntime=await native.evaluate(({safeStorage})=>({platform:process.platform,architecture:process.arch,electron:process.versions.electron,credentialBackend:process.platform==='linux'?safeStorage.getSelectedStorageBackend():process.platform==='darwin'?'macos_keychain':'windows_dpapi',encryptionAvailable:safeStorage.isEncryptionAvailable()}));page=await native.firstWindow();await page.getByRole('heading',{name:'我的影片',exact:false}).waitFor();}
+const env:Record<string,string>={...Object.fromEntries(Object.entries(process.env).filter(([,value])=>typeof value==='string')),YINGLIU_DATA_DIR:data,YINGLIU_PROJECTS:join(data,'projects')};delete env.ELECTRON_RUN_AS_NODE;let native:ElectronApplication|undefined;let page!:Page;
+async function launch(){
+  const extraArgs=process.platform==='linux'&&process.env.YINGLIU_VERIFY_PASSWORD_STORE==='gnome-libsecret'?['--password-store=gnome-libsecret']:[];
+  native=await electron.launch({chromiumSandbox:true,...(process.env.YINGLIU_VERIFY_EXECUTABLE?{executablePath:process.env.YINGLIU_VERIFY_EXECUTABLE,args:extraArgs}:{args:[process.env.YINGLIU_VERIFY_APP||root,...extraArgs]}),env,timeout:45000});
+  nativeRuntime=await native.evaluate(({safeStorage})=>({platform:process.platform,architecture:process.arch,electron:process.versions.electron,credentialBackend:process.platform==='linux'?safeStorage.getSelectedStorageBackend():process.platform==='darwin'?'macos_keychain':'windows_dpapi',encryptionAvailable:safeStorage.isEncryptionAvailable()}));
+  assert.equal(nativeRuntime.encryptionAvailable,true,'系统安全存储不可用，不能视为原生凭据验收通过');
+  if(process.platform==='linux')assert.ok(['gnome_libsecret','kwallet','kwallet5','kwallet6'].includes(String(nativeRuntime.credentialBackend)),'Linux 必须使用真实系统钥匙环，basic_text 不算通过');
+  page=await native.firstWindow();await page.getByRole('heading',{name:'我的影片',exact:false}).waitFor();
+  Object.assign(nativeRuntime,await inspectNativeSandbox(native));assert.equal(nativeRuntime.sandboxEnabled,true,'原生验收需要 renderer 的 OS sandbox 证据，且不能包含 no-sandbox 启动参数');
+  await call('environment',{browserPath});
+}
 async function capture(name:string){const png=await native!.evaluate(async({BrowserWindow})=>{const image=await BrowserWindow.getAllWindows()[0]!.webContents.capturePage();if(image.isEmpty())throw new Error('原生窗口截图为空');return image.toPNG().toString('base64');});await writeFile(join(out,name),Buffer.from(png,'base64'));}
 async function call<T=StudioSnapshot>(endpoint:string='current',payload:unknown={}):Promise<T>{const result=await page.evaluate(async({endpoint,payload})=>window.yingliu!.call(endpoint,payload),{endpoint,payload});if(!result.ok)throw new Error(result.error.message);return result.value as T;}
 async function settled(snapshot:StudioSnapshot){const start=Date.now();while(snapshot.task?.status==='running'){if(Date.now()-start>240000)throw new Error('render timeout');await new Promise(accept=>setTimeout(accept,350));snapshot=await call('current',{projectId:snapshot.project!.id});}assert.equal(snapshot.task?.status,'complete',snapshot.task?.message);return snapshot;}
@@ -27,7 +42,10 @@ async function until(check:()=>Promise<boolean>,timeout=15000){const start=Date.
 async function create(title:string,ai=false){await page.getByRole('button',{name:'新建影片',exact:true}).first().click();await page.getByRole('textbox',{name:'影片名称',exact:true}).fill(title);await page.getByRole('textbox',{name:'主题与创作简报',exact:true}).fill('海边散步，关于观察、停留与重新出发的短片');await page.getByRole('spinbutton',{name:'目标片长（秒）',exact:true}).fill('6');if(ai)await page.getByRole('button',{name:'让模型构建初稿',exact:false}).click();await page.getByRole('button',{name:ai?'创建并生成初稿':'创建空白影片',exact:true}).click();await page.locator('.vs-studio').waitFor();if(ai)await until(async()=>{const history=await call<{turns:{status:string}[]}>('chat.history',{projectId:(await call()).project!.id});return history.turns.at(-1)?.status==='succeeded';},120000);}
 async function home(){await page.getByRole('button',{name:'项目首页',exact:true}).click();await page.getByRole('heading',{name:'我的影片',exact:false}).waitFor();}
 try{
-  await launch();record('first launch enters project library without demo project');assert.equal((await call<{projects:unknown[]}>('list')).projects.length,0);assert.equal((await call<{hasKey:boolean;mode:string}>('providers.get')).hasKey,false);
+  await launch();
+  const competingCli=spawnSync(process.execPath,[join(root,'bin/yingliu.mjs'),'project','list','--json','--lock-timeout','0'],{cwd:root,env,encoding:'utf8',timeout:15000,windowsHide:true});
+  assert.equal(competingCli.status,9,'桌面持有数据目录时，当前 CLI 应以 BUSY 退出');const cliLines=competingCli.stdout.trim().split(/\r?\n/);assert.equal(cliLines.length,1);const deniedCli=JSON.parse(cliLines[0]!);assert.equal(deniedCli.ok,false);assert.equal(deniedCli.error.code,'BUSY');record('current built CLI and relocated desktop share owner lease (BUSY, one JSON line)');
+  record('first launch enters project library without demo project');assert.equal((await call<{projects:unknown[]}>('list')).projects.length,0);assert.equal((await call<{hasKey:boolean;mode:string}>('providers.get')).hasKey,false);
   assert.deepEqual(await page.evaluate(()=>({node:typeof require,process:typeof process,bridge:typeof window.yingliu!.call})),{node:'undefined',process:'undefined',bridge:'function'});record('editor sandbox and narrow native bridge');
   await capture('01-library.png');
   await create('手动影片');let snapshot=await call(),manual=snapshot.project!;assert.equal(manual.shots.length,0);assert.equal(manual.targetDuration,6);assert.ok(manual.extensions.brief);assert.equal(requests,0);
@@ -62,4 +80,4 @@ try{
   await call('providers.save',{apiKey:''});record('synthetic key removed after acceptance');
   nativeAcceptance='PASS';console.log(JSON.stringify({passed:checks.length,report:join(out,'verification.json')}));
 }catch(error){nativeAcceptance='FAIL';checks.push({name:'native acceptance execution',status:'FAIL',message:error instanceof Error?error.message:String(error)});throw error;}
-finally{await native?.close();await new Promise<void>((accept,reject)=>gateway.close(error=>error?reject(error):accept()));await writeFile(join(out,'verification.json'),JSON.stringify({application:'映流智能体',version:'0.5.0',checkedAt:new Date().toISOString(),nativeAcceptance,checks,modelProtocol:'actual localhost HTTP gateway with deterministic test responder',realProvider:'NOT_CHECKED',humanFullViewing:'NOT_CHECKED',platform:platformName+' '+process.arch,platformId:process.platform,architecture:process.arch,osRelease:release(),nativeRuntime,screenCapture:'native Electron viewport bitmap',packagedExecutable:process.env.YINGLIU_VERIFY_EXECUTABLE??null,dataDirectory:data,requests},null,2)+'\n');}
+finally{await native?.close().catch(()=>{});gateway.closeAllConnections();await new Promise<void>((accept,reject)=>gateway.close(error=>error?reject(error):accept()));await rm(data,{recursive:true,force:true,maxRetries:5,retryDelay:200});await writeFile(join(out,'verification.json'),JSON.stringify({application:'映流智能体',version:'0.5.0',checkedAt:new Date().toISOString(),nativeAcceptance,checks,modelProtocol:'actual localhost HTTP gateway with deterministic test responder',realProvider:'NOT_CHECKED',humanFullViewing:'NOT_CHECKED',platform:platformName+' '+process.arch,platformId:process.platform,architecture:process.arch,osRelease:release(),nativeRuntime,screenCapture:'native Electron viewport bitmap',packagedExecutable:process.env.YINGLIU_VERIFY_EXECUTABLE??null,temporaryDataRemoved:true,requests},null,2)+'\n');}

@@ -26,7 +26,8 @@ export async function startTemplateGateway(options: { pollsBeforeDone?: number; 
       return json(200, { output: { task_id: id, task_status: 'SUCCEEDED', ...(isImage ? { results: [{ url: base + '/files/image.png' }] } : { video_url: base + '/files/video.mp4' }) }, usage: { video_count: 1 } });
     }
     // Replicate style (any modality: here audio/music)
-    if (req.method === 'POST' && /^\/v1\/models\/.+\/predictions$/.test(url.pathname)) { const id = 'rp-' + (++next); return json(201, { id, status: 'starting' }); }
+    if (req.method === 'POST' && /^\/v1\/models\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/predictions$/.test(url.pathname)) { const id = 'rp-' + (++next); return json(201, { id, status: 'starting' }); }
+    if (req.method === 'POST' && url.pathname === '/v1/predictions' && typeof (body as {version?:unknown})?.version === 'string') { const id = 'rp-' + (++next); return json(201, { id, status: 'starting' }); }
     if (req.method === 'GET' && url.pathname.startsWith('/v1/predictions/')) { const id = url.pathname.split('/').pop()!; return done(id) ? json(200, { id, status: 'succeeded', output: base + '/files/music.mp3' }) : json(200, { id, status: 'processing' }); }
     if (req.method === 'POST' && /^\/v1\/predictions\/.+\/cancel$/.test(url.pathname)) return json(200, { status: 'canceled' });
     // Kling style

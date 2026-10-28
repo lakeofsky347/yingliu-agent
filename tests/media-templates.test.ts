@@ -92,7 +92,7 @@ test('failed remote status surfaces; binary audio and Replicate-style polling wo
   assert.ok(!('kind' in job)); assert.equal(job.status, 'queued');
   for (let i = 0; i < 5 && job.status !== 'succeeded'; i++) job = await pollTemplate(context, music, job.jobId, 'audio');
   assert.equal(job.status, 'succeeded'); assert.equal(job.artifacts?.[0].mimeType, 'audio/mpeg');
-  assert.equal(f.gateway.requests.find(r => r.path === '/v1/models/meta%2Fmusicgen/predictions')?.method, 'POST');
+  assert.equal(f.gateway.requests.find(r => r.path === '/v1/models/meta/musicgen/predictions')?.method, 'POST');
   const before = f.gateway.requests.length;
   assert.equal((await checkTemplate({ connection: rp, key: 'r8', signal: AbortSignal.timeout(5000) }, { ...music, parameters: { preset: 'replicate', checkPath: '/denied/' } })).ok, false);
   assert.ok(f.gateway.requests.slice(before).every(r => r.method === 'GET'));

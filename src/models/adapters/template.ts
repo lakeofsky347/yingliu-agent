@@ -36,6 +36,11 @@ export function templateOutput(parameters: Record<string, unknown>): 'image' | '
 export interface TemplateVars { prompt: string; model: string; clientRequestId: string; image?: string; duration?: number; parameters: Record<string, unknown>; id?: string }
 function lookupVar(vars: TemplateVars, name: string): unknown {
   if (name.startsWith('param.')) return vars.parameters[name.slice(6)];
+  if (name === 'modelOwner' || name === 'modelName') {
+    const parts = vars.model.split('/');
+    if (parts.length !== 2 || parts.some(part => !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(part))) throw new Error('此模型模板需要 owner/name；社区模型请选择 Replicate 指定版本模板并填写版本标识');
+    return parts[name === 'modelOwner' ? 0 : 1];
+  }
   return ({ prompt: vars.prompt, model: vars.model, clientRequestId: vars.clientRequestId, image: vars.image, duration: vars.duration, id: vars.id } as Record<string, unknown>)[name];
 }
 function token(vars: TemplateVars, expression: string): unknown {

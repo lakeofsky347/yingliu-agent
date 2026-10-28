@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createProject, defaultSceneSource } from '../src/core/index.ts';
@@ -10,6 +10,10 @@ import { RunStore } from '../src/agent/run-store.ts';
 import { toolGateway } from './model-gateway.ts';
 
 const model = async () => ({ parameters: {}, vision: false, config: { baseUrl: 'http://gateway.test/v1', model: 'mock', timeoutMs: 1000, maxTokens: 1000, supportsTools: true } });
+// Director calls now also have ledger entries. Preserve that prior history and
+// break the path only after the paid tool returns, rather than failing inside the tool fixture.
+async function breakLedger(directory:string){await rename(join(directory,'ledger'),join(directory,'ledger-fixture-backup'));await writeFile(join(directory,'ledger'),'ledger path unavailable');}
+async function repairLedger(directory:string){await rm(join(directory,'ledger'));await rename(join(directory,'ledger-fixture-backup'),join(directory,'ledger'));}
 async function settle(service: AgentService, id: string, states: PublicRun['status'][]) {
   for (let i = 0; i < 500; i++) { const run = await service.get(id); if (states.includes(run.status)) return run; await new Promise(resolve => setTimeout(resolve, 10)); }
   throw new Error('run did not settle: ' + (await service.get(id)).status);
@@ -29,7 +33,7 @@ for (const fault of ['ledger', 'trace', 'run-save'] as const) for (const restart
       generateAudio: async () => {
         accepted++;
         const store = (service as unknown as { store: RunStore }).store;
-        if (fault === 'ledger') await writeFile(join(directory, 'ledger'), 'ledger path unavailable');
+        if (fault === 'ledger') await breakLedger(directory);
         if (fault === 'trace') {
           const trace = store.trace.bind(store);
           store.trace = async (id, event) => { if (!failedOnce && event.event === 'step.finish' && (event.step as { kind?: string })?.kind === 'tool') { failedOnce = true; throw new Error('injected trace ENOSPC'); } return trace(id, event); };
@@ -49,7 +53,7 @@ for (const fault of ['ledger', 'trace', 'run-save'] as const) for (const restart
       const receipts = await readdir(join(directory, started.id + '.results')); assert.equal(receipts.length, 1, 'success is independently durable');
       const receipt = JSON.parse(await readFile(join(directory, started.id + '.results', receipts[0]), 'utf8'));
       assert.equal(receipt.result.cost, 1.25);
-      if (fault === 'ledger') await rm(join(directory, 'ledger'));
+      if (fault === 'ledger') await repairLedger(directory);
       if (restart) { await service.dispose(); service = new AgentService(directory, port, { resolveModel: model, fetch: gateway.fetch }); }
       await service.resume(started.id);
       const done = await settle(service, started.id, ['complete', 'failed', 'awaiting_approval']);
@@ -69,14 +73,14 @@ test('R2-01: cancel keeps a known successful receipt until failed local settleme
   const directory = await mkdtemp(join(tmpdir(), 'yingliu-success-cancel-')); let accepted = 0;
   const project = { ...createProject('cancel settlement'), id: 'project-cancel' };
   const gateway = toolGateway((_body, turn) => turn === 0 ? { toolCalls: [{ name: 'generate_music', arguments: { prompt: 'music' } }] } : { text: 'done' });
-  const port = { snapshot: async () => ({ project }), capabilities: async () => ({ roles: ['music'] }), generateAudio: async () => { accepted++; await writeFile(join(directory, 'ledger'), 'ledger unavailable'); return { id: 'one-asset', name: 'music', cost: 2 }; } } as unknown as AgentPort;
+  const port = { snapshot: async () => ({ project }), capabilities: async () => ({ roles: ['music'] }), generateAudio: async () => { accepted++; await breakLedger(directory); return { id: 'one-asset', name: 'music', cost: 2 }; } } as unknown as AgentPort;
   const service = new AgentService(directory, port, { resolveModel: model, fetch: gateway.fetch });
   try {
     const started = await service.start({ projectId: project.id, goal: 'music', autoApprove: ['read', 'cost'] });
     assert.equal((await settle(service, started.id, ['failed', 'complete'])).status, 'failed');
     const refused = await service.cancel(started.id); assert.equal(refused.status, 'failed'); assert.equal(refused.queue.length, 1);
     assert.equal((await readdir(join(directory, started.id + '.results'))).length, 1);
-    await rm(join(directory, 'ledger'));
+    await repairLedger(directory);
     const cancelled = await service.cancel(started.id); assert.equal(cancelled.status, 'cancelled'); assert.equal(cancelled.queue.length, 0);
     assert.equal(accepted, 1); assert.equal((await service.ledger(project.id)).spent, 2); assert.equal(gateway.requests.length, 1);
     assert.equal((await readdir(join(directory, started.id + '.results'))).length, 0);
@@ -113,13 +117,13 @@ test('R2-01b: a success receipt that matches no queued call is settled as uncert
     saveSource: async () => ({ project }) as any, commit: async () => ({ project }) as any,
     route: async () => ({ ok: true, value: {} }), capture: async () => ({ bytes: new Uint8Array(), mime: 'image/png', frame: 0, shotId: '' }),
     capabilities: async () => ({ roles: ['music'] }),
-    generateAudio: async () => { accepted++; await writeFile(join(directory, 'ledger'), 'ledger path unavailable'); return { id: 'audio-once', name: 'music', cost: 1.25 }; },
+    generateAudio: async () => { accepted++; await breakLedger(directory); return { id: 'audio-once', name: 'music', cost: 1.25 }; },
   };
   service = new AgentService(directory, port, { resolveModel: model, fetch: gateway.fetch });
   try {
     const started = await service.start({ projectId: project.id, goal: 'music', autoApprove: ['read', 'write', 'cost'] });
     assert.equal((await settle(service, started.id, ['failed', 'complete'])).status, 'failed');
-    await rm(join(directory, 'ledger'));
+    await repairLedger(directory);
     await service.dispose(); // wait for the failed loop's last snapshot write before editing it
     // Simulate a snapshot that lost its queue entry (e.g. hand-edited or older format) while the success receipt survived.
     const runFile = join(directory, started.id + '.json'); const snapshot = JSON.parse(await readFile(runFile, 'utf8'));

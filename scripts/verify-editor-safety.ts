@@ -13,7 +13,7 @@ import type { PublicRun } from '../src/agent/contracts.ts';
 import type { RpcResult, StudioSnapshot } from '../src/shared/types.ts';
 
 const workspace=resolve('.'),temporary=await mkdtemp(join(tmpdir(),'yingliu-editor-safety-'));
-const output=join(workspace,'artifacts/acceptance-editor-safety'),ui=join(temporary,'ui');await mkdir(output,{recursive:true});await mkdir(ui);
+const output=resolve(process.env.YINGLIU_ACCEPTANCE_OUTPUT||join(workspace,'artifacts/acceptance-editor-safety')),ui=join(temporary,'ui');await mkdir(output,{recursive:true});await mkdir(ui);
 const checks:string[]=[],pageErrors:string[]=[],agentRequests:{endpoint:string;payload:Record<string,unknown>}[]=[];
 let browser:Browser|undefined,application:Awaited<ReturnType<typeof createApplication>>|undefined,server:Awaited<ReturnType<typeof startUiServer>>|undefined;
 let failSaves=false,storyReads=0,releaseBudget:(()=>void)|undefined,delayBudget=false;
