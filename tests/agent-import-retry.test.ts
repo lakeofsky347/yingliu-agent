@@ -3,15 +3,17 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import type { AgentPort } from '../src/agent/contracts.ts';
 import type { StudioSnapshot } from '../src/shared/types.ts';
 import { createApplication, MemorySecrets } from '../src/app/application.ts';
 
+const hasFfprobe = (() => { try { execFileSync('ffprobe', ['-version'], { stdio: 'ignore' }); return true; } catch { return false; } })();
 // 1x1 PNG
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 
 for (const kind of ['image', 'audio'] as const) {
-  test(`agent ${kind} import retries once the project moved on between reading the revision and importing`, async () => {
+  test(`agent ${kind} import retries once the project moved on between reading the revision and importing`, { skip: kind === 'audio' && !hasFfprobe && 'ffprobe 不可用（音频导入需要探测时长）' }, async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agent-import-retry-'));
     const app = await createApplication({ dataDirectory: directory, credentials: new MemorySecrets() });
     try {
