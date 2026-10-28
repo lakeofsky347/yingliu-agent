@@ -24,6 +24,7 @@
     "verify": "node --import tsx scripts/verify-app.ts",
     "verify:models": "node --import tsx scripts/verify-model-ui.ts",
     "verify:film": "node --import tsx scripts/verify-multimodal-film.ts",
+    "verify:editor": "node --import tsx scripts/verify-editor-safety.ts",
     "cli": "node bin/yingliu.mjs",
     "setup:cli": "bash scripts/setup-cli.sh"
   },
@@ -32,13 +33,14 @@
     "fflate": "0.8.3",
     "playwright-core": "1.63.0",
     "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react-dom": "18.3.1",
+    "undici": "7.30.1"
   },
   "devDependencies": {
     "@types/node": "22.20.0",
     "@types/react": "18.3.31",
     "@types/react-dom": "18.3.7",
-    "electron": "44.5.1",
+    "electron": "44.9.3",
     "esbuild": "0.28.2",
     "tsx": "4.22.4",
     "typescript": "6.0.3"

@@ -1,3 +1,4 @@
+import { fetch } from '../host/http.ts';
 import { randomUUID } from 'node:crypto';
 import type { AgentMessage, AgentTool, ModelTurn, ToolCall } from './contracts.ts';
 

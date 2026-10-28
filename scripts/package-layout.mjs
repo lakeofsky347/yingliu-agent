@@ -60,7 +60,7 @@ export function electronRuntime(executable) {
 export async function copyApplication(root, appRoot) {
   await mkdir(join(appRoot, 'node_modules'), { recursive: true });
   for (const directory of ['dist', 'licenses']) await cp(join(root, directory), join(appRoot, directory), { recursive: true, verbatimSymlinks: true });
-  for (const dependency of ['playwright-core', 'fflate']) await cp(join(root, 'node_modules', dependency), join(appRoot, 'node_modules', dependency), { recursive: true, verbatimSymlinks: true });
+  for (const dependency of ['playwright-core', 'fflate', 'undici']) await cp(join(root, 'node_modules', dependency), join(appRoot, 'node_modules', dependency), { recursive: true, verbatimSymlinks: true });
   for (const file of ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md']) await cp(join(root, file), join(appRoot, file));
   const info = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   await writeFile(join(appRoot, 'package.json'), JSON.stringify({ name: info.name, productName: info.productName, version: info.version, main: info.main, license: info.license }, null, 2) + '\n');

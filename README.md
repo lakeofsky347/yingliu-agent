@@ -17,6 +17,8 @@
 
 智能体设计见 [docs/AGENT.md](docs/AGENT.md)，0.5 方案见 [docs/ROADMAP-0.5.md](docs/ROADMAP-0.5.md)。以下为沿用自工作台的通用说明。
 
+2026-10-27 的本地与远端核对、缺陷清单、逐项施工和本轮验收见 [工作区施工计划](docs/DEVELOPMENT-PLAN-2026-10-27.md)。本轮以 `main@5ff743e` 为基线，完善同工程智能体互斥、项目预算执行边界、角色与预算草稿保护、素材/音轨版本检查，以及同步媒体产物恢复。
+
 
 映流是一个本地视频创作应用。先填写影片简报，再与自己的模型讨论、构建初稿；也可以从空白节点图开始，亲手安排镜头、画面和声音。现在还可分别连接文本、生图、生视频和配音模型，在同一工程中混合代码场景与视频片段，随后预览、导出 MP4、备份和继续编辑。
 
@@ -93,17 +95,22 @@ Windows/Linux 请移动或分发完整目录。应用包不包含工作区用户
 npm run typecheck
 npm test
 npm run build
+npm run verify:editor
 npm run verify
 npm run package:app
 node scripts/verify-package.mjs
 node scripts/verify-package.mjs --layout-only
 ```
 
-`verify` 使用隔离数据目录和实际 localhost 模型测试网关，操作真实 Electron 界面、检查工程流转，实际捕帧、编码、完整解码并播放六秒带合成验收音的 MP4。它不请求付费供应商，不代表真实 DeepSeek 创作质量或 TTS 质量。结果在 `artifacts/acceptance-v03/`；源码、测试和脱敏验收摘要提交远端，凭据、项目、日志和大型媒体不提交。
+`verify` 使用隔离数据目录和实际 localhost 模型测试网关，操作真实 Electron 界面、检查工程流转，实际捕帧、编码、完整解码并播放六秒带合成验收音的 MP4。它不请求付费供应商，不代表真实 DeepSeek 创作质量或 TTS 质量。 设置 `YINGLIU_VERIFY_EXECUTABLE` 为搬迁后的应用可执行文件绝对路径时，会直接启动该打包应用并执行同一套成片验收。结果在 `artifacts/acceptance-v03/`；源码、测试和脱敏验收摘要提交远端，凭据、项目、日志和大型媒体不提交。
+
+`verify:editor` 使用真实 Chromium、临时工程和智能体回执 fixture，检查角色/预算草稿、跨工程隔离、关闭保护、保存失败及智能体执行入口。报告和截图保存在 `artifacts/acceptance-editor-safety/`；它不调用模型，也不替代原生 Electron 或真实供应商验收。
 
 `verify-package` 将本机包复制到源码目录之外，检查平台入口、相对软链接、许可证和完整依赖，再用包内 Electron 的 Node 模式启动独立服务，验证界面文件、工程创建及 ZIP 备份恢复。有图形环境时继续验证真实桌面界面与渲染；`--layout-only` 或 Linux 缺少显示服务时明确记为 `SKIP`，报告为 `PARTIAL`，不会视作桌面验收。结果保存在 `artifacts/acceptance-v03/package-verification-<platform>-<arch>.json`；临时目录和测试数据验证后清理。
 
-已有 macOS arm64 本机原生验收，签名仍为临时签名、尚未公证。本轮增加 Windows/Linux 可携带目录打包，尚未签名或制作安装器；Linux 包已完成布局和包外服务验证，三个系统的新改动仍需原生及跨机器验收。三系统 CI 已在 GitHub Actions 远端运行（Platform checks）：2026-10-22 的 main 提交上 Linux、Windows 通过，macOS 因测试按字面比较临时目录路径（`/var` 与 `/private/var`）失败；测试已改为比较真实路径，以最新一次运行结果为准。Chrome/FFmpeg 由用户提供。Linux 无安全钥匙环时不保存新密钥，仍可手动制作和清除旧密钥。本轮多模型和视频素材功能的本地协议／媒体测试不等同真实供应商质量验收，也不延伸历史记录中的平台验收结论。没有云端成片渲染、多人实时编辑或通用节点市场。
+Electron 固定为 `44.9.3`。其内置 Undici 仍为 `7.29.1`，存在 [异常 Content-Encoding 导致进程退出的问题](https://github.com/nodejs/undici/security/advisories/GHSA-xjj6-f33q-929c)。应用的 Node 请求通过 `src/host/http.ts` 安装固定生产依赖 `undici@7.30.1` 的 Fetch API，覆盖桌面、CLI、开发服务的模型、媒体、配音与下载路径；运行包同时包含该依赖和许可证。此措施修复应用请求路径，未改写 Electron 二进制中的内置版本。渲染器继续使用 Chromium Fetch API，CLI `--mock` 的禁止外网规则继续生效。`tests/undici-security.test.ts` 在隔离进程验证异常响应、取消、SRI 校验、模拟模式和实际 Electron 运行时；CI 在测试前显式准备 Electron，避免原生回归因未安装二进制而跳过。
+
+已有 macOS arm64 本机原生验收，签名仍为临时签名、尚未公证。Windows/Linux 使用可携带目录打包，尚未签名或制作安装器；Linux 包已有布局和包外服务验证，各系统的原生及跨机器验收仍按具体版本记录。截至 2026-10-27 核对，主线 `5ff743e` 的 [Platform checks 40169024170](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40169024170) 在 macOS、Windows、Ubuntu 均成功；该历史结果不替代后续提交的验证。Chrome/FFmpeg 由用户提供。Linux 无安全钥匙环时不保存新密钥，仍可手动制作和清除旧密钥。本地协议／媒体测试不等同真实供应商质量验收，也不延伸历史记录中的平台验收结论。没有云端成片渲染、多人实时编辑或通用节点市场。
 
 本仓库自有代码及随仓提供的用户自有工作包数据采用 [GNU GPL 第 3 版](LICENSE)，仅限第 3 版（SPDX：`GPL-3.0-only`）。版权和来源说明见 [NOTICE](NOTICE)；历史 Apache-2.0 与 MIT 许可全文分别保留在 [licenses/Legacy-Apache-2.0.txt](licenses/Legacy-Apache-2.0.txt) 和 [licenses/Legacy-MIT.txt](licenses/Legacy-MIT.txt)。第三方组件继续适用各自的许可，详见[第三方声明](THIRD_PARTY_NOTICES.md)。
 

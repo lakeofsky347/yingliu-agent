@@ -1,3 +1,4 @@
+import { fetch } from '../host/http.ts';
 import { resolve } from 'node:path';
 import { AppBackend } from './backend.ts';
 import { ProviderManager } from './model.ts';
@@ -94,8 +95,8 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
       let director:string|undefined;try{director=(await providers.registry.resolve('director')).model.name;}catch{}
       return {roles,models,...(director?{director}:{})};
     },
-    importImage:async(id,name,bytes,mime)=>{if(!/^image\/(png|jpeg|webp)$/.test(mime))throw new Error('不支持的图片格式');const snapshot=await backend.call('import',{projectId:id,name,description:'智能体截取的尾帧',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error('图片导入失败');return {id:asset.id,name:asset.name};},
-    importAudio:async(id,name,bytes,mime)=>{const snapshot=await backend.call('import',{projectId:id,name,description:'智能体本地合成',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error('音频导入失败');return {id:asset.id,name:asset.name};},
+    importImage:async(id,name,bytes,mime)=>{if(!/^image\/(png|jpeg|webp)$/.test(mime))throw new Error('不支持的图片格式');const current=await backend.call('current',{projectId:id});const snapshot=await backend.call('import',{projectId:id,expectedRevision:current.project?.revision,name,description:'智能体截取的尾帧',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error('图片导入失败');return {id:asset.id,name:asset.name};},
+    importAudio:async(id,name,bytes,mime)=>{const current=await backend.call('current',{projectId:id});const snapshot=await backend.call('import',{projectId:id,expectedRevision:current.project?.revision,name,description:'智能体本地合成',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error('音频导入失败');return {id:asset.id,name:asset.name};},
     generateAudio:async(id,role,prompt,{durationSeconds,signal,shotId})=>{
       const resolved=await providers.registry.resolve(role);
       if(role==='speech'&&resolved.connection.protocol==='speech'){const project=(await backend.call('current',{projectId:id})).project;const shot=shotId??project?.shotOrder[0];if(!shot||!project?.shots.some(item=>item.id===shot))throw new Error('配音目标镜头不存在');const asset=await agentVoice(id,shot,prompt,signal,{});return {id:asset.id,name:asset.name,cost:null};}
@@ -143,7 +144,8 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         let lastError:unknown;
         for(let attempt=0;attempt<3;attempt++){
           try{
-            const snapshot=await backend.call('import',{projectId:id,name:(role==='music'?'音乐 · ':role==='sfx'?'音效 · ':'配音 · ')+prompt.slice(0,24),description:'由 '+resolved.model.name+' 生成',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});
+            const current=await backend.call('current',{projectId:id});
+            const snapshot=await backend.call('import',{projectId:id,expectedRevision:current.project?.revision,name:(role==='music'?'音乐 · ':role==='sfx'?'音效 · ':'配音 · ')+prompt.slice(0,24),description:'由 '+resolved.model.name+' 生成',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});
             const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error('音频导入失败');
             await dropReceipt().catch(()=>{});return {id:asset.id,name:asset.name,cost};
           }catch(error){lastError=error;if(signal.aborted)break;await new Promise(r=>setTimeout(r,50*(attempt+1)));}

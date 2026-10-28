@@ -75,6 +75,7 @@ function sleep(ms: number, signal: AbortSignal) { return new Promise<void>((reso
 export class AgentService {
   private runs = new Map<string, AgentRun>();
   private active = new Map<string, { controller: AbortController; promise: Promise<void> }>();
+  private projectCommands = new Map<string, Promise<void>>();
   private listeners = new Set<(event: AgentEvent) => void>();
   private store: RunStore; private tools: AgentTool[]; private initialized?: Promise<void>; private stopped = false;
   private imageBuffer = new Map<string, AgentContent[]>();
@@ -208,25 +209,45 @@ export class AgentService {
   async get(id: string) { return this.public(await this.required(id)); }
   async trace(id: string) { await this.required(id); return this.store.readTrace(id); }
 
+  /** Serialize lifecycle changes only within one project; snapshot I/O must not leave an activation race. */
+  private projectCommand<T>(projectId: string, work: () => Promise<T>): Promise<T> {
+    const next = (this.projectCommands.get(projectId) ?? Promise.resolve()).then(() => {
+      this.requireOpen(); return work();
+    });
+    const drained = next.then(() => {}, () => {});
+    this.projectCommands.set(projectId, drained);
+    void drained.then(() => { if (this.projectCommands.get(projectId) === drained) this.projectCommands.delete(projectId); });
+    return next;
+  }
+  private requireOpen() { if (this.stopped) throw new Error('智能体服务正在关闭'); }
+  private async requireProjectAvailable(projectId: string, exceptId?: string) {
+    // Terminal/paused status is published just before the loop returns; drain that final save instead of reporting a false conflict.
+    await Promise.all([...this.runs.values()].filter(run => run.id !== exceptId && run.projectId === projectId && (TERMINAL.has(run.status) || run.status === 'paused')).map(run => this.settled(run.id)));
+    if ([...this.runs.values()].some(run => run.id !== exceptId && run.projectId === projectId && (this.active.has(run.id) || !TERMINAL.has(run.status) && run.status !== 'paused'))) throw new Error('该工程已有进行中的智能体运行，请先完成、暂停或取消');
+  }
+
   async start(input: AgentStartInput): Promise<PublicRun> {
-    await this.initialize(); if (this.stopped) throw new Error('智能体服务正在关闭');
+    await this.initialize(); this.requireOpen();
     if (typeof input.projectId !== 'string' || !input.projectId) throw new Error('缺少工程');
     const goal = String(input.goal ?? '').trim(); if (!goal || goal.length > 8000) throw new Error('目标须为 1–8000 字');
-    if ([...this.runs.values()].some(run => run.projectId === input.projectId && !TERMINAL.has(run.status) && run.status !== 'paused')) throw new Error('该工程已有进行中的智能体运行，请先完成、暂停或取消');
-    const snapshot = await this.port.snapshot(input.projectId);
-    if (!snapshot.project || snapshot.project.id !== input.projectId) throw new Error('工程不存在或未打开');
-    const budget = budgetFrom(input.budget), autoApprove = (input.autoApprove ?? DEFAULT_AUTO).filter(risk => ['read', 'write', 'plan', 'cost', 'export'].includes(risk));
-    if (!autoApprove.includes('read')) autoApprove.push('read');
-    const run: AgentRun = {
-      version: 1, id: randomUUID(), projectId: input.projectId, goal, status: 'running', message: '智能体正在规划', createdAt: now(), updatedAt: now(),
-      model: {}, budget, usage: emptyUsage(budget.currency), policy: { autoApprove },
-      messages: [{ role: 'user', content: `目标：${goal}\n\n当前工程摘要：${JSON.stringify(summarizeProject(snapshot.project))}` }],
-      steps: [], queue: [], approvedCallIds: [], reviewRounds: 0,
-    };
-    (run as AgentRun & { maxReviewRounds?: number }).maxReviewRounds = Number.isSafeInteger(input.maxReviewRounds) ? Math.max(0, Math.min(5, input.maxReviewRounds!)) : this.options.maxReviewRounds ?? 2;
-    (run as AgentRun & { allowImages?: boolean }).allowImages = input.allowImages === true;
-    this.runs.set(run.id, run); await this.store.trace(run.id, { event: 'run.start', goal, budget, autoApprove }); await this.save(run);
-    this.launch(run); return this.public(run);
+    return this.projectCommand(input.projectId, async () => {
+      await this.requireProjectAvailable(input.projectId);
+      const snapshot = await this.port.snapshot(input.projectId);
+      this.requireOpen();
+      if (!snapshot.project || snapshot.project.id !== input.projectId) throw new Error('工程不存在或未打开');
+      const budget = budgetFrom(input.budget), autoApprove = (input.autoApprove ?? DEFAULT_AUTO).filter(risk => ['read', 'write', 'plan', 'cost', 'export'].includes(risk));
+      if (!autoApprove.includes('read')) autoApprove.push('read');
+      const run: AgentRun = {
+        version: 1, id: randomUUID(), projectId: input.projectId, goal, status: 'running', message: '智能体正在规划', createdAt: now(), updatedAt: now(),
+        model: {}, budget, usage: emptyUsage(budget.currency), policy: { autoApprove },
+        messages: [{ role: 'user', content: `目标：${goal}\n\n当前工程摘要：${JSON.stringify(summarizeProject(snapshot.project))}` }],
+        steps: [], queue: [], approvedCallIds: [], reviewRounds: 0,
+      };
+      (run as AgentRun & { maxReviewRounds?: number }).maxReviewRounds = Number.isSafeInteger(input.maxReviewRounds) ? Math.max(0, Math.min(5, input.maxReviewRounds!)) : this.options.maxReviewRounds ?? 2;
+      (run as AgentRun & { allowImages?: boolean }).allowImages = input.allowImages === true;
+      this.runs.set(run.id, run); await this.store.trace(run.id, { event: 'run.start', goal, budget, autoApprove }); await this.save(run);
+      this.launch(run); return this.public(run);
+    });
   }
   /** R08: a loop publishes paused/awaiting state just before it exits; callers acting on that state wait for it to finish. */
   /** R02: decisions are bound to the host execution ID (and optionally the args hash) of the pending call; a stale or replayed
@@ -253,7 +274,7 @@ export class AgentService {
   }
   private async settled(id: string) { const active = this.active.get(id); if (active) await active.promise.catch(() => {}); }
   private launch(run: AgentRun) {
-    if (this.active.has(run.id)) return;
+    if (this.stopped || this.active.has(run.id)) return;
     const controller = new AbortController();
     const promise = this.loop(run, controller.signal).catch(async error => {
       if (controller.signal.aborted) return;
@@ -262,51 +283,80 @@ export class AgentService {
     this.active.set(run.id, { controller, promise });
   }
   async approve(id: string, callId: string, execId?: string, expectedArgsHash?: string): Promise<PublicRun> {
-    const run = await this.required(id); if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
-    await this.settled(id); if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
-    this.checkPending(run.pending, execId, expectedArgsHash);
-    if (run.pending.execId && run.pending.argsHash) (run.approvals ??= []).push({ execId: run.pending.execId, tool: run.pending.tool, argsHash: run.pending.argsHash });
-    await this.store.trace(run.id, { event: 'approval', callId, execId: run.pending.execId, decision: 'approved', tool: run.pending.tool });
-    const step = [...run.steps].reverse().find((s: RunStep) => s.kind === 'approval' && s.callId === callId); if (step) await this.finishStep(run, step, { status: 'complete', summary: '用户已批准' });
-    delete run.pending; run.status = 'running'; run.message = '已批准，继续执行'; await this.save(run); this.launch(run); return this.public(run);
+    const run = await this.required(id);
+    return this.projectCommand(run.projectId, async () => {
+      if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
+      await this.settled(id); if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
+      this.requireOpen(); await this.requireProjectAvailable(run.projectId, run.id);
+      this.checkPending(run.pending, execId, expectedArgsHash);
+      if (run.pending.execId && run.pending.argsHash) (run.approvals ??= []).push({ execId: run.pending.execId, tool: run.pending.tool, argsHash: run.pending.argsHash });
+      await this.store.trace(run.id, { event: 'approval', callId, execId: run.pending.execId, decision: 'approved', tool: run.pending.tool });
+      const step = [...run.steps].reverse().find((s: RunStep) => s.kind === 'approval' && s.callId === callId); if (step) await this.finishStep(run, step, { status: 'complete', summary: '用户已批准' });
+      delete run.pending; run.status = 'running'; run.message = '已批准，继续执行'; await this.save(run); this.launch(run); return this.public(run);
+    });
   }
   async reject(id: string, callId: string, execId?: string, reason = ''): Promise<PublicRun> {
-    const run = await this.required(id); if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
-    await this.settled(id); if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
-    this.checkPending(run.pending, execId);
-    const tool = run.pending.tool; await this.store.trace(run.id, { event: 'approval', callId, decision: 'rejected', tool, reason });
-    const step = [...run.steps].reverse().find((s: RunStep) => s.kind === 'approval' && s.callId === callId); if (step) await this.finishStep(run, step, { status: 'rejected', summary: '用户拒绝' + (reason ? '：' + reason : '') });
-    const pendingExec = run.pending.execId; run.queue = pendingExec ? run.queue.filter(call => call.execId !== pendingExec) : run.queue.filter(call => call.id !== callId);
-    run.messages.push({ role: 'tool', tool_call_id: callId, content: JSON.stringify({ rejected: true, reason: reason.slice(0, 500) || '用户拒绝执行此操作，请换一种方式或说明原因' }) });
-    delete run.pending; run.status = 'running'; run.message = '已拒绝，智能体调整方案'; await this.save(run); this.launch(run); return this.public(run);
+    const run = await this.required(id);
+    return this.projectCommand(run.projectId, async () => {
+      if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
+      await this.settled(id); if (run.status !== 'awaiting_approval' || run.pending?.callId !== callId) throw new Error('没有待批准的这一步');
+      this.requireOpen(); await this.requireProjectAvailable(run.projectId, run.id);
+      this.checkPending(run.pending, execId);
+      const tool = run.pending.tool; await this.store.trace(run.id, { event: 'approval', callId, decision: 'rejected', tool, reason });
+      const step = [...run.steps].reverse().find((s: RunStep) => s.kind === 'approval' && s.callId === callId); if (step) await this.finishStep(run, step, { status: 'rejected', summary: '用户拒绝' + (reason ? '：' + reason : '') });
+      const pendingExec = run.pending.execId; run.queue = pendingExec ? run.queue.filter(call => call.execId !== pendingExec) : run.queue.filter(call => call.id !== callId);
+      run.messages.push({ role: 'tool', tool_call_id: callId, content: JSON.stringify({ rejected: true, reason: reason.slice(0, 500) || '用户拒绝执行此操作，请换一种方式或说明原因' }) });
+      delete run.pending; run.status = 'running'; run.message = '已拒绝，智能体调整方案'; await this.save(run); this.launch(run); return this.public(run);
+    });
   }
   async resume(id: string): Promise<PublicRun> {
-    const run = await this.required(id); if (!['paused', 'failed', 'waiting_task'].includes(run.status)) throw new Error('当前状态不能继续');
-    await this.settled(id); if (!['paused', 'failed', 'waiting_task'].includes(run.status) || this.active.has(id)) throw new Error('当前状态不能继续');
-    if (run.status === 'failed' && !run.queue.length) run.messages.push({ role: 'user', content: '上一步失败：' + (run.error ?? '') + '。请根据当前工程重新判断并继续。' });
-    run.status = run.waiting ? 'waiting_task' : 'running'; delete run.error; run.message = '从断点继续'; await this.store.trace(run.id, { event: 'run.resume' }); await this.save(run); this.launch(run); return this.public(run);
+    const run = await this.required(id);
+    return this.projectCommand(run.projectId, async () => {
+      if (!['paused', 'failed', 'waiting_task'].includes(run.status) || run.status === 'waiting_task' && this.active.has(id)) throw new Error('当前状态不能继续');
+      await this.settled(id); if (!['paused', 'failed', 'waiting_task'].includes(run.status) || this.active.has(id)) throw new Error('当前状态不能继续');
+      this.requireOpen(); await this.requireProjectAvailable(run.projectId, run.id);
+      if (run.status === 'failed' && !run.queue.length) run.messages.push({ role: 'user', content: '上一步失败：' + (run.error ?? '') + '。请根据当前工程重新判断并继续。' });
+      run.status = run.waiting ? 'waiting_task' : 'running'; delete run.error; run.message = '从断点继续'; await this.store.trace(run.id, { event: 'run.resume' }); await this.save(run); this.launch(run); return this.public(run);
+    });
   }
   async pause(id: string): Promise<PublicRun> {
-    const run = await this.required(id); const active = this.active.get(id);
-    active?.controller.abort(new Error('用户暂停')); await active?.promise.catch(() => {});
-    await this.settleInFlight(run);
-    if (!TERMINAL.has(run.status) && run.status !== 'awaiting_approval') { run.status = 'paused'; run.message = '已暂停，可继续'; await this.store.trace(run.id, { event: 'run.pause' }); await this.save(run); }
-    return this.public(run);
+    const run = await this.required(id);
+    return this.projectCommand(run.projectId, async () => {
+      const active = this.active.get(id);
+      active?.controller.abort(new Error('用户暂停')); await active?.promise.catch(() => {});
+      await this.settleInFlight(run);
+      if (!TERMINAL.has(run.status) && run.status !== 'awaiting_approval') { run.status = 'paused'; run.message = '已暂停，可继续'; await this.store.trace(run.id, { event: 'run.pause' }); await this.save(run); }
+      return this.public(run);
+    });
   }
   async cancel(id: string): Promise<PublicRun> {
-    const run = await this.required(id); const active = this.active.get(id);
-    active?.controller.abort(new Error('用户取消')); await active?.promise.catch(() => {});
-    // Cancelling cannot discard an already successful paid effect that still needs local settlement.
-    try { for (const receipt of await this.store.toolSuccesses(run.id)) await this.settleToolSuccess(run, receipt); }
-    catch (error) {
-      run.status = 'failed'; run.error = errorText(error); run.message = '工具已成功，但本地结算尚未完成；回执已保留，修复后可继续结算或再次取消';
-      await this.save(run); return this.public(run);
-    }
-    await this.settleInFlight(run);
-    if (run.status === 'failed' || !TERMINAL.has(run.status)) { run.status = 'cancelled'; run.message = '已取消'; delete run.pending; run.queue = []; await this.store.trace(run.id, { event: 'run.cancel' }); await this.save(run); }
-    return this.public(run);
+    const run = await this.required(id);
+    return this.projectCommand(run.projectId, async () => {
+      const active = this.active.get(id);
+      active?.controller.abort(new Error('用户取消')); await active?.promise.catch(() => {});
+      // Cancelling cannot discard an already successful paid effect that still needs local settlement.
+      try { for (const receipt of await this.store.toolSuccesses(run.id)) await this.settleToolSuccess(run, receipt); }
+      catch (error) {
+        run.status = 'failed'; run.error = errorText(error); run.message = '工具已成功，但本地结算尚未完成；回执已保留，修复后可继续结算或再次取消';
+        await this.save(run); return this.public(run);
+      }
+      await this.settleInFlight(run);
+      if (run.status === 'failed' || !TERMINAL.has(run.status)) { run.status = 'cancelled'; run.message = '已取消'; delete run.pending; run.queue = []; await this.store.trace(run.id, { event: 'run.cancel' }); await this.save(run); }
+      return this.public(run);
+    });
   }
-  async dispose() { this.stopped = true; for (const { controller } of this.active.values()) controller.abort(new Error('应用正在关闭')); await Promise.allSettled([...this.active.values()].map(item => item.promise)); }
+  async dispose() {
+    this.stopped = true;
+    for (const { controller } of this.active.values()) controller.abort(new Error('应用正在关闭'));
+    await Promise.allSettled([...this.projectCommands.values()]);
+    await Promise.allSettled([...this.active.values()].map(item => item.promise));
+  }
+
+  private async budgetLimit(run: AgentRun, scope: 'model' | 'tool'): Promise<string | null> {
+    const limit = overBudget(run.budget, run.usage, scope); if (limit) return limit;
+    const ledger = await this.ledgers.get(run.projectId);
+    return ledger.maxCost !== null && ledger.spent >= ledger.maxCost ? `项目累计花费 ${ledger.spent.toFixed(2)} 已达上限 ${ledger.maxCost} ${ledger.currency}` : null;
+  }
 
   private async withRetry<T>(run: AgentRun, step: RunStep, work: () => Promise<T>, signal: AbortSignal): Promise<T> {
     const max = this.options.maxRetries ?? 3;
@@ -333,7 +383,7 @@ export class AgentService {
       if (run.waiting) { await this.awaitTask(run, signal); continue; }
       if (run.queue.length) {
         // F06: budget is checked before *every* tool execution, not only before the next model turn.
-        const limit = overBudget(run.budget, run.usage, 'tool');
+        const limit = await this.budgetLimit(run, 'tool');
         if (limit) { run.status = 'budget_exceeded'; run.message = '已停止：' + limit; await this.store.trace(run.id, { event: 'budget', reason: limit, usage: run.usage, pendingCalls: run.queue.map(c => c.name) }); await this.save(run); return; }
         const call = run.queue[0];
         const outcome = await this.runCall(run, call, model, signal);
@@ -341,9 +391,7 @@ export class AgentService {
         continue;
       }
       const images = this.imageBuffer.get(run.id); if (images?.length) { run.messages.push({ role: 'user', content: [{ type: 'text', text: '上面工具截取的画面：' }, ...images] }); this.imageBuffer.delete(run.id); }
-      const limit = overBudget(run.budget, run.usage);
-      const ledger = await this.ledgers.get(run.projectId);
-      if (!limit && ledger.maxCost !== null && ledger.spent >= ledger.maxCost) { run.status = 'budget_exceeded'; run.message = `已停止：项目累计花费 ${ledger.spent.toFixed(2)} 已达上限 ${ledger.maxCost} ${ledger.currency}`; await this.store.trace(run.id, { event: 'budget', reason: 'project', ledger }); await this.save(run); return; }
+      const limit = await this.budgetLimit(run, 'model');
       if (limit) { run.status = 'budget_exceeded'; run.message = '已停止：' + limit; await this.store.trace(run.id, { event: 'budget', reason: limit, usage: run.usage }); await this.save(run); return; }
       const compressed = compressMessages(run.messages, this.options.contextChars ?? 120_000);
       if (compressed.compressed) { run.messages = compressed.messages; const s = await this.step(run, { kind: 'compress', status: 'running' }); await this.finishStep(run, s, { status: 'complete', summary: '已压缩较早的上下文' }); }
@@ -434,6 +482,18 @@ export class AgentService {
     const sideEffect = tool.risk === 'cost' || tool.risk === 'export';
     const work = () => tool.run({ ...args, __callId: call.execId }, this.context(run.id, run.projectId, signal, meta.allowImages === true));
     if (sideEffect) { run.inFlight = { execId: call.execId!, tool: tool.name, argsHash: hash, startedAt: now() }; await this.save(run); }
+    // Capabilities, approval and durable preparation can await I/O. Honor a budget changed during that preparation
+    // at the last boundary before submitting work, including calls with an already consumed approval grant.
+    let finalLimit: string | null;
+    try { finalLimit = await this.budgetLimit(run, 'tool'); signal.throwIfAborted(); }
+    catch (error) { delete run.inFlight; throw error; } // Nothing has been submitted yet.
+    if (finalLimit) {
+      delete run.inFlight;
+      await this.finishStep(run, step, { status: 'skipped', summary: '未执行：' + finalLimit });
+      run.status = 'budget_exceeded'; run.message = '已停止：' + finalLimit;
+      await this.store.trace(run.id, { event: 'budget', reason: finalLimit, usage: run.usage, pendingCalls: run.queue.map(call => call.name) });
+      await this.save(run); return 'suspend';
+    }
     try { result = sideEffect ? await (async () => { step.attempts = 1; return work(); })() : await this.withRetry(run, step, work, signal); }
     catch (error) {
       if (signal.aborted) throw error; // R03: the in-flight receipt stays persisted and is settled by pause/restart/resume

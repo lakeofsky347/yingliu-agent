@@ -1,10 +1,11 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, session, shell, webContents } from 'electron';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createApplication, ENDPOINTS } from '../app/application.ts';
 import { startUiServer } from '../app/ui-server.ts';
 import { NativeSecrets } from './native-secrets.ts';
 import { editorWebPreferences } from './web-preferences.ts';
+import { ownedSceneProcesses, sameSceneProcess } from './scene-recovery.ts';
 
 app.setName('映流智能体');
 app.commandLine.appendSwitch('site-per-process');
@@ -34,9 +35,16 @@ if(ownsApplication)void app.whenReady().then(async()=>{
   ipcMain.handle('yingliu:pick-executable',async event=>{if(!trusted(event))throw new Error('此窗口无法打开文件');const result=await dialog.showOpenDialog(window,{title:'选择本地可执行文件',properties:['openFile']});return result.canceled?null:result.filePaths[0]??null;});
   ipcMain.handle('yingliu:reset-scene',async event=>{
     if(!trusted(event))throw new Error('此窗口不能重新加载画面');
-    const editorPid=window.webContents.mainFrame.osProcessId,origins=new Set<string>();
-    function visit(frame:Electron.WebFrameMain){for(const child of frame.frames){try{const url=new URL(child.url);if(url.hostname==='localhost'&&child.osProcessId!==editorPid)origins.add(url.origin);}catch{}visit(child);}}
-    visit(window.webContents.mainFrame);if(!origins.size)return {reset:false};
+    const editorPid=window.webContents.mainFrame.osProcessId;
+    const sceneProcesses=()=>{
+      const frames:{url:string;pid:number}[]=[];
+      function visit(frame:Electron.WebFrameMain){for(const child of frame.frames){try{frames.push({url:child.url,pid:child.osProcessId});visit(child);}catch{/* A detached frame is never a termination candidate. */}}}
+      visit(window.webContents.mainFrame);
+      const protectedPids=webContents.getAllWebContents().flatMap(contents=>{try{return [contents.mainFrame.osProcessId];}catch{return [];}});
+      return ownedSceneProcesses(editorPid,frames,app.getAppMetrics(),protectedPids);
+    };
+    const initialScenes=sceneProcesses(),origins=new Set(initialScenes.map(scene=>scene.origin));
+    if(!initialScenes.length)return {reset:false};
     const debuggerPort=window.webContents.debugger,attachedHere=!debuggerPort.isAttached();let reset=false;
     const command=(method:string,params:unknown={},sessionId?:string)=>{let timer:ReturnType<typeof setTimeout>;return Promise.race([debuggerPort.sendCommand(method,params,sessionId),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('画面恢复超时，请修复源码后重新打开工程')),3000);})]).finally(()=>clearTimeout(timer));};
     try{
@@ -47,7 +55,25 @@ if(ownsApplication)void app.whenReady().then(async()=>{
         try{await command('Runtime.terminateExecution',{},sessionId);await command('Page.navigate',{url:'about:blank'},sessionId);reset=true;}
         finally{await command('Target.detachFromTarget',{sessionId}).catch(()=>{});}
       }
-      return {reset};
+      if(!reset)throw new Error('未找到独立的画面调试目标');
+      return {reset:true};
+    }catch(error){
+      // A busy OOPIF can stop answering CDP entirely. Only restart renderers
+      // still owned by this app and still hosting these exact scene frames.
+      // Recheck creationTime as well as PID to reject process-ID reuse.
+      const restarted:typeof initialScenes=[];
+      for(const expected of initialScenes){
+        const current=sceneProcesses().find(scene=>sameSceneProcess(expected,scene));if(!current)continue;
+        try{process.kill(current.pid,'SIGKILL');restarted.push(current);}catch(killError){if((killError as NodeJS.ErrnoException).code!=='ESRCH')throw killError;}
+      }
+      if(!restarted.length)throw error;
+      const deadline=Date.now()+3000;
+      while(app.getAppMetrics().some(metric=>restarted.some(scene=>metric.pid===scene.pid&&metric.creationTime===scene.creationTime))){
+        if(Date.now()>=deadline)throw new Error('画面进程尚未退出，请修复源码后重新打开工程');
+        await new Promise(resolve=>setTimeout(resolve,25));
+      }
+      if(window.webContents.mainFrame.osProcessId!==editorPid)throw new Error('编辑器进程发生变化，请重新打开工程');
+      return {reset:true,rendererRestarted:true};
     }finally{if(attachedHere&&debuggerPort.isAttached())debuggerPort.detach();}
   });
   ipcMain.handle('yingliu:export-project',async(event,projectId:string)=>{

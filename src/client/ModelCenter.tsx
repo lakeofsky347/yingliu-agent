@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { StudioApi } from '../shared/types.ts';
 import type { ConnectionInput, Modality, ModelDefinition, ModelProtocol, ModelRole, RegistrySnapshot } from '../models/contracts.ts';
 import { ROLE_OUTPUT, ROLE_PROTOCOLS } from '../models/contracts.ts';
-import { TEMPLATE_PRESETS } from '../models/adapters/template.ts';
+import { TEMPLATE_PRESETS } from '../models/template-presets.ts';
 
 const protocolNames:Record<ModelProtocol,string>={'chat-completions':'文本／视觉理解（Chat Completions）',images:'生图（Images Generations）','video-gateway':'生视频（映流网关 v1）',speech:'配音（Speech）','async-task':'异步任务模板（通义万相／可灵／即梦／Runway／Replicate／音频）'};
 const roleNames:Record<ModelRole,string>={director:'导演与讨论',scene:'场景代码',vision:'关键帧视觉检查',image:'图片生成',video:'视频生成',speech:'配音',music:'音乐',sfx:'音效'};

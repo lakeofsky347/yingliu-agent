@@ -51,6 +51,35 @@ test('save and source endpoints reject stale versions at their serialized commit
   }finally{await f.close();}
 });
 
+test('asset imports require a revision and reject concurrent stale writes before importing',async()=>{
+  const f=await fixture();try{
+    const first=await f.backend.call<StudioSnapshot>('create',{title:'素材导入版本保护'}),id=first.project!.id;
+    const missing=await f.backend.route('import',{projectId:id,name:'未授权版本',text:'不应加入工程'});
+    assert.ok(!missing.ok);assert.equal(missing.error.code,'REVISION_REQUIRED');
+    const results=await Promise.all(['第一份素材','过期并发素材'].map(name=>f.backend.route('import',{projectId:id,expectedRevision:0,name,text:name})));
+    assert.equal(results.filter(result=>result.ok).length,1);const conflict=results.find(result=>!result.ok);assert.ok(conflict&&!conflict.ok);assert.equal(conflict.error.code,'REVISION_CONFLICT');
+    const current=await f.backend.call<StudioSnapshot>('current',{projectId:id});assert.equal(current.project!.revision,1);assert.deepEqual(current.project!.assets.map(asset=>asset.name),['第一份素材']);
+    const disk=JSON.parse(await readFile(join(first.root!,'project.json'),'utf8'));assert.equal(disk.revision,1);assert.equal(disk.assets.length,1);
+  }finally{await f.close();}
+});
+
+test('audio add, update, removal and synthesis require revisions inside the project queue',async()=>{
+  const f=await fixture();try{
+    const project=createProject('音轨版本保护');project.assets.push({id:'audio-fixture',kind:'audio',name:'测试音频',description:'persistence fixture, not media QA',path:'assets/fixture.wav',mime:'audio/wav',duration:1});
+    const first=await f.backend.call<StudioSnapshot>('create',{project,assetFiles:[{path:'assets/fixture.wav',dataBase64:Buffer.from('fixture bytes').toString('base64')}]}),id=first.project!.id;
+    for(const operation of ['add','update','remove','synthesize']){
+      const missing=await f.backend.route('audio',{projectId:id,operation,assetId:'audio-fixture',clipId:'missing',text:'不应调用配音'});
+      assert.ok(!missing.ok);assert.equal(missing.error.code,'REVISION_REQUIRED');
+    }
+    const added=await f.backend.call<StudioSnapshot>('audio',{projectId:id,expectedRevision:0,operation:'add',assetId:'audio-fixture',role:'music'}),clipId=added.project!.audioClips![0]!.id;
+    const results=await Promise.all([.5,.2].map(volume=>f.backend.route('audio',{projectId:id,expectedRevision:1,operation:'update',clipId,patch:{volume}})));
+    assert.equal(results.filter(result=>result.ok).length,1);const conflict=results.find(result=>!result.ok);assert.ok(conflict&&!conflict.ok);assert.equal(conflict.error.code,'REVISION_CONFLICT');
+    const staleRemove=await f.backend.route('audio',{projectId:id,expectedRevision:1,operation:'remove',clipId});assert.ok(!staleRemove.ok);assert.equal(staleRemove.error.code,'REVISION_CONFLICT');
+    const current=await f.backend.call<StudioSnapshot>('current',{projectId:id});assert.equal(current.project!.revision,2);assert.equal(current.project!.audioClips![0]!.volume,.5);
+    const removed=await f.backend.call<StudioSnapshot>('audio',{projectId:id,expectedRevision:2,operation:'remove',clipId});assert.equal(removed.project!.revision,3);assert.deepEqual(removed.project!.audioClips,[]);
+  }finally{await f.close();}
+});
+
 test('projects remain isolated and indexed project reopening preserves revisions',async()=>{
   const f=await fixture();try{
     const a=await f.backend.call<StudioSnapshot>('create',{title:'工程 A'}),b=await f.backend.call<StudioSnapshot>('create',{title:'工程 B'});
