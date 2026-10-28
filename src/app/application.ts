@@ -36,7 +36,9 @@ export class MemorySecrets implements SecretStore {
   async set(ref:string,value:string){this.values.set(ref,value);}
   async delete(ref:string){this.values.delete(ref);}
 }
-export async function createApplication(options:{dataDirectory:string;projectsDirectory?:string;credentials:SecretStore;reveal?:(path:string)=>Promise<void>;fetch?:typeof fetch;recover?:boolean;resumeRemoteTasks?:boolean;ownership?:OwnerLease}){
+export async function createApplication(options:{dataDirectory:string;projectsDirectory?:string;credentials:SecretStore;reveal?:(path:string)=>Promise<void>;fetch?:typeof fetch;recover?:boolean;resumeRemoteTasks?:boolean;ownership?:OwnerLease;projectRootWaitMs?:number}){
+  const projectRootWaitMs=options.projectRootWaitMs===undefined?0:options.projectRootWaitMs;
+  if(!Number.isFinite(projectRootWaitMs)||projectRootWaitMs<0)throw new RangeError('工程目录锁等待时间必须是非负有限数字');
   const {dataDirectory,projectsDirectory}=applicationDirectories(options);
   const ownership=options.ownership??await acquireApplicationOwner({dataDirectory,projectsDirectory},'application');
   const cleanups:(()=>Promise<unknown>)[]=[];
@@ -44,7 +46,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
   // Borrowed leases also verify the resolved roots, without taking a second listener on their own ports.
   await ownership.claim([dataDirectory,projectsDirectory]);
   const providers=new ProviderManager(dataDirectory,options.credentials,options.fetch?{fetch:options.fetch}:{});await providers.initialize();
-  const backend=new AppBackend({...options,dataDirectory,projectsDirectory,providers:providers.host(),claimProjectRoot:root=>ownership.claim([root],0,{existingOnly:true})});
+  const backend=new AppBackend({...options,dataDirectory,projectsDirectory,providers:providers.host(),claimProjectRoot:root=>ownership.claim([root],projectRootWaitMs,{existingOnly:true})});
   cleanups.push(()=>backend.dispose());
   const conversation=new ConversationService(backend,providers,dataDirectory);
   cleanups.push(()=>conversation.shutdown());

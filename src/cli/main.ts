@@ -286,11 +286,12 @@ export async function runCli(argv: string[], io: { out: (s: string) => void; err
   let result: { ok: boolean; payload: unknown; code: number };
   try {
     const projects = process.env.YINGLIU_PROJECTS ? resolve(process.env.YINGLIU_PROJECTS) : join(dir, 'projects'), readOnly = isReadOnly(positional, flags);
-    const lockSeconds = flags['lock-timeout'] === undefined ? 30 : Number(flags['lock-timeout']); if (!Number.isFinite(lockSeconds) || lockSeconds < 0) throw new CliError('USAGE', '--lock-timeout 必须是非负数字');
+    const lockSeconds = flags['lock-timeout'] === undefined ? 30 : Number(flags['lock-timeout']), lockTimeoutMs = lockSeconds * 1000;
+    if (!Number.isFinite(lockSeconds) || lockSeconds < 0 || !Number.isFinite(lockTimeoutMs)) throw new CliError('USAGE', '--lock-timeout 必须是可转换为有限毫秒的非负数字');
     await startup('创建数据目录 ' + dir, () => mkdir(dir, { recursive: true }));
-    await startup('获取数据目录锁', async () => { try { ownership = await acquireOwnerLease([dir, projects], positional.slice(0, 2).join(' '), lockSeconds * 1000, { signal: lifecycle.signal }); } catch (e) { if (e instanceof BusyError) throw new CliError('BUSY', e.message); if (e instanceof LockConfigError) throw new CliError('CONFIG', e.message); throw e; } });
+    await startup('获取数据目录锁', async () => { try { ownership = await acquireOwnerLease([dir, projects], positional.slice(0, 2).join(' '), lockTimeoutMs, { signal: lifecycle.signal }); } catch (e) { if (e instanceof BusyError) throw new CliError('BUSY', e.message); if (e instanceof LockConfigError) throw new CliError('CONFIG', e.message); throw e; } });
     if (!readOnly || positional[0] === 'models') await secrets.check(); // C06: a broken key map fails up front with CONFIG instead of surfacing as a provider error
-    app = await startup('初始化应用', () => createApplication({ dataDirectory: dir, projectsDirectory: projects, credentials: secrets, ownership, ...(mock ? { fetch: mockFetch(), resumeRemoteTasks: false } : {}), ...(readOnly ? { recover: false } : {}) }));
+    app = await startup('初始化应用', () => createApplication({ dataDirectory: dir, projectsDirectory: projects, credentials: secrets, ownership, projectRootWaitMs: lockTimeoutMs, ...(mock ? { fetch: mockFetch(), resumeRemoteTasks: false } : {}), ...(readOnly ? { recover: false } : {}) }));
     lifecycle.throwIfInterrupted();
     const ctx: Ctx = { app, secrets, flags, mock, lifecycle };
     if (mock && !readOnly) await ensureMockModels(ctx);

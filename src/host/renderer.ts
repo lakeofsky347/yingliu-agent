@@ -144,8 +144,10 @@ export class VideoRenderer {
     await fs.access(env.browserPath,constants.X_OK);
     // 逐帧契约要求同一帧可复现：GPU 光栅的 2D canvas 在不同页面状态下会出现 ±1 的采样差异，
     // 会让逆序 seek / 冷启动的字节比对偶发失败。固定用 Skia 软件光栅画 2D canvas，
-    // 合成与 WebGL 仍走原路径，渲染结果与截图因此稳定可复现。
-    const browser=await chromium.launch({executablePath:env.browserPath,headless:true,chromiumSandbox:true,args:[...WEBRTC_LOCKDOWN_ARGS,'--disable-background-timer-throttling','--disable-renderer-backgrounding','--disable-accelerated-2d-canvas','--disable-accelerated-video-decode']});this.browsers.add(browser);
+    // Windows 首帧差异限于 DOM 文字区域，候选机制是合成层历史影响 LCD/灰阶
+    // 抗锯齿选择；固定为灰阶文字栅格，并继续用严格 hash 检查该策略。
+    // 此策略保留 GPU 合成与 WebGL，最终效果仍须 Windows 实跑确认。
+    const browser=await chromium.launch({executablePath:env.browserPath,headless:true,chromiumSandbox:true,args:[...WEBRTC_LOCKDOWN_ARGS,'--disable-background-timer-throttling','--disable-renderer-backgrounding','--disable-accelerated-2d-canvas','--disable-accelerated-video-decode','--disable-lcd-text']});this.browsers.add(browser);
     const cancel=()=>{void browser.close().catch(()=>{});};signal?.addEventListener('abort',cancel,{once:true});
     try {
       const context=await browser.newContext({viewport:{width:spec.target.width,height:spec.target.height},deviceScaleFactor:1,serviceWorkers:'block'});
