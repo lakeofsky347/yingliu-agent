@@ -86,7 +86,17 @@ test('each sidecar UI preparation rebuilds existing bundles and removes obsolete
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('cleanup only terminates a real fixture child with matching birth identity', { timeout: 10_000 }, async () => {
+test('unsupported Windows process evidence fails closed before spawning ps or granting signal authority', async () => {
+  let calls = 0;
+  await assert.rejects(processes.processTable({ platform: 'win32', execute: () => { calls++; throw new Error('must never spawn'); } }), { code: 'PROCESS_EVIDENCE_UNSUPPORTED', platform: 'win32' });
+  assert.equal(calls, 0);
+  if (process.platform === 'win32') {
+    await assert.rejects(processes.ownedTree(process.pid), { code: 'PROCESS_EVIDENCE_UNSUPPORTED' });
+    await assert.rejects(processes.killOwned([{ pid: process.pid, started: 'unverified-fixture-identity' }]), { code: 'PROCESS_EVIDENCE_UNSUPPORTED' });
+  }
+});
+
+test('cleanup only terminates a real fixture child with matching birth identity', { timeout: 10_000, skip: process.platform === 'win32' ? 'POSIX出生身份/回收验收不支持Windows；另有零spawn的明确拒绝测试' : false }, async () => {
   const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
   const exited = new Promise<void>(resolve => child.once('close', () => resolve()));
   try {

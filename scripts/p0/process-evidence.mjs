@@ -6,15 +6,16 @@ export function withTimeout(promise, timeoutMs, label) {
   let timer; return Promise.race([promise, new Promise((_resolve, reject) => { timer = setTimeout(() => reject(new Error(label + '超时')), timeoutMs); })]).finally(() => clearTimeout(timer));
 }
 /** PID alone is never evidence that a process still belongs to this drill. */
-export async function processTable() {
-  const result = spawnSync('ps', ['-eo', 'pid=,ppid=,lstart=,comm='], { encoding: 'utf8' });
+export async function processTable({ platform = process.platform, execute = spawnSync } = {}) {
+  if (platform !== 'linux' && platform !== 'darwin') throw Object.assign(new Error('P0进程树证据仅支持Linux/macOS；本平台尚无可验证的自有进程出生身份与后代回收实现'), { code: 'PROCESS_EVIDENCE_UNSUPPORTED', platform });
+  const result = execute('ps', ['-eo', 'pid=,ppid=,lstart=,comm='], { encoding: 'utf8' });
   if (result.error || result.status !== 0) throw new Error('无法检查自有进程树');
   const rows = result.stdout.trim().split('\n').filter(Boolean).map(line => {
     const [pid, ppid, ...rest] = line.trim().split(/\s+/);
     return { pid: Number(pid), ppid: Number(ppid), started: rest.slice(0, 5).join(' '), comm: rest.slice(5).join(' ') };
   });
   return Promise.all(rows.map(async row => {
-    if (process.platform === 'linux') {
+    if (platform === 'linux') {
       try { const stat = await readFile(`/proc/${row.pid}/stat`, 'utf8'); row.started = 'linux-ticks:' + stat.slice(stat.lastIndexOf(')') + 2).split(/\s+/)[19]; }
       catch { row.started = ''; }
     }

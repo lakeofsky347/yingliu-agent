@@ -2,9 +2,9 @@
 
 日期：2026-10-28，Asia/Singapore。交付记录为 v1.0.0，应用 package 版本保持 0.5.0。
 
-工作分支为 `codex/tauri-p0-hardening-20261028`。产品冻结验收基于主线 `9137eb7b7921423c9039704b4872cc2eff77b334`，在隔离分支的合并基线为 `d843ee5d1c19bf0872c703a6db02c3c9ffb25f0d`，同时包含与本记录同批交付的 P0 加固修改。构建 manifest 中的 commit 指向该产品验收合并基线，不能单独解释为不含本轮修改的纯基线二进制。本记录不改写历史测量或把 P0 壳当成主线应用；原 spike、PR 4 和主线不自动合并。
+工作分支为 `codex/tauri-p0-hardening-20261028`。本次重新冻结验收基于主线 `accfdf3007b33369720af103ed6c4e6fd9cb2b8c`，在隔离分支的合并基线为 `24534bbd315e47b5f6d17c5102e8adf1c3dbe429`，同时包含 P0 加固及 Windows 进程证据拒绝路径修改。构建 manifest 中的 commit 指向该产品验收合并基线；它不单独代表该主线提交的全部原生验收已通过。本记录不改写历史测量或把 P0 壳当成主线应用；原 spike、PR 4 和主线不自动合并。
 
-最后同步的主线为 `eb514f452e910bb8d1b75f71529f13660c15ab9f`，对应本分支合并提交 `563a1f9ab073982866b9daae1a8a66128b0363c1`。`9137eb7..eb514f4` 仅改变 9 个验收脚本、测试或交付记录文件；对 `src/`、`package.json`、`package-lock.json`、`assets/` 的 Git 差异为空，本轮 P0 产品代码也保持冻结。同步后实际补跑验收任务屏障与平台摘要 15 项专项，全部通过；下面的 482 项全量、Rust 4 项以及 source/SEA 共 10 项演练仍对应上述 `9137eb7` 产品等价代码，不把脚本同步描述成重新执行了更大的全量套件。
+之前 `9137eb7..eb514f4` 仅为验收脚本、测试和文档同步，当时产品源码等价；该结论不延伸到之后的实际渲染字体屏障、文本渲染与合成参数、工程目录锁等待及不可变运行时发布修改。本次已重新执行下面的 525 项全量、UI/应用构建、Node SEA 打包及 source/SEA 共 10 项故障演练，没有沿用旧 Node/渲染运行时结果替代。Rust 源码树与 `dd711fe` 验收合并基线相同，沿用该轮 4 项测试与编译检查证据。旧基线证据仍保存在各自忽略目录，未被本轮覆盖。
 
 ## 凭据迁移事务
 
@@ -35,12 +35,13 @@ Rust `SidecarProcess` 从 spawn 开始持有子进程；缺管道、首行错误
 
 | 检查 | 结果 | 范围 |
 | --- | --- | --- |
-| 全量 Node/tsx 回归 | **482/482，零失败、零跳过** | 在 `9137eb7` 产品验收合并基线一次完整执行；包含当时主线 447 项和 P0 五组 35 项 |
-| P0 五组 Node/tsx 回归 | 35 个独立用例包含在上述全量结果内 | 合成迁移 13、自有进程生命周期与 Windows 前置拒绝 4、真实 Chromium 隔离 4、脚本门槛 8、sidecar 共同 lease 6 |
-| 后续验收脚本同步专项 | **15/15，零失败、零跳过** | 同步 `eb514f4` 后执行 `acceptance-task.test.ts` 与 `platform-acceptance.test.ts`；实际补验任务就绪/失败屏障及脱敏平台摘要 |
+| 全量 Node/tsx 回归 | **525/525，零失败、零跳过** | 在 `accfdf3` 产品验收合并基线重新完整执行；包含主线 489 项和 P0 五组 36 项 |
+| P0 五组 Node/tsx 回归 | 36 个独立用例包含在上述全量结果内 | 合成迁移 13、自有进程生命周期与 Windows 前置拒绝 4、真实 Chromium 隔离 4、脚本门槛 9、sidecar 共同 lease 6 |
+| 先前验收脚本同步专项 | **15/15，零失败、零跳过** | 同步 `eb514f4` 后曾执行 `acceptance-task.test.ts` 与 `platform-acceptance.test.ts`；这是前一轮脚本补验记录 |
+| 进程证据平台边界专项 | **9/9，当前 macOS 零跳过** | 单独补验且纳入本轮全量；不将该本机计数解释为 Windows 真实进程回收通过，Windows POSIX 实进程用例明确跳过 |
 | `npm run typecheck` / `npm run build` | PASS / PASS | 当前冻结源码；普通构建生成 UI、web、Electron 和 CLI bundle |
-| Rust `cargo test` | 4/4 | 沉默进程、坏标签/JSON/协议/origin、EOF/超长/非法 UTF-8/无换行，以及 setup guard 回收 |
-| Rust `cargo check --locked` | PASS | 当前 macOS arm64 宿主编译检查；test 同样使用 `--locked`，Cargo.lock 未改动 |
+| Rust `cargo test` | 4/4，沿用 `dd711fe` 同源码证据 | 沉默进程、坏标签/JSON/协议/origin、EOF/超长/非法 UTF-8/无换行，以及 setup guard 回收；本轮核对 `src-tauri` Git 树哈希相同 |
+| Rust `cargo check --locked` | PASS，沿用 `dd711fe` 同源码证据 | macOS arm64 宿主编译检查；test 同样使用 `--locked`，Cargo.lock 未改动 |
 | Node SEA 重新构建 | PASS | 现成本机 Node 24.19.0、darwin arm64；每次重建 UI，资源 `app.js` 与最新构建字节相同 |
 | source sidecar 严格故障演练 | **5/5 PASS** | 隔离源码入口与 HTTP harness；真实本机 Chromium 进程与本地导出任务中断 |
 | SEA sidecar 严格故障演练 | **5/5 PASS** | 对本轮新构建二进制重复全部五项；不以源码或 fixture 结果替代 |
@@ -51,14 +52,18 @@ Rust `SidecarProcess` 从 spawn 开始持有子进程；缺管道、首行错误
 
 `measure.mjs` 对清缓存失败的样本不启动应用、不纳入 cold 统计；Electron React 挂载、Tauri WebView load 和 sidecar backend ready 分别标识，当前三者 `crossShellComparable=false`。所有 idle 计时从相应模式的实际判据后开始。`build-sidecar.mjs` 每次先重建 UI，再复制资源。
 
-本轮 SEA 二进制为 129,346,160 字节，连同资源为 131,554,217 字节；SHA-256 为 `6956c17f358fdb5e7f6fcc1514395e92de6de4d7ee49c5d155fd2bb9d32bd48d`。这只是当前本机产物的身份，不用于和历史 Linux 包直接比较体积。manifest 的 `signed=false`，构建中的 macOS ad-hoc 签名不等于发行签名或公证。本机 Homebrew Node 26.8.2 明确禁用了 SEA，本轮改用已有 Node 24.19.0 完成打包，未更改全局 Node。
+进程证据辅助模块仅在 Linux/macOS 上检查 POSIX 进程出生身份。Windows 在调用 `ps` 或授予任何信号权限之前，明确返回 `PROCESS_EVIDENCE_UNSUPPORTED`；没有将缺少 POSIX 工具解释成空进程树或清理通过。真实 fixture 子进程的出生身份/回收测试在 Windows 明确标记为不支持并跳过，另一个独立测试验证零 spawn 的拒绝路径。它不构成 Windows 进程树回收、故障演练或性能测量通过；专用 SEA/stdio/Rust 构建可以继续独立验收。
 
-本轮原始本机证据另存于忽略目录 `.local/p0-final-9137eb7-20261028/`：`node-tests.log`、`fault-drills-source.json`、`fault-drills-sea.json` 和 `sidecar-build/node-darwin-arm64/manifest.json`。它们不随源码发布；本记录只保留脱敏计数、范围和产物哈希，未覆盖 `docs/p0/evidence/` 的历史性能或演练记录。
+本轮 SEA 二进制为 129,362,576 字节，连同资源为 131,572,125 字节；SHA-256 为 `897e4450bac20c1e20db501c4e215ab97859fc70a240631a2b4c906c8945867f`。这只是当前本机产物的身份，不用于和历史 Linux 包直接比较体积。manifest 的 `signed=false`，构建中的 macOS ad-hoc 签名不等于发行签名或公证。本机 Homebrew Node 26.8.2 明确禁用了 SEA，本轮改用已有 Node 24.19.0 完成打包，未更改全局 Node。
+
+本轮原始本机证据另存于忽略目录 `.local/p0-final-accfdf3-20261028/`：`node-tests.log`、`typecheck.log`、`build.log`、`sea-build.log`、`rust-source-equivalence.log`、`fault-drills-source.json`、`fault-drills-sea.json` 和 `sidecar-build/node-darwin-arm64/manifest.json`。Rust 同源码树哈希为 `0483a15df701f7d994887b643d99deca05928406`，对应测试与检查日志保留在 `.local/p0-final-dd711fe-20261028/`。本轮在启动全量测试前已恢复自有临时依赖链接，取得 525/525、零跳过。前一轮 `2f39b31` 曾因链接未恢复跳过真实 Electron 用例，其初始日志与重新取得 507/507 的日志仍各自保留在原目录，不计为本轮结果。这些原始数据不随源码发布；本记录只保留脱敏计数、范围和产物哈希，未覆盖 `docs/p0/evidence/` 的历史性能或演练记录。
 
 ## CI 触发与适用范围
 
 专用 `Tauri P0 spike` workflow 的 push 条件包含 `spike/tauri-p0` 与本次独立加固分支。PR 路径过滤除 Rust、sidecar 和 P0 脚本外，也覆盖迁移、场景 worker、P0 测试及其 fixture。它运行三平台 Node SEA 构建、stdio 冒烟和 Rust release 编译，产物仍为未发行签名的实验构建；**不代表 Tauri 原生窗口或性能验收**。
 
 通用 `Platform checks` 与 `Native and media acceptance` 不限制上述分支，但其原生应用对象仍是主线 Electron 应用。触发配置说明哪些检查会被尝试执行，不构成对应提交的远端 CI 已通过证据，应查看该提交实际 Actions 结果。
+
+同期主线在用户手动处理系统钥匙串后，最终新包于 `2026-10-28T11:19:03.529Z` 取得单次完整本机 73/73 通过，包含此前无限循环恢复、Keychain 与 sandbox 路径；这是主线 Electron 本机验收。本轮没有独立执行 Tauri 原生 GUI 验收。`accfdf3` 的三平台快速矩阵已通过（Actions run 40679330829），三平台 Electron 原生媒体验收也已通过（run 40679330857），包括 Windows 的默认分镜严格重复渲染与完整搬迁包。独立 Tauri 分支本次提交的专用 SEA/stdio/Rust CI 仍须按自己的提交核对；本记录中的 P0 中断恢复演练不替代 Tauri 原生窗口验收。
 
 本轮没有执行 sudo/drop_caches、真实计费 API、真实旧凭据迁移、Tauri 原生 GUI 验收、Windows JobObject 验收、干净目标机安装、发行签名/公证或新的 Linux 冷启动/PSS 同口径性能比较。历史 P0 报告和 evidence 保留为历史记录，不用本轮加固追认旧性能数字。
