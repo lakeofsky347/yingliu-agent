@@ -27,7 +27,7 @@ test('task failure metadata accepts only fixed enums and never copies exception 
   }
 });
 
-test('a real runtime rename failure reaches matching-revision check diagnostics without retry or raw error fields',async t=>{
+test('a real runtime rename failure retains matching-revision diagnostics after the platform filesystem policy fails',async t=>{
   const directory=await fs.mkdtemp(join(tmpdir(),'yingliu-check-io-')),store=new ProjectStore({baseDirectory:directory}),renderer=new VideoRenderer(store),rename=fs.rename.bind(fs);let attempts=0;
   try{
     const created=await store.create(createProject('IO诊断')),expected={category:'IO_ERROR',operation:'runtime_scene_publish',ioCode:'EPERM',syscall:'rename'};
@@ -36,7 +36,11 @@ test('a real runtime rename failure reaches matching-revision check diagnostics 
       return rename(from,to);
     });syncBuiltinESMExports();
     const checked=await renderer.check(created.root,created.project,{browserPath:process.execPath,ffmpegPath:process.execPath,ffprobePath:process.execPath});
-    assert.equal(checked.ok,false);assert.equal(attempts,1,'diagnostics never retry the failed operation');assert.deepEqual(checked.errors[0]?.failure,expected);
+    assert.equal(checked.ok,false);
+    // Filesystem retries are bounded separately in runtime-rename-retry.test.ts;
+    // a Windows deadline can expire before the attempt cap. This is not a task/model retry.
+    if(process.platform==='win32')assert.ok(attempts>=1&&attempts<=8,'Windows runtime file retries remain bounded');else assert.equal(attempts,1,'other platforms fail on the first filesystem attempt');
+    assert.deepEqual(checked.errors[0]?.failure,expected);
     const disk=JSON.parse(await fs.readFile(checked.reportPath!,'utf8'));assert.deepEqual(disk.errors[0].failure,expected);
     const uploaded=await readRenderDiagnostics(created.root,created.project.revision);assert.deepEqual(uploaded,[{failure:expected}]);
     for(const raw of ['sk-private-key','/private/fixture','errno','message','path'])assert.ok(!JSON.stringify(uploaded).includes(raw));
