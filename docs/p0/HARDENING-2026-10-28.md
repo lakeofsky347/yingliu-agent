@@ -78,6 +78,6 @@ Rust `SidecarProcess` 从 spawn 开始持有子进程；缺管道、首行错误
 
 当前主线 `0f26d9a` 的三平台快速矩阵已通过（Actions run 40683701636），同一干净提交的 Electron 原生媒体验收三平台也全部成功（run 40683701661：macOS 73、Windows 73、Linux 74 项）。主线本机完整 498/498、类型检查、构建与搬迁包布局检查已通过；新增诊断后的 GUI 结果以这次远端干净提交为证，不标成本轮重新执行的本机 73 项。
 
-独立分支此前提交 `2cb084b` 的专用 SEA/stdio/Rust 三平台与通用快速三平台已通过，但继承的 Windows Electron 原生验收失败：package 的 revision 4 预览任务为 `TASK_FAILED`，native 在聊天重试等待处超时；models、film、editor 已通过。当时脱敏摘要没有具体 IO code 或 syscall，不能判定其 Windows 根因，也不将其记为通过。随后 `a7c31c7` 的专用与快速三平台也通过，但 Windows Electron 原生失败并取得上述固定 IO/rename 证据。本次 `ef3104c` 只同步复用修复；主线和本独立分支的新专用、快速及原生结果均须按各自提交核对。本轮没有执行 Tauri 原生窗口验收，P0 中断恢复演练也不替代该验收。
+独立分支此前提交 `2cb084b` 的专用 SEA/stdio/Rust 三平台与通用快速三平台已通过，但继承的 Windows Electron 原生验收失败：package 的 revision 4 预览任务为 `TASK_FAILED`，native 在聊天重试等待处超时；models、film、editor 已通过。当时脱敏摘要没有具体 IO code 或 syscall，不能判定其 Windows 根因，也不将其记为通过。随后 `a7c31c7` 的专用与快速三平台也通过，但 Windows Electron 原生失败并取得上述固定 IO/rename 证据。本次同步的主线源码 `ef3104c` 已取得三平台快速和 Electron 原生矩阵全部成功；该源码的本机完整 504/504、类型检查和应用包构建也已通过。此处验收身份固定为源码 SHA，之后的 HARDENING 封存仅改文档；本独立分支自己的专用、快速及原生 CI 仍须按最终分支提交核对，不由主线结果替代。本轮没有执行 Tauri 原生窗口验收，P0 中断恢复演练也不替代该验收。
 
 本轮没有执行 sudo/drop_caches、真实计费 API、真实旧凭据迁移、Tauri 原生 GUI 验收、Windows JobObject 验收、干净目标机安装、发行签名/公证或新的 Linux 冷启动/PSS 同口径性能比较。历史 P0 报告和 evidence 保留为历史记录，不用本轮加固追认旧性能数字。
