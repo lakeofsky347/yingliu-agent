@@ -1,10 +1,11 @@
 import { cloneElement, isValidElement, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode } from 'react';
 import { bindAsset, compileSpec, deleteAsset, deleteShot, duplicateShot, reorderShots, specMarkdown, unbindAsset, updateShot, validateGraph } from '../core/index.ts';
-import type { Asset, SceneSource, Shot, StudioSnapshot, VideoProject } from '../shared/types.ts';
+import type { Asset, Shot, StudioSnapshot, VideoProject } from '../shared/types.ts';
 import { StudioController } from './controller.ts';
 import { LiteGraphEditor } from './graph-adapter.ts';
 import { OutputSettings, targetLabel } from './output-settings.tsx';
 import { Preview } from './Preview.tsx';
+import { SourceEditor } from './SourceEditor.tsx';
 import { AudioPanel } from './AudioPanel.tsx';
 import { TaskPanel, HistoryPanel } from './TaskPanel.tsx';
 import { ExportPanel } from './ExportPanel.tsx';
@@ -170,15 +171,7 @@ export function Studio({controller,currentSessionId,onOpenSession,onNew,onOpen,o
   </main>;
 }
 
-function SourceEditor({controller,selectedShot,busy,version}:{controller:StudioController;selectedShot?:Shot;busy:boolean;version:string}){
-  const [source,setSource]=useState<SceneSource|null>(null),[language,setLanguage]=useState<'html'|'css'|'js'>('html'),[loading,setLoading]=useState(false),[error,setError]=useState(''),[dirty,setDirty]=useState(false);
-  useEffect(()=>{let active=true;if(!selectedShot){setSource(null);return;}setLoading(true);setError('');if(dirty){setLoading(false);return;}controller.readSource(selectedShot.id).then(value=>{if(active){setSource(value);setDirty(false);}}).catch(e=>{if(active)setError(e instanceof Error?e.message:'读取源码失败');}).finally(()=>{if(active)setLoading(false);});return()=>{active=false;};},[selectedShot?.id,controller,version]);
-  useEffect(()=>{controller.setSourceDraftDirty(dirty);return()=>controller.setSourceDraftDirty(false);},[controller,dirty]);
-  async function restore(){if(!selectedShot)return;try{await controller.restoreSource(selectedShot.id);if(controller.getSnapshot().error)throw new Error(controller.getSnapshot().error);const value=await controller.readSource(selectedShot.id);setSource(value);setDirty(false);setError('');}catch(cause){setError(cause instanceof Error?cause.message:'恢复源码失败');}}
-  if(!selectedShot)return <div className="vs-dock-empty"><Icon name="text"/><p>选中一个镜头，查看与编辑它的前端源码。</p></div>;
-  if(loading)return <div className="vs-loading"><span className="vs-spinner"/>读取镜头源码…</div>;
-  return <div className="vs-source"><div className="vs-source-toolbar"><span>{selectedShot.title}</span><div className="vs-code-tabs">{(['html','css','js'] as const).map(l=><button key={l} className={language===l?'is-active':''} onClick={()=>setLanguage(l)}>{l.toUpperCase()}</button>)}</div><span className="vs-source-dirty">{dirty?'尚未保存':'已保存'}</span><Button icon="undo" disabled={busy} onClick={()=>void restore()}>恢复上次可用</Button><Button className="vs-primary" icon="check" disabled={!source||!dirty||busy} onClick={()=>source&&void controller.saveSource(selectedShot.id,source).then(()=>{if(!controller.getSnapshot().error)setDirty(false);})}>保存源码</Button></div>{error&&<p className="vs-inline-error">{error}</p>}<textarea className="vs-code-editor" aria-label={`${language.toUpperCase()} 源码`} spellCheck={false} value={source?.[language]||''} onChange={e=>{setSource({...source||{html:'',css:'',js:''},[language]:e.target.value});setDirty(true);}} onKeyDown={e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();if(source&&dirty&&!busy)void controller.saveSource(selectedShot.id,source).then(()=>{if(!controller.getSnapshot().error)setDirty(false);});}if(e.key==='Tab'){e.preventDefault();const field=e.currentTarget,start=field.selectionStart,end=field.selectionEnd,text=field.value;setSource({...source||{html:'',css:'',js:''},[language]:text.slice(0,start)+'  '+text.slice(end)});setDirty(true);requestAnimationFrame(()=>field.setSelectionRange(start+2,start+2));}}}/><p className="vs-source-note">修改源码后保存，再刷新预览。镜头参数保持独立，源码中写死的属性由代码控制。</p></div>;
-}
+
 function Environment({controller,snapshot}:{controller:StudioController;snapshot:StudioSnapshot}){
   const [settings,setSettings]=useState({...snapshot.environment});useEffect(()=>setSettings({...snapshot.environment}),[snapshot.environment]);
   const [health,setHealth]=useState<{canRender:boolean;tools:Record<string,{available:boolean;version?:string;message?:string}>}|null>(null),[checking,setChecking]=useState(false),[error,setError]=useState('');

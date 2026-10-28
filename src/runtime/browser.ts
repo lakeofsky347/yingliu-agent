@@ -18,7 +18,8 @@ function decorateError(error,shot,frame) {
 }
 function assetUrl(asset){return asset.path?new URL('../'+asset.path.split('/').map(encodeURIComponent).join('/'),import.meta.url).href:undefined;}
 async function init() {
-  const response=await fetch('./runtime/spec.json');
+  const specUrl=document.querySelector('meta[name="video-studio-spec"]')?.getAttribute('content')||'./runtime/spec.json';
+  const response=await fetch(specUrl);
   if(!response.ok)throw new Error('Unable to read project runtime: '+response.status);
   data=await response.json();modules=new Map();images=new Map();videos=new Map();
   document.documentElement.style.setProperty('--video-width',data.spec.target.width+'px');
@@ -162,10 +163,12 @@ ready().then(async metadata=>{await renderFrame({frame:0});post({type:'video-stu
 });
 `;
 
-export function runtimeHtml(width:number,height:number):string {
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>映流视频预览</title><style>
+export function runtimeHtml(width:number,height:number,resources:{runtimeUrl?:string;specUrl?:string}={}):string {
+  const attribute=(value:string)=>value.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+  const spec=resources.specUrl?`<meta name="video-studio-spec" content="${attribute(resources.specUrl)}">`:'';
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${spec}<link rel="icon" href="data:,"><title>映流视频预览</title><style>
   :root{color-scheme:dark}*{box-sizing:border-box}html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#000}
   body{position:relative}#stage{position:absolute;top:50%;left:50%;width:${width}px;height:${height}px;overflow:hidden;background:#101016;isolation:isolate;transform:translate(-50%,-50%)}
   .video-background,.video-canvas,.scene-root{position:absolute;inset:0;width:100%;height:100%}.scene-root{overflow:hidden}canvas{display:block}
-  </style><style id="scene-style"></style></head><body><main id="stage"></main><script type="module" src="./runtime/frame.mjs"></script></body></html>`;
+  </style><style id="scene-style"></style></head><body><main id="stage"></main><script type="module" src="${attribute(resources.runtimeUrl??'./runtime/frame.mjs')}"></script></body></html>`;
 }

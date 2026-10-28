@@ -1,6 +1,7 @@
 import { _electron as electron } from 'playwright-core';
 import {inspectNativeSandbox} from './acceptance-sandbox.mjs';
 import {waitForNewTask,readRenderDiagnostics} from './acceptance-task.mjs';
+import {readSourceUiState} from './acceptance-source-ui.mjs';
 import { cp, mkdtemp, mkdir, readFile, writeFile, readdir, stat, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve,relative,isAbsolute } from 'node:path';
@@ -14,7 +15,7 @@ const layout=packageLayout(root,options.platform,options.arch);
 const source=options.bundle?resolve(options.bundle):layout.destination,app=join(temp,layout.name);
 const executable=join(app,layout.executableRelative),appRoot=join(app,layout.appRelative);
 const env={...process.env,YINGLIU_DATA_DIR:join(temp,'user-data'),YINGLIU_PROJECTS:join(temp,'user-data/projects')};delete env.ELECTRON_RUN_AS_NODE;
-let native,manifest,phase='relocation',sandboxVerified=false,latestSnapshot;
+let native,manifest,phase='relocation',sandboxVerified=false,latestSnapshot,sourcePage;
 const checks=[];const pass=name=>{checks.push({name,status:'PASS'});console.log('PASS '+name);};
 try{
   await cp(source,app,{recursive:true,verbatimSymlinks:true});
@@ -65,14 +66,29 @@ try{
   phase='manual storyboard preview task completion';const beforePreview=await call('current');await page.getByRole('button',{name:'全图概览',exact:true}).click();await page.getByRole('button',{name:'预览',exact:true}).click();
   snapshot=await waitForNewTask({read:()=>call('current'),previousTaskId:beforePreview.task?.id,projectId:beforePreview.project.id,minimumRevision:beforePreview.project.revision});pass('manual storyboard renders without conversation');
   phase='preview iframe ready handshake';const preview=page.frameLocator('iframe[title="影片画面预览"]');await preview.locator('canvas').waitFor();await page.waitForFunction(()=>{const button=document.querySelector('.vs-player button');return button&&!button.disabled;},{},{timeout:15000});assert.equal(await page.getByRole('button',{name:'播放',exact:true}).isEnabled(),true);pass('preview iframe ready handshake');
-  phase='UI source save task completion';await page.locator('.vs-shotchip').first().click();await page.getByRole('tab',{name:'前端源码'}).click();await page.getByRole('textbox',{name:'HTML 源码'}).waitFor();const editor=page.getByRole('textbox',{name:'HTML 源码'});await editor.fill((await editor.inputValue())+'\n<!-- packaged edit -->');const beforeSource=await call('current');await page.getByRole('button',{name:'保存源码',exact:true}).click();
-  snapshot=await waitForNewTask({read:()=>call('current'),previousTaskId:beforeSource.task?.id,projectId:beforeSource.project.id,minimumRevision:beforeSource.project.revision+1});assert.ok(!(await page.locator('[role="alert"]').allTextContents()).some(t=>/revision|版本|失败/.test(t)));pass('UI source edit commits with CAS and real runtime check');
+  sourcePage=page;phase='source editor: first shot click';await page.locator('.vs-shotchip').first().click();
+  phase='source editor: shot selection acknowledgement';await page.waitForFunction(()=>document.querySelector('.vs-shotchip')?.classList.contains('is-active'),{},{timeout:15000});
+  phase='source editor: source tab click';await page.getByRole('tab',{name:'前端源码',exact:true}).click();
+  phase='source editor: source tab acknowledgement';await page.waitForFunction(()=>Array.from(document.querySelectorAll('.vs-tabs [role="tab"]')).some(tab=>tab.getAttribute('aria-selected')==='true'&&tab.textContent?.trim()==='前端源码'),{},{timeout:15000});
+  phase='source editor: HTML field visible';const editor=page.getByRole('textbox',{name:'HTML 源码',exact:true});await editor.waitFor();
+  // SourceEditor can briefly mount its empty textarea before the async source
+  // read starts. Match the selected fixture source before editing that field.
+  phase='source editor: saved source read';const savedSource=await call('source',{projectId:snapshot.project.id,shotId:snapshot.project.shotOrder[0]});
+  phase='source editor: loaded source acknowledgement';await page.waitForFunction(html=>document.querySelector('textarea[aria-label="HTML 源码"]')?.value===html,savedSource.html,{timeout:15000});
+  phase='source editor: HTML value read';const initialHtml=await editor.inputValue();
+  phase='source editor: HTML edit fill';await editor.fill(initialHtml+'\n<!-- packaged edit -->');
+  phase='source editor: save enabled acknowledgement';await page.waitForFunction(()=>Array.from(document.querySelectorAll('.vs-source-toolbar button')).some(button=>button.textContent?.trim()==='保存源码'&&!button.matches(':disabled')),{},{timeout:15000});
+  phase='source editor: current revision read';const beforeSource=await call('current');
+  phase='source editor: save source click';await page.getByRole('button',{name:'保存源码',exact:true}).click();
+  phase='source editor: saved task completion';snapshot=await waitForNewTask({read:()=>call('current'),previousTaskId:beforeSource.task?.id,projectId:beforeSource.project.id,minimumRevision:beforeSource.project.revision+1});
+  phase='source editor: saved alert assertion';const sourceAlerts=await page.locator('[role="alert"]').allTextContents();assert.ok(!sourceAlerts.some(t=>/revision|版本|失败/.test(t)));pass('UI source edit commits with CAS and real runtime check');
   phase='unsaved source navigation guard';await editor.fill((await editor.inputValue())+'\n<!-- unsaved draft guard -->');await page.getByRole('button',{name:'项目首页',exact:true}).click();assert.equal(await page.locator('.vs-studio').count(),1);assert.ok((await editor.inputValue()).includes('unsaved draft guard'));assert.ok((await page.locator('.vs-project-status').textContent()).includes('源码未保存'));pass('unsaved source blocks project navigation and remains visible');phase='source guard save task completion';const beforeGuard=await call('current');await page.getByRole('button',{name:'保存源码',exact:true}).click();snapshot=await waitForNewTask({read:()=>call('current'),previousTaskId:beforeGuard.task?.id,projectId:beforeGuard.project.id,minimumRevision:beforeGuard.project.revision+1});
   await page.getByRole('tab',{name:'影片预览'}).click();await page.getByRole('button',{name:'全图概览',exact:true}).click();await page.evaluate(()=>window.scrollTo(0,0));await page.waitForTimeout(250);const graphBounds=await page.locator('.vs-graph-shell').boundingBox();assert.ok(graphBounds.height<440,'properties must not expand the graph');assert.ok(graphBounds.y+graphBounds.height/2<await page.evaluate(()=>window.innerHeight),'graph center is visible in desktop viewport');pass('wide desktop graph is bounded and visible');await mkdir(output,{recursive:true});await page.screenshot({path:join(output,'07-packaged.png')});await page.getByRole('spinbutton',{name:'跳转帧',exact:true}).fill('30');await page.getByRole('button',{name:'定位',exact:true}).click();await page.locator('iframe[title="影片画面预览"]').scrollIntoViewIfNeeded();await page.waitForTimeout(350);assert.equal(await page.getByTestId('current-frame').textContent(),'30');await page.screenshot({path:join(output,'08-preview-visible.png')});pass('visible midframe preview and thumbnail composition');
   const archive=await call('app.exportProject',{projectId:snapshot.project.id});const restored=await call('app.importProject',{dataBase64:archive.dataBase64});assert.notEqual(restored.project.id,snapshot.project.id);pass('bundled ZIP codec backs up and restores outside source workspace');const id=snapshot.project.id,shotId=snapshot.project.shotOrder[0];await page.getByRole('textbox',{name:'镜头标题',exact:true}).fill('关闭前的修改已保存');await native.close();native=await electron.launch({chromiumSandbox:true,executablePath:executable,args:[],cwd:temp,env,timeout:45000});page=await native.firstWindow();await page.getByRole('heading',{name:'我的影片',exact:false}).waitFor();const persisted=await call('current',{projectId:id});assert.equal(persisted.project.shots.find(shot=>shot.id===shotId).title,'关闭前的修改已保存');pass('closing drains immediate manual edits and restart preserves them');
   }
 }catch(error){
-  const diagnostic=error?.acceptanceDiagnostic??(phase==='preview iframe ready handshake'?{expected:'ready',actual:'not_ready',diagnosticCategory:'WAIT_TIMEOUT'}:undefined);
+  let diagnostic=error?.acceptanceDiagnostic??(phase==='preview iframe ready handshake'?{expected:'ready',actual:'not_ready',diagnosticCategory:'WAIT_TIMEOUT'}:undefined);
+  if(phase.startsWith('source editor: ')){diagnostic={...(diagnostic??{diagnosticCategory:'UI_ACTION_FAILED'}),sourceUi:await readSourceUiState(sourcePage)};}
   if(diagnostic?.diagnosticCategory==='FRAME_NOT_REPEATABLE'&&latestSnapshot?.root){const owned=relative(env.YINGLIU_PROJECTS,latestSnapshot.root);if(owned&&!owned.startsWith('..')&&!isAbsolute(owned))diagnostic.render=await readRenderDiagnostics(latestSnapshot.root,latestSnapshot.project.revision);}
   checks.push({name:phase,status:'FAIL',message:error instanceof Error?error.message:String(error),...(diagnostic?{diagnostic}:{})});console.error(error);process.exitCode=1;
 }finally{
