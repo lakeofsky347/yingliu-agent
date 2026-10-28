@@ -41,7 +41,7 @@ try{
   await build({entryPoints:[join(workspace,'src/client/index.tsx')],bundle:true,format:'esm',platform:'browser',outfile:join(ui,'app.js'),loader:{'.css':'css'},target:['chrome120'],logLevel:'silent'});await writeFile(join(ui,'index.html'),await readFile(join(workspace,'public/index.html')));
   application=await createApplication({dataDirectory:join(temporary,'data'),credentials:new MemorySecrets()});server=await startUiServer(application,ui);
   const executablePath=process.env.CHROME_PATH||findBrowserExecutable();assert.ok(executablePath,'缺少 Chrome/Chromium，可设置 CHROME_PATH');
-  browser=await chromium.launch({executablePath,headless:true,args:['--disable-dev-shm-usage']});
+  browser=await chromium.launch({chromiumSandbox:true,executablePath,headless:true,args:['--disable-dev-shm-usage']});
   const page=await browser.newPage({viewport:{width:1440,height:1000}});page.on('pageerror',error=>pageErrors.push(error.message));await page.goto(server.origin);await page.getByRole('heading',{name:'我的影片',exact:false}).waitFor();
   await page.getByRole('button',{name:'模型设置',exact:true}).click();
   async function connection(name:string,protocol:string,model:string,role:string){

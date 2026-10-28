@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Only for an isolated CI Linux session. Never selects basic_text or disables the application sandbox.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/ci-owned-job.sh"
 if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
   echo "A session D-Bus is required; run with dbus-run-session." >&2
   exit 1
@@ -11,15 +12,15 @@ export GNOME_KEYRING_CONTROL="$acceptance_keyring_root/control" XDG_CURRENT_DESK
 export YINGLIU_VERIFY_PASSWORD_STORE=gnome-libsecret
 mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$GNOME_KEYRING_CONTROL"
 acceptance_keyring_password=$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")
-printf '%s' "$acceptance_keyring_password" | gnome-keyring-daemon --foreground --unlock --components=secrets --control-directory="$GNOME_KEYRING_CONTROL" >"$acceptance_keyring_root/keyring.out" 2>"$acceptance_keyring_root/keyring.err" &
+gnome-keyring-daemon --foreground --unlock --components=secrets --control-directory="$GNOME_KEYRING_CONTROL" < <(printf '%s' "$acceptance_keyring_password") >"$acceptance_keyring_root/keyring.out" 2>"$acceptance_keyring_root/keyring.err" &
 acceptance_keyring_pid=$!
 unset acceptance_keyring_password
 cleanup_acceptance_keyring() {
-  for acceptance_running_pid in $(jobs -pr); do
-    if [[ "$acceptance_running_pid" == "$acceptance_keyring_pid" ]]; then kill "$acceptance_keyring_pid" 2>/dev/null || true; fi
-  done
-  wait "$acceptance_keyring_pid" 2>/dev/null || true
+  local acceptance_exit=$?
+  trap - EXIT
+  acceptance_stop_owned_job "$acceptance_keyring_pid" || acceptance_exit=1
   rm -rf "$acceptance_keyring_root"
+  exit "$acceptance_exit"
 }
 trap cleanup_acceptance_keyring EXIT
 acceptance_keyring_ready=false

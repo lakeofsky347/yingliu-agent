@@ -161,6 +161,7 @@ for (const phase of ['startup', 'dispose']) test(`web-server在${phase}收到重
 
 test('目录解析按显式参数、环境变量和profile默认路径依次选择', () => {
   const previous = process.env.YINGLIU_PROJECTS;
-  try { process.env.YINGLIU_PROJECTS = '/tmp/yingliu-owner-env-projects'; assert.equal(applicationDirectories({ dataDirectory: '/tmp/profile' }).projectsDirectory, '/tmp/yingliu-owner-env-projects'); assert.equal(applicationDirectories({ dataDirectory: '/tmp/profile', projectsDirectory: '/tmp/explicit-projects' }).projectsDirectory, '/tmp/explicit-projects'); delete process.env.YINGLIU_PROJECTS; assert.equal(applicationDirectories({ dataDirectory: '/tmp/profile' }).projectsDirectory, '/tmp/profile/projects'); }
+  const profile=join(tmpdir(),'yingliu-owner-profile'),environment=join(tmpdir(),'yingliu-owner-env-projects'),explicit=join(tmpdir(),'yingliu-owner-explicit-projects');
+  try { process.env.YINGLIU_PROJECTS = environment; assert.equal(applicationDirectories({ dataDirectory: profile }).projectsDirectory, environment); assert.equal(applicationDirectories({ dataDirectory: profile, projectsDirectory: explicit }).projectsDirectory, explicit); delete process.env.YINGLIU_PROJECTS; assert.equal(applicationDirectories({ dataDirectory: profile }).projectsDirectory, join(profile,'projects')); }
   finally { if (previous === undefined) delete process.env.YINGLIU_PROJECTS; else process.env.YINGLIU_PROJECTS = previous; }
 });
