@@ -6,7 +6,7 @@
   "timezone": "Asia/Singapore",
   "branch": "codex/workspace-improvements-20261027",
   "validationSource": {
-    "baseCommit": "41de6712570add499c14484739484d115fc29093",
+    "baseCommit": "9137eb7b7921423c9039704b4872cc2eff77b334",
     "workingTreeDirty": true
   },
   "local": {
@@ -16,8 +16,8 @@
     "build": "PASS",
     "package": "PASS",
     "tests": {
-      "total": 447,
-      "passed": 447,
+      "total": 453,
+      "passed": 453,
       "failed": 0,
       "skipped": 0
     },
@@ -34,7 +34,8 @@
       "cliDesktopBusyExitCode": 9,
       "checkedAt": "2026-10-28T09:05:44.984Z",
       "totalChecks": 73,
-      "temporaryDataCleanup": "PASS"
+      "temporaryDataCleanup": "PASS",
+      "runtimeCommittedAs": "9137eb7b7921423c9039704b4872cc2eff77b334"
     },
     "providerEvidence": "仅本机网关、内存响应与合成凭据；未调用真实计费 API",
     "workflowDurabilityCases": 74,
@@ -44,9 +45,22 @@
       "failedBeforeFix": 3,
       "browser": "real Chromium and React"
     },
-    "recoveryEvidence": "最终真实无限循环恢复验收通过；原单次超时未保留完整末态，不声称精确根因已证明。另3项确定性Preview缺陷修前失败、修后通过。"
+    "recoveryEvidence": "最终真实无限循环恢复验收通过；原单次超时未保留完整末态，不声称精确根因已证明。另3项确定性Preview缺陷修前失败、修后通过。",
+    "packageTaskBarrier": {
+      "checkedAt": "2026-10-28T09:19:23.882Z",
+      "checksPassed": 20,
+      "newRegressionCases": 6,
+      "productCodeChanged": false,
+      "status": "PASS"
+    }
   },
-  "remoteAcceptance": "按此分支推送后对应的快速矩阵与原生媒体 Actions 独立核对",
+  "remoteAcceptance": {
+    "validatedCommit": "9137eb7b7921423c9039704b4872cc2eff77b334",
+    "fastRun": 40661704196,
+    "fastStatus": "PASS",
+    "nativeRun": 40661704269,
+    "nativeStatus": "Windows package failed; macOS/Linux complete PASS, Windows native/models/film/editor PASS; next commit verifies task identity barriers without retrying failed tasks"
+  },
   "separateExperimentalBranch": "codex/tauri-p0-hardening-20261028",
   "notVerified": [
     "真实供应商与计费",
