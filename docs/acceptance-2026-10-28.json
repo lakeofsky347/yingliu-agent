@@ -6,7 +6,7 @@
   "timezone": "Asia/Singapore",
   "branch": "codex/workspace-improvements-20261027",
   "validationSource": {
-    "baseCommit": "2f39b31db56c1feddcdec960254883c3282d8871",
+    "baseCommit": "dd711feb955e5e5c363af95e5e7f96e392b1c3a0",
     "workingTreeDirty": true
   },
   "local": {
@@ -77,13 +77,14 @@
       "size": "1920x1080",
       "keyFrames": 9,
       "strictPngHash": true,
-      "windowsOutcome": "PENDING_CI"
+      "windowsOutcome": "PENDING_CI",
+      "compositorBarrier": "--run-all-compositor-stages-before-draw"
     },
     "applicationOwnerCases": 16
   },
   "remoteAcceptance": {
     "candidatePending": true,
-    "note": "475项完整回归、重建包及默认三镜头实际严格重复性专项通过；等待对应提交三平台CI，本机GUI上次钥匙串阻塞后未重试"
+    "note": "灰阶将Windows最大通道差由13降至1，仍严格失败；新增完整合成阶段屏障候选475项回归和重建包通过，等待对应提交三平台CI"
   },
   "separateExperimentalBranch": "codex/tauri-p0-hardening-20261028",
   "notVerified": [
