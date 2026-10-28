@@ -6,9 +6,10 @@
   "timezone": "Asia/Singapore",
   "branch": "codex/workspace-improvements-20261027",
   "validationSource": {
-    "sourceCommittedAs": "ef3104c6c1cac698671c8a32ed75ab19d8050627",
+    "sourceCommittedAs": "988a064a4df9c92822e7c6d7a048462758ee6340",
     "localTestsAndPackageBeforeCommit": true,
-    "documentationChangesExcludedFromSourceComparison": true
+    "documentationChangesExcludedFromSourceComparison": true,
+    "productSourceCommit": "6ae4103919ce511412bc7c4b18eb7101f445fdf5"
   },
   "local": {
     "platform": "darwin",
@@ -17,8 +18,8 @@
     "build": "PASS",
     "package": "PASS",
     "tests": {
-      "total": 504,
-      "passed": 504,
+      "total": 512,
+      "passed": 512,
       "failed": 0,
       "skipped": 0
     },
@@ -79,7 +80,7 @@
       "realChromium": true
     },
     "pngDiagnosticCases": 15,
-    "applicationOwnerCases": 16,
+    "applicationOwnerCases": 17,
     "webglCapability": {
       "platform": "darwin arm64",
       "casesPassed": 2,
@@ -115,7 +116,7 @@
       "composition": "software capture only",
       "editorCompositionChanged": false
     },
-    "evidenceDirectory": ".local/final-v1.0.0-20261028/main-ef3104c",
+    "evidenceDirectory": ".local/final-v1.0.0-20261028/main-988a064",
     "finalPackageLayout": "PASS; desktop GUI intentionally excluded from this layout command",
     "immutableRuntimeReuse": {
       "newRegressionCases": 6,
@@ -128,46 +129,78 @@
       "globalDurableHelperChanged": false,
       "automaticRetriesAdded": false,
       "beforeEvidence": ".local/final-v1.0.0-20261028/main-ef3104c/immutable-reuse-before-failed.log"
-    }
+    },
+    "runtimeRenamePolicy": {
+      "regressionCases": 7,
+      "combinedTargetPassed": 23,
+      "platform": "win32 only",
+      "errorCode": "EPERM",
+      "syscall": "rename",
+      "maximumAttempts": 8,
+      "intervalMs": 100,
+      "monotonicRetryWindowMs": 750,
+      "singleKernelIoTimeout": false,
+      "liveTargetDeletedOrTruncated": false,
+      "backgroundWriteRace": false,
+      "nonMatchingLaterError": "immediate current error",
+      "pureEpermExhaustion": "first original error",
+      "scope": "runtime publication only; global durable, paid receipts, model and task retries unchanged"
+    },
+    "postPolicyTestSync": {
+      "commit": "e7cbf37b532e44e7b4937126051806f68fd04a32",
+      "targetCasesPassed": 23,
+      "typecheck": "PASS",
+      "productCodeUnchanged": true
+    },
+    "ownerFixtureIsolation": {
+      "regressionCases": 1,
+      "combinedCasesPassed": 17,
+      "applicationCreationRetried": false,
+      "busyAcceptedAsSuccess": false,
+      "productionOwnershipChanged": false,
+      "candidateBound": 64,
+      "realListenerProbe": true
+    },
+    "packageProductSourceCommit": "6ae4103919ce511412bc7c4b18eb7101f445fdf5"
   },
   "remoteAcceptance": {
-    "validatedCommit": "ef3104c6c1cac698671c8a32ed75ab19d8050627",
-    "fastRunId": 40687282565,
-    "nativeRunId": 40687282586,
+    "validatedCommit": "988a064a4df9c92822e7c6d7a048462758ee6340",
+    "productSourceCommit": "6ae4103919ce511412bc7c4b18eb7101f445fdf5",
+    "fastRunId": 40696564704,
+    "nativeRunId": 40696564703,
     "status": "PASS",
-    "fastStatus": "PASS",
+    "workingTreeDirty": false,
     "fastMatrix": [
       {
         "platform": "macos",
-        "total": 504,
-        "passed": 490,
+        "total": 512,
+        "passed": 498,
         "skipped": 14,
         "failed": 0
       },
       {
         "platform": "windows",
-        "total": 504,
-        "passed": 483,
+        "total": 512,
+        "passed": 491,
         "skipped": 21,
         "failed": 0
       },
       {
         "platform": "linux",
-        "total": 504,
-        "passed": 490,
+        "total": 512,
+        "passed": 498,
         "skipped": 14,
         "failed": 0
       }
     ],
-    "workingTreeDirty": false,
     "nativeMatrix": [
       {
         "platform": "linux",
         "architecture": "x64",
         "status": "PASS",
-        "commit": "ef3104c6c1cac698671c8a32ed75ab19d8050627",
+        "commit": "988a064a4df9c92822e7c6d7a048462758ee6340",
         "workingTreeDirty": false,
-        "checkedAt": "2026-10-28T12:25:30.483Z",
+        "checkedAt": "2026-10-28T13:30:28.744Z",
         "phases": {
           "preflight": {
             "status": "PASS",
@@ -199,8 +232,8 @@
         "sandboxEnabled": true,
         "encryptionAvailable": true,
         "temporaryDataCleanup": "PASS",
-        "artifactId": 12815657347,
-        "artifactZipSha256": "1ceddc13c4b64b904391556397df7ea822d319fb12be9138e55af2458918dc5e",
+        "artifactId": 12820475168,
+        "artifactZipSha256": "dfd84f7e542da62e57a2dd540387db8b7e083dc1f63eeb2a5b0c2c76d13b3a61",
         "runtime": {
           "node": "22.23.3",
           "browser": "Chromium 156.0.8078.73",
@@ -212,9 +245,9 @@
         "platform": "macos",
         "architecture": "arm64",
         "status": "PASS",
-        "commit": "ef3104c6c1cac698671c8a32ed75ab19d8050627",
+        "commit": "988a064a4df9c92822e7c6d7a048462758ee6340",
         "workingTreeDirty": false,
-        "checkedAt": "2026-10-28T12:26:54.511Z",
+        "checkedAt": "2026-10-28T13:31:26.318Z",
         "phases": {
           "preflight": {
             "status": "PASS",
@@ -246,8 +279,8 @@
         "sandboxEnabled": true,
         "encryptionAvailable": true,
         "temporaryDataCleanup": "PASS",
-        "artifactId": 12816081477,
-        "artifactZipSha256": "7bbbd91825aa3ba7be2dc5a62cf670c9d5959144909842917b0e1589010f0778",
+        "artifactId": 12820335562,
+        "artifactZipSha256": "8f144db27c6cacfdddf0e2d18c0728f96735d8f39b83816259ef578f67ff8f28",
         "runtime": {
           "node": "22.23.2",
           "browser": "Chromium 156.0.8078.74",
@@ -259,9 +292,9 @@
         "platform": "windows",
         "architecture": "x64",
         "status": "PASS",
-        "commit": "ef3104c6c1cac698671c8a32ed75ab19d8050627",
+        "commit": "988a064a4df9c92822e7c6d7a048462758ee6340",
         "workingTreeDirty": false,
-        "checkedAt": "2026-10-28T12:27:24.446Z",
+        "checkedAt": "2026-10-28T13:32:21.048Z",
         "phases": {
           "preflight": {
             "status": "PASS",
@@ -293,8 +326,8 @@
         "sandboxEnabled": true,
         "encryptionAvailable": true,
         "temporaryDataCleanup": "PASS",
-        "artifactId": 12815837323,
-        "artifactZipSha256": "7b4edeb130faff2bb600592fb282a761f853e3608c795f3acd048d84de79f3ca",
+        "artifactId": 12819623139,
+        "artifactZipSha256": "6731450c3938babf2edbc413b22ad31c514c48c97aad41e57e3d871f1393a380",
         "runtime": {
           "node": "22.23.4",
           "browser": "Chromium 156.0.8078.74",
@@ -306,14 +339,14 @@
   },
   "separateExperimentalBranch": {
     "branch": "codex/tauri-p0-hardening-20261028",
-    "localSourceMerge": "11ff0074a9b19b325cc62808d9e43720f2e71f94",
-    "validationCommit": "7c21a490e81149d31b0b0f7cb4fb89bf463a12c1",
+    "localSourceMerge": "c859e21e6574e7c2cfa257da682d774d409d22a2",
+    "validationCommit": "21f8ba1206eba2f7c9cbf1e4bc210a73a74e3977",
     "local": {
       "platform": "darwin",
       "architecture": "arm64",
       "tests": {
-        "total": 540,
-        "passed": 540,
+        "total": 548,
+        "passed": 548,
         "failed": 0,
         "skipped": 0
       },
@@ -338,42 +371,44 @@
       },
       "sea": {
         "runtime": "Node 24.19.0",
-        "manifestCommit": "11ff0074a9b19b325cc62808d9e43720f2e71f94",
-        "sha256": "454296c657534a5236dead5958e8e42e47ab241a436fc2b136b1c0b771602b21",
+        "manifestCommit": "4de336a6b50e96c2981f1c13a513bd6e0fa98a60",
+        "sha256": "6aa562bb793467f3b13906773ef256037fe42ccb60fb290f1d67cdc7ab469ac6",
         "binaryBytes": 129362576,
         "totalBytes": 131572125,
         "signed": false
       },
-      "evidenceDirectory": ".local/worktrees/tauri-p0/.local/p0-final-ef3104c-20261028"
+      "evidenceDirectory": ".local/worktrees/tauri-p0/.local/p0-final-6ae4103-20261028",
+      "productFullTestCountBeforeTestOnlySync": 547,
+      "testSyncEvidenceDirectory": ".local/worktrees/tauri-p0/.local/p0-test-sync-988a064-20261028"
     },
     "remote": {
-      "fastRunId": 40688252045,
-      "tauriBuildRunId": 40688252168,
-      "electronNativeRunId": 40688252048,
+      "fastRunId": 40697100383,
+      "tauriBuildRunId": 40697100421,
+      "electronNativeRunId": 40697100520,
       "status": "PASS",
+      "workingTreeDirty": false,
       "fastStatus": "PASS",
       "tauriBuildStatus": "PASS",
       "electronNativeStatus": "PASS",
-      "workingTreeDirty": false,
       "fastMatrix": [
         {
           "platform": "macos",
-          "total": 540,
-          "passed": 526,
+          "total": 548,
+          "passed": 534,
           "skipped": 14,
           "failed": 0
         },
         {
           "platform": "windows",
-          "total": 540,
-          "passed": 511,
+          "total": 548,
+          "passed": 519,
           "skipped": 29,
           "failed": 0
         },
         {
           "platform": "linux",
-          "total": 540,
-          "passed": 526,
+          "total": 548,
+          "passed": 534,
           "skipped": 14,
           "failed": 0
         }
@@ -383,9 +418,9 @@
           "platform": "linux",
           "architecture": "x64",
           "status": "PASS",
-          "commit": "7c21a490e81149d31b0b0f7cb4fb89bf463a12c1",
+          "commit": "21f8ba1206eba2f7c9cbf1e4bc210a73a74e3977",
           "workingTreeDirty": false,
-          "checkedAt": "2026-10-28T12:33:39.989Z",
+          "checkedAt": "2026-10-28T13:34:03.682Z",
           "phases": {
             "preflight": {
               "status": "PASS",
@@ -417,8 +452,8 @@
           "sandboxEnabled": true,
           "encryptionAvailable": true,
           "temporaryDataCleanup": "PASS",
-          "artifactId": 12816042962,
-          "artifactZipSha256": "ce0e3b0a21afaa42595b46b38bda3df7d2fb462effae2633c401bd61874c9b9a",
+          "artifactId": 12819194266,
+          "artifactZipSha256": "2bd116ed5445e326f031d6e3ebc295402c727367b133f9889e7ceccbb420ca1b",
           "runtime": {
             "node": "22.23.3",
             "browser": "Chromium 156.0.8078.73",
@@ -430,9 +465,9 @@
           "platform": "macos",
           "architecture": "arm64",
           "status": "PASS",
-          "commit": "7c21a490e81149d31b0b0f7cb4fb89bf463a12c1",
+          "commit": "21f8ba1206eba2f7c9cbf1e4bc210a73a74e3977",
           "workingTreeDirty": false,
-          "checkedAt": "2026-10-28T12:34:57.690Z",
+          "checkedAt": "2026-10-28T13:34:54.230Z",
           "phases": {
             "preflight": {
               "status": "PASS",
@@ -464,8 +499,8 @@
           "sandboxEnabled": true,
           "encryptionAvailable": true,
           "temporaryDataCleanup": "PASS",
-          "artifactId": 12815863062,
-          "artifactZipSha256": "a5af8f3cde9e9ceb7b97e2e72543a14074b41ef813647db372eec3416b3e23ad",
+          "artifactId": 12820271469,
+          "artifactZipSha256": "0e393d4078b6aeebca5a4dc14b7b9e801b4aaccb2be3fe7e53dbcbaea2d88214",
           "runtime": {
             "node": "22.23.2",
             "browser": "Chromium 156.0.8078.74",
@@ -477,9 +512,9 @@
           "platform": "windows",
           "architecture": "x64",
           "status": "PASS",
-          "commit": "7c21a490e81149d31b0b0f7cb4fb89bf463a12c1",
+          "commit": "21f8ba1206eba2f7c9cbf1e4bc210a73a74e3977",
           "workingTreeDirty": false,
-          "checkedAt": "2026-10-28T12:34:51.139Z",
+          "checkedAt": "2026-10-28T13:36:11.036Z",
           "phases": {
             "preflight": {
               "status": "PASS",
@@ -511,8 +546,8 @@
           "sandboxEnabled": true,
           "encryptionAvailable": true,
           "temporaryDataCleanup": "PASS",
-          "artifactId": 12815678992,
-          "artifactZipSha256": "46080556d11c59e46a199dbf8d86fa9e0d6af79e14cf717b0b456f7a69239790",
+          "artifactId": 12819194658,
+          "artifactZipSha256": "a20bb66464224a017276438d70b0898eaafdae73d24d18bcf6bf585c709dd7d4",
           "runtime": {
             "node": "22.23.4",
             "browser": "Chromium 156.0.8078.74",
@@ -522,7 +557,8 @@
         }
       ]
     },
-    "scope": "P0 hardening and SEA/stdio/Rust builds; not formal Tauri native GUI or migration acceptance"
+    "scope": "P0 hardening and SEA/stdio/Rust builds; not formal Tauri native GUI or migration acceptance",
+    "productSourceMerge": "4de336a6b50e96c2981f1c13a513bd6e0fa98a60"
   },
   "notVerified": [
     "真实供应商、账户权限、生成质量、实际计费和报价",
@@ -570,11 +606,58 @@
       "proven": "repeated content-addressed runtime publication fails at Windows rename",
       "lockHolder": "NOT_IDENTIFIED",
       "fixScope": "byte-verified reuse of unchanged content-addressed resources; mutable aliases/index and global durable receipts unchanged"
+    },
+    {
+      "scope": "Tauri inherited Electron Windows at documentation seal 95bbf31",
+      "commit": "95bbf311ef4468604b0cbf8d2332484cd2f69166",
+      "nativeRunId": 40690138976,
+      "workingTreeDirty": false,
+      "package": "PASS",
+      "models": "PASS",
+      "film": "PASS",
+      "editor": "PASS",
+      "native": {
+        "category": "IO_ERROR",
+        "operation": "runtime_index_publish",
+        "ioCode": "EPERM",
+        "syscall": "rename",
+        "taskRevision": 2,
+        "observedAs": "WAIT_TIMEOUT after failed preview"
+      },
+      "artifactId": 12817187216,
+      "artifactZipSha256": "0ecd4aa0c4541b4e992c6d57158c547e3116ad53b753da6bb07d5ac5deadf205",
+      "fixScope": "Windows-only runtime publication retry on actual EPERM/rename, bounded attempts and monotonic retry window; no task/provider/global durable retry",
+      "lockHolder": "NOT_IDENTIFIED"
+    },
+    {
+      "scope": "main Windows fast matrix at 6ae4103",
+      "commit": "6ae4103919ce511412bc7c4b18eb7101f445fdf5",
+      "fastRunId": 40693416868,
+      "jobId": 122833777293,
+      "cause": "old diagnostic fixture asserted one filesystem attempt after a Windows-only retry policy was intentionally added",
+      "expectedByOldFixture": 1,
+      "actualAttempts": 6,
+      "testOnlyFixCommit": "e7cbf37b532e44e7b4937126051806f68fd04a32",
+      "productCodeChangedByTestFix": false,
+      "separateNativeRunId": 40693416863,
+      "separateNativeThreePlatforms": "PASS"
+    },
+    {
+      "scope": "main Linux fast matrix at e7cbf37",
+      "commit": "e7cbf37b532e44e7b4937126051806f68fd04a32",
+      "fastRunId": 40694492844,
+      "jobId": 122837533122,
+      "cause": "parallel independent directory fixture did not exclude an already occupied ownership listener slot",
+      "observed": "BUSY while creating other-projects",
+      "testOnlyFixCommit": "988a064a4df9c92822e7c6d7a048462758ee6340",
+      "productionOwnershipChanged": false,
+      "separateNativeRunId": 40694492857,
+      "separateNativeThreePlatforms": "PASS"
     }
   ],
   "publication": {
     "commitMessage": "v1.0.0",
-    "sourceValidationCommit": "ef3104c6c1cac698671c8a32ed75ab19d8050627",
+    "sourceValidationCommit": "988a064a4df9c92822e7c6d7a048462758ee6340",
     "finalSealScope": "documentation only; product code must equal validated source",
     "tagCreated": false,
     "githubReleaseCreated": false,
@@ -876,6 +959,180 @@
           "temporaryDataCleanup": "PASS",
           "artifactId": 12813358401,
           "artifactZipSha256": "7b22d9130240db3350f719473f2451f3dc6c5bb3428543952e45b0a4ca61e4ec"
+        }
+      ]
+    },
+    {
+      "validatedCommit": "ef3104c6c1cac698671c8a32ed75ab19d8050627",
+      "fastRunId": 40687282565,
+      "nativeRunId": 40687282586,
+      "status": "PASS",
+      "fastStatus": "PASS",
+      "fastMatrix": [
+        {
+          "platform": "macos",
+          "total": 504,
+          "passed": 490,
+          "skipped": 14,
+          "failed": 0
+        },
+        {
+          "platform": "windows",
+          "total": 504,
+          "passed": 483,
+          "skipped": 21,
+          "failed": 0
+        },
+        {
+          "platform": "linux",
+          "total": 504,
+          "passed": 490,
+          "skipped": 14,
+          "failed": 0
+        }
+      ],
+      "workingTreeDirty": false,
+      "nativeMatrix": [
+        {
+          "platform": "linux",
+          "architecture": "x64",
+          "status": "PASS",
+          "commit": "ef3104c6c1cac698671c8a32ed75ab19d8050627",
+          "workingTreeDirty": false,
+          "checkedAt": "2026-10-28T12:25:30.483Z",
+          "phases": {
+            "preflight": {
+              "status": "PASS",
+              "checks": 5
+            },
+            "package": {
+              "status": "PASS",
+              "checks": 21
+            },
+            "native": {
+              "status": "PASS",
+              "checks": 22
+            },
+            "models": {
+              "status": "PASS",
+              "checks": 11
+            },
+            "film": {
+              "status": "PASS",
+              "checks": 7
+            },
+            "editor": {
+              "status": "PASS",
+              "checks": 8
+            }
+          },
+          "totalChecks": 74,
+          "credentialBackend": "gnome_libsecret",
+          "sandboxEnabled": true,
+          "encryptionAvailable": true,
+          "temporaryDataCleanup": "PASS",
+          "artifactId": 12815657347,
+          "artifactZipSha256": "1ceddc13c4b64b904391556397df7ea822d319fb12be9138e55af2458918dc5e",
+          "runtime": {
+            "node": "22.23.3",
+            "browser": "Chromium 156.0.8078.73",
+            "ffmpeg": "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers",
+            "ffprobe": "ffprobe version 6.1.1-3ubuntu5 Copyright (c) 2007-2023 the FFmpeg developers"
+          }
+        },
+        {
+          "platform": "macos",
+          "architecture": "arm64",
+          "status": "PASS",
+          "commit": "ef3104c6c1cac698671c8a32ed75ab19d8050627",
+          "workingTreeDirty": false,
+          "checkedAt": "2026-10-28T12:26:54.511Z",
+          "phases": {
+            "preflight": {
+              "status": "PASS",
+              "checks": 5
+            },
+            "package": {
+              "status": "PASS",
+              "checks": 20
+            },
+            "native": {
+              "status": "PASS",
+              "checks": 22
+            },
+            "models": {
+              "status": "PASS",
+              "checks": 11
+            },
+            "film": {
+              "status": "PASS",
+              "checks": 7
+            },
+            "editor": {
+              "status": "PASS",
+              "checks": 8
+            }
+          },
+          "totalChecks": 73,
+          "credentialBackend": "macos_keychain",
+          "sandboxEnabled": true,
+          "encryptionAvailable": true,
+          "temporaryDataCleanup": "PASS",
+          "artifactId": 12816081477,
+          "artifactZipSha256": "7bbbd91825aa3ba7be2dc5a62cf670c9d5959144909842917b0e1589010f0778",
+          "runtime": {
+            "node": "22.23.2",
+            "browser": "Chromium 156.0.8078.74",
+            "ffmpeg": "ffmpeg version 9.0.1 Copyright (c) 2000-2026 the FFmpeg developers",
+            "ffprobe": "ffprobe version 9.0.1 Copyright (c) 2007-2026 the FFmpeg developers"
+          }
+        },
+        {
+          "platform": "windows",
+          "architecture": "x64",
+          "status": "PASS",
+          "commit": "ef3104c6c1cac698671c8a32ed75ab19d8050627",
+          "workingTreeDirty": false,
+          "checkedAt": "2026-10-28T12:27:24.446Z",
+          "phases": {
+            "preflight": {
+              "status": "PASS",
+              "checks": 5
+            },
+            "package": {
+              "status": "PASS",
+              "checks": 20
+            },
+            "native": {
+              "status": "PASS",
+              "checks": 22
+            },
+            "models": {
+              "status": "PASS",
+              "checks": 11
+            },
+            "film": {
+              "status": "PASS",
+              "checks": 7
+            },
+            "editor": {
+              "status": "PASS",
+              "checks": 8
+            }
+          },
+          "totalChecks": 73,
+          "credentialBackend": "windows_dpapi",
+          "sandboxEnabled": true,
+          "encryptionAvailable": true,
+          "temporaryDataCleanup": "PASS",
+          "artifactId": 12815837323,
+          "artifactZipSha256": "7b4edeb130faff2bb600592fb282a761f853e3608c795f3acd048d84de79f3ca",
+          "runtime": {
+            "node": "22.23.4",
+            "browser": "Chromium 156.0.8078.74",
+            "ffmpeg": "ffmpeg version 9.0.2-essentials_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers",
+            "ffprobe": "ffprobe version 9.0.2-essentials_build-www.gyan.dev Copyright (c) 2007-2026 the FFmpeg developers"
+          }
         }
       ]
     }
