@@ -74,10 +74,22 @@ Rust `SidecarProcess` 从 spawn 开始持有子进程；缺管道、首行错误
 
 通用 `Platform checks` 与 `Native and media acceptance` 不限制上述分支，但其原生应用对象仍是主线 Electron 应用。触发配置说明哪些检查会被尝试执行，不构成对应提交的远端 CI 已通过证据，应查看该提交实际 Actions 结果。
 
-此前主线在用户手动处理系统钥匙串后，新包于 `2026-10-28T11:19:03.529Z` 取得单次完整本机 73/73 通过，包含此前无限循环恢复、Keychain 与 sandbox 路径；这是当时主线 Electron 本机验收。`accfdf3` 的三平台快速矩阵已通过（Actions run 40679330829），三平台 Electron 原生媒体验收也已通过（run 40679330857）。这些旧提交证据不替代当前诊断候选自己的原生验收。
+此前主线在用户手动处理系统钥匙串后，新包于 `2026-10-28T11:19:03.529Z` 取得单次完整本机 73/73 通过，包含此前无限循环恢复、Keychain 与 sandbox 路径；这是当时主线 Electron 本机验收。`accfdf3` 的三平台快速矩阵已通过（Actions run 40679330829），三平台 Electron 原生媒体验收也已通过（run 40679330857）。这些旧提交证据不替代最新源码自己的原生验收。
 
-当前主线 `0f26d9a` 的三平台快速矩阵已通过（Actions run 40683701636），同一干净提交的 Electron 原生媒体验收三平台也全部成功（run 40683701661：macOS 73、Windows 73、Linux 74 项）。主线本机完整 498/498、类型检查、构建与搬迁包布局检查已通过；新增诊断后的 GUI 结果以这次远端干净提交为证，不标成本轮重新执行的本机 73 项。
+前一主线诊断提交 `0f26d9a` 的三平台快速矩阵已通过（Actions run 40683701636），同一干净提交的 Electron 原生媒体验收三平台也全部成功（run 40683701661：macOS 73、Windows 73、Linux 74 项）。主线本机完整 498/498、类型检查、构建与搬迁包布局检查已通过；新增诊断后的 GUI 结果以这次远端干净提交为证，不标成本轮重新执行的本机 73 项。
 
-独立分支此前提交 `2cb084b` 的专用 SEA/stdio/Rust 三平台与通用快速三平台已通过，但继承的 Windows Electron 原生验收失败：package 的 revision 4 预览任务为 `TASK_FAILED`，native 在聊天重试等待处超时；models、film、editor 已通过。当时脱敏摘要没有具体 IO code 或 syscall，不能判定其 Windows 根因，也不将其记为通过。随后 `a7c31c7` 的专用与快速三平台也通过，但 Windows Electron 原生失败并取得上述固定 IO/rename 证据。本次同步的主线源码 `ef3104c` 已取得三平台快速和 Electron 原生矩阵全部成功；该源码的本机完整 504/504、类型检查和应用包构建也已通过。此处验收身份固定为源码 SHA，之后的 HARDENING 封存仅改文档；本独立分支自己的专用、快速及原生 CI 仍须按最终分支提交核对，不由主线结果替代。本轮没有执行 Tauri 原生窗口验收，P0 中断恢复演练也不替代该验收。
+独立分支此前提交 `2cb084b` 的专用 SEA/stdio/Rust 三平台与通用快速三平台已通过，但继承的 Windows Electron 原生验收失败：package 的 revision 4 预览任务为 `TASK_FAILED`，native 在聊天重试等待处超时；models、film、editor 已通过。当时脱敏摘要没有具体 IO code 或 syscall，不能判定其 Windows 根因，也不将其记为通过。随后 `a7c31c7` 的专用与快速三平台也通过，但 Windows Electron 原生失败并取得上述固定 IO/rename 证据。本次同步的主线源码 `ef3104c` 已取得三平台快速和 Electron 原生矩阵全部成功；该源码的本机完整 504/504、类型检查和应用包构建也已通过。此处验收身份固定为源码 SHA，之后的 HARDENING 封存仅改文档；本独立分支验收提交 `7c21a490e81149d31b0b0f7cb4fb89bf463a12c1` 的专用、快速及继承 Electron 原生 CI 均已独立核对通过，见下表；最终交付文档同步不改变该产品源码。本轮没有执行 Tauri 原生窗口验收，P0 中断恢复演练也不替代该验收。
 
 本轮没有执行 sudo/drop_caches、真实计费 API、真实旧凭据迁移、Tauri 原生 GUI 验收、Windows JobObject 验收、干净目标机安装、发行签名/公证或新的 Linux 冷启动/PSS 同口径性能比较。历史 P0 报告和 evidence 保留为历史记录，不用本轮加固追认旧性能数字。
+
+## 最终独立提交的远端验收
+
+本表固定源码验收提交 `7c21a490e81149d31b0b0f7cb4fb89bf463a12c1`，其本机产品源码为 `11ff0074a9b19b325cc62808d9e43720f2e71f94`，两者之间仅 HARDENING 文档变化。后续同步主施工四份说明和本段证据，产品源码仍保持等价；不循环改写文档以追逐说明提交触发的新 CI 编号。
+
+| 检查 | 三平台结果 | 范围 |
+| --- | --- | --- |
+| [Platform checks 40688252045](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40688252045) | PASS；Mac/Linux各526通过14跳过，Windows511通过29跳过，全部零失败 | 总数540；Windows未支持的POSIX进程用例明确跳过 |
+| [Tauri P0 spike 40688252168](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40688252168) | Windows/macOS/Linux全部PASS | SEA构建、stdio冒烟、Rust release编译；非Tauri原生GUI |
+| [Native and media acceptance 40688252048](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40688252048) | Mac73/73、Windows73/73、Linux74/74；全部PASS | 继承的Electron搬迁包/原生/媒体/模型费用/编辑安全；非Tauri原生GUI |
+
+三份原生允许字段摘要已分别下载，核对 clean 提交、所有阶段、系统凭据后端、sandbox、加密与临时数据清理，以及 GitHub 公布的 ZIP SHA-256。对应 artifact 为Linux12816042962、macOS12815863062、Windows12815678992，摘要身份完整保存在同步后的 [机器可读交付记录](../acceptance-2026-10-28.json)。此前2cb失败保持UNKNOWN、a7的EPERM/rename实证继续保留；没有把旧失败重标PASS，没有放宽哈希或自动重试任务。
