@@ -2,9 +2,11 @@
 
 日期：2026-10-28，Asia/Singapore。交付记录为 v1.0.0，应用 package 版本保持 0.5.0。
 
-工作分支为 `codex/tauri-p0-hardening-20261028`。本次重新冻结验收基于主线资源复用修复 `ef3104c6c1cac698671c8a32ed75ab19d8050627`，在隔离分支的合并基线为 `11ff0074a9b19b325cc62808d9e43720f2e71f94`，同时包含 P0 加固及 Windows 进程证据拒绝路径修改。构建 manifest 中的 commit 指向该产品验收合并基线；它不单独代表该主线提交的全部原生验收已通过。本记录不改写历史测量或把 P0 壳当成主线应用；原 spike、PR 4 和主线不自动合并。
+工作分支为 `codex/tauri-p0-hardening-20261028`。本次重新冻结验收基于主线 runtime 有界重试修复 `6ae4103919ce511412bc7c4b18eb7101f445fdf5`，在隔离分支的合并基线为 `4de336a6b50e96c2981f1c13a513bd6e0fa98a60`，同时包含 P0 加固及 Windows 进程证据拒绝路径修改。构建 manifest 中的 commit 指向该产品验收合并基线；它不单独代表该主线提交的全部原生验收已通过。本记录不改写历史测量或把 P0 壳当成主线应用；原 spike、PR 4 和主线不自动合并。
 
-之前 `9137eb7..eb514f4` 仅为验收脚本、测试和文档同步，当时产品源码等价；该结论不延伸到之后的实际渲染字体屏障、文本渲染与合成参数、工程目录锁等待、不可变运行时发布、可选错误诊断及安全复用修改。本次已重新执行下面的 540 项全量、UI/应用构建、Node SEA 打包及 source/SEA 共 10 项故障演练，没有沿用旧 Node/渲染运行时结果替代。Rust 源码树与 `dd711fe` 验收合并基线相同，沿用该轮 4 项测试与编译检查证据。旧基线证据仍保存在各自忽略目录，未被本轮覆盖。
+随后仅同步测试断言修正 `e7cbf37b532e44e7b4937126051806f68fd04a32`，隔离分支对应合并提交为 `97612038a2cb10d4ececeb88e60ecf10a9fc42a4`。已核对相对 `4de336a` 的 `src / scripts / bin / .github / package.json / package-lock.json / assets` 差异为空，仅 `tests/task-failure-diagnostics.test.ts` 更新：Windows 文件尝试次数允许在 1..8 内随期限提前结束，其他平台仍须一次失败；失败状态、固定 IO 诊断和不上传 raw 字段的断言保留。该同步后另跑 23/23 专项及类型检查通过，产品与 SEA 字节等价，因此没有伪称重跑全量或重新生成 SEA。
+
+之前 `9137eb7..eb514f4` 仅为验收脚本、测试和文档同步，当时产品源码等价；该结论不延伸到之后的实际渲染字体屏障、文本渲染与合成参数、工程目录锁等待、不可变运行时发布、可选错误诊断、安全复用及 runtime 文件级重试修改。本次已重新执行下面的 547 项全量、UI/应用构建、Node SEA 打包及 source/SEA 共 10 项故障演练，没有沿用旧 Node/渲染运行时结果替代。Rust 源码树与 `dd711fe` 验收合并基线相同，沿用该轮 4 项测试与编译检查证据。旧基线证据仍保存在各自忽略目录，未被本轮覆盖。
 
 ## 凭据迁移事务
 
@@ -33,19 +35,28 @@ Rust `SidecarProcess` 从 spawn 开始持有子进程；缺管道、首行错误
 
 ## 可选错误诊断
 
-同步主线的固定 `category / operation / ioCode / syscall` 元数据，从 renderer 实际错误进入匹配 revision 的 check 报告、任务状态和日志，上传摘要再次按枚举校验。原 error 文本和旧任务日志仍兼容；冻结或不可写的 Error 保留原异常信息，原生验收的历史读取挂起时仍返回 2 秒预算内已采集的固定任务状态。诊断不决定任务状态、审批或重试，没有增加自动重试、放宽 PNG 验收或修改通用持久化 helper。
+同步主线的固定 `category / operation / ioCode / syscall` 元数据，从 renderer 实际错误进入匹配 revision 的 check 报告、任务状态和日志，上传摘要再次按枚举校验。原 error 文本和旧任务日志仍兼容；冻结或不可写的 Error 保留原异常信息，原生验收的历史读取挂起时仍返回 2 秒预算内已采集的固定任务状态。诊断不决定任务状态、审批或任务/模型重试，不放宽 PNG 验收或修改通用持久化 helper；runtime 文件级重试只由下述实际平台、code 和 syscall 判据触发。
 
 ## 不可变 runtime 资源复用
 
 `a7c31c7` 的 Windows 脱敏固定诊断已证实重复发布路径上的 IO 失败：package 预览为 `runtime_spec_publish / EPERM / rename`，native 良好源码恢复为 `runtime_frame_publish / EPERM / rename`。这不证明具体锁持有者或杀毒软件是原因，也不反推此前缺少这些字段的 `2cb084b` 根因。
 
-本次只对带内容 hash 的 scene、frame、spec 地址复用已有完整相同字节。检查使用同一读取描述符的 stat；大小相同时最多读取预期长度加 1 字节，确认完整内容和 EOF 后复用。缺失或内容不一致仍通过原耐久临时文件、sync、原子 rename 发布；只有 open 的 ENOENT 视为缺失，其余 open/stat/read/close 错误继续失败，替换前先关闭读取描述符。Mutable aliases 和 index 继续原先的原子发布，不增加重试或删除/截断 fallback。六项新增回归覆盖旧实现第二次 prepare 的 EPERM 失败、修复后相同资源不替换、变更版本完整发布、缺失/损坏原子修复、非 ENOENT 读错误，以及超大和 stat 后变长文件的读取上限；原五项发布门闩继续保留。
+只对带内容 hash 的 scene、frame、spec 地址复用已有完整相同字节。检查使用同一读取描述符的 stat；大小相同时最多读取预期长度加 1 字节，确认完整内容和 EOF 后复用。缺失或内容不一致仍通过原耐久临时文件、sync、原子 rename 发布；只有 open 的 ENOENT 视为缺失，其余 open/stat/read/close 错误继续失败，替换前先关闭读取描述符。Mutable aliases 和 index 不使用条件跳过，继续原子发布，也没有删除/截断 fallback。六项复用回归覆盖旧实现第二次 prepare 的 EPERM 失败、修复后相同资源不替换、变更版本完整发布、缺失/损坏原子修复、非 ENOENT 读错误，以及超大和 stat 后变长文件的读取上限；原五项发布门闩继续保留。
+
+## Runtime 专属 Windows rename 重试
+
+源码等价的文档提交 `95bbf31` 在 Windows 原生复验中再次取得实际 IO 证据：无限循环恢复的 revision 2 预览失败，固定诊断为 `IO_ERROR / runtime_index_publish / EPERM / rename`；package、models、film、editor 已通过。对应 workflow 为 40690138976、job 为 122822547537，允许字段摘要 artifact 12817187216 的 ZIP SHA-256 为 `0ecd4aa0c4541b4e992c6d57158c547e3116ad53b753da6bb07d5ac5deadf205`。这证明必须原子替换的 index 路径也受到影响，仍不能归因于某个锁持有者。
+
+本次 `writeRuntimeFile` 仅用于 runtime prepare：必要的 hash 发布，以及 aliases 和最后的 index 发布。只有实际 Windows、`code === 'EPERM'` 且 `syscall === 'rename'` 同时满足才重试，固定间隔 100ms、最多 8 次尝试，重试窗口为 750ms 单调时钟；单次内核 IO 继续等待完成，不声称可被该窗口中断。每次完整执行原有耐久写入，不用 Promise.race 遗留后台写，不修改全局 paid 回执持久化 helper。纯 EPERM/rename 耗尽时抛首个原 Node IO 错误；若后继遇其他 code 或 syscall，立即抛该当前错误。成功 rename 后目录 fsync 失败也不重试或回滚已经完整发布的 index。
+
+七项新增回归验证临时拒绝释放后成功、永久拒绝的尝试上限、窗口耗尽保留原错、非 Windows/其他 code/其他 syscall/仅消息相似时单次失败，以及实际临时文件 fsync 和发布后目录 fsync 错误不重试。真实 localhost HTTP 双门闩核对等待期间旧图完整、每次新临时文件均同步、index 最后发布；这属于本机平台 fixture，不能代替新源码自己的 Windows 原生 CI。
 
 ## 已执行检查与边界
 
 | 检查 | 结果 | 范围 |
 | --- | --- | --- |
-| 全量 Node/tsx 回归 | **540/540，零失败、零跳过** | 在 `ef3104c` 产品验收合并基线重新完整执行；包含主线 504 项和 P0 五组 36 项 |
+| 全量 Node/tsx 回归 | **547/547，零失败、零跳过** | 在 `6ae4103` 产品验收合并基线 `4de336a` 重新完整执行；包含主线 511 项和 P0 五组 36 项，后续 test-only 同步未改总数 |
+| test-only 同步后的补验 | **23/23，零失败、零跳过；typecheck PASS** | `9761203` 上重新执行 runtime rename 7、publication 11、failure diagnostics 5 项；产品差异为空，沿用 `4de336a` 全量/构建/SEA 与故障演练证据 |
 | P0 五组 Node/tsx 回归 | 36 个独立用例包含在上述全量结果内 | 合成迁移 13、自有进程生命周期与 Windows 前置拒绝 4、真实 Chromium 隔离 4、脚本门槛 9、sidecar 共同 lease 6 |
 | 先前验收脚本同步专项 | **15/15，零失败、零跳过** | 同步 `eb514f4` 后曾执行 `acceptance-task.test.ts` 与 `platform-acceptance.test.ts`；这是前一轮脚本补验记录 |
 | 进程证据平台边界专项 | **9/9，当前 macOS 零跳过** | 单独补验且纳入本轮全量；不将该本机计数解释为 Windows 真实进程回收通过，Windows POSIX 实进程用例明确跳过 |
@@ -64,9 +75,9 @@ Rust `SidecarProcess` 从 spawn 开始持有子进程；缺管道、首行错误
 
 进程证据辅助模块仅在 Linux/macOS 上检查 POSIX 进程出生身份。Windows 在调用 `ps` 或授予任何信号权限之前，明确返回 `PROCESS_EVIDENCE_UNSUPPORTED`；没有将缺少 POSIX 工具解释成空进程树或清理通过。真实 fixture 子进程的出生身份/回收测试在 Windows 明确标记为不支持并跳过，另一个独立测试验证零 spawn 的拒绝路径。它不构成 Windows 进程树回收、故障演练或性能测量通过；专用 SEA/stdio/Rust 构建可以继续独立验收。
 
-本轮 SEA 二进制为 129,362,576 字节，连同资源为 131,572,125 字节；SHA-256 为 `454296c657534a5236dead5958e8e42e47ab241a436fc2b136b1c0b771602b21`。这只是当前本机产物的身份，不用于和历史 Linux 包直接比较体积。manifest 的 `signed=false`，构建中的 macOS ad-hoc 签名不等于发行签名或公证。本机 Homebrew Node 26.8.2 明确禁用了 SEA，本轮改用已有 Node 24.19.0 完成打包，未更改全局 Node。
+本轮 SEA 二进制为 129,362,576 字节，连同资源为 131,572,125 字节；SHA-256 为 `6aa562bb793467f3b13906773ef256037fe42ccb60fb290f1d67cdc7ab469ac6`。这只是当前本机产物的身份，不用于和历史 Linux 包直接比较体积。manifest 的 `signed=false`，构建中的 macOS ad-hoc 签名不等于发行签名或公证。本机 Homebrew Node 26.8.2 明确禁用了 SEA，本轮改用已有 Node 24.19.0 完成打包，未更改全局 Node。
 
-本轮原始本机证据另存于忽略目录 `.local/p0-final-ef3104c-20261028/`：`node-tests.log`、`typecheck.log`、`build.log`、`sea-build.log`、`rust-source-equivalence.log`、`fault-drills-source.json`、`fault-drills-sea.json` 和 `sidecar-build/node-darwin-arm64/manifest.json`。Rust 同源码树哈希为 `0483a15df701f7d994887b643d99deca05928406`，对应测试与检查日志保留在 `.local/p0-final-dd711fe-20261028/`。本轮在启动全量测试前已恢复自有临时依赖链接，取得 540/540、零跳过。前一轮 `2f39b31` 曾因链接未恢复跳过真实 Electron 用例，其初始日志与重新取得 507/507 的日志仍各自保留在原目录，不计为本轮结果。这些原始数据不随源码发布；本记录只保留脱敏计数、范围和产物哈希，未覆盖 `docs/p0/evidence/` 的历史性能或演练记录。
+本轮原始本机证据另存于忽略目录 `.local/p0-final-6ae4103-20261028/`：`node-tests.log`、`typecheck.log`、`build.log`、`sea-build.log`、`rust-source-equivalence.log`、`fault-drills-source.json`、`fault-drills-sea.json` 和 `sidecar-build/node-darwin-arm64/manifest.json`；test-only 同步补验另存为 `test-only-target.log`、`test-only-typecheck.log` 与 `test-only-sync-diff.log`。Rust 同源码树哈希为 `0483a15df701f7d994887b643d99deca05928406`，对应测试与检查日志保留在 `.local/p0-final-dd711fe-20261028/`。本轮在启动全量测试前已恢复自有临时依赖链接，取得 547/547、零跳过。前一轮 `2f39b31` 曾因链接未恢复跳过真实 Electron 用例，其初始日志与重新取得 507/507 的日志仍各自保留在原目录，不计为本轮结果。这些原始数据不随源码发布；本记录只保留脱敏计数、范围和产物哈希，未覆盖 `docs/p0/evidence/` 的历史性能或演练记录。
 
 ## CI 触发与适用范围
 
@@ -78,13 +89,15 @@ Rust `SidecarProcess` 从 spawn 开始持有子进程；缺管道、首行错误
 
 前一主线诊断提交 `0f26d9a` 的三平台快速矩阵已通过（Actions run 40683701636），同一干净提交的 Electron 原生媒体验收三平台也全部成功（run 40683701661：macOS 73、Windows 73、Linux 74 项）。主线本机完整 498/498、类型检查、构建与搬迁包布局检查已通过；新增诊断后的 GUI 结果以这次远端干净提交为证，不标成本轮重新执行的本机 73 项。
 
-独立分支此前提交 `2cb084b` 的专用 SEA/stdio/Rust 三平台与通用快速三平台已通过，但继承的 Windows Electron 原生验收失败：package 的 revision 4 预览任务为 `TASK_FAILED`，native 在聊天重试等待处超时；models、film、editor 已通过。当时脱敏摘要没有具体 IO code 或 syscall，不能判定其 Windows 根因，也不将其记为通过。随后 `a7c31c7` 的专用与快速三平台也通过，但 Windows Electron 原生失败并取得上述固定 IO/rename 证据。本次同步的主线源码 `ef3104c` 已取得三平台快速和 Electron 原生矩阵全部成功；该源码的本机完整 504/504、类型检查和应用包构建也已通过。此处验收身份固定为源码 SHA，之后的 HARDENING 封存仅改文档；本独立分支验收提交 `7c21a490e81149d31b0b0f7cb4fb89bf463a12c1` 的专用、快速及继承 Electron 原生 CI 均已独立核对通过，见下表；最终交付文档同步不改变该产品源码。本轮没有执行 Tauri 原生窗口验收，P0 中断恢复演练也不替代该验收。
+独立分支此前提交 `2cb084b` 的专用 SEA/stdio/Rust 三平台与通用快速三平台已通过，但继承的 Windows Electron 原生验收失败：package 的 revision 4 预览任务为 `TASK_FAILED`，native 在聊天重试等待处超时；models、film、editor 已通过。当时脱敏摘要没有具体 IO code 或 syscall，不能判定其 Windows 根因，也不将其记为通过。随后 `a7c31c7` 的专用与快速三平台也通过，但 Windows Electron 原生失败并取得上述固定 IO/rename 证据。此前主线 `ef3104c` 及独立分支 `7c21a490e81149d31b0b0f7cb4fb89bf463a12c1` 曾取得各自三平台通过，但其源码等价文档提交 `95bbf31` 的 Windows 原生复验再次失败，不能用旧通过覆盖该失败。当前 `6ae4103` 修改了 runtime 文件发布行为，不再与上述旧源码等价；本次主线和独立分支均须核对自己的新 CI。本轮没有执行 Tauri 原生窗口验收，P0 中断恢复演练也不替代该验收。
+
+主线 runtime 修复源码 `6ae4103` 的三平台 Electron 原生流程已全部成功（workflow 40693416863）。其 Windows 快速矩阵唯一失败是旧诊断测试仍假定文件只尝试一次，这一测试-only 断言已在 `e7cbf37` 修正；不能把这项旧断言失败写成通过。`e7cbf37` 和本独立分支最新提交仍分别等待自己的完整 CI 结果；旧源码或本机平台 fixture 的通过均不替代它们。
 
 本轮没有执行 sudo/drop_caches、真实计费 API、真实旧凭据迁移、Tauri 原生 GUI 验收、Windows JobObject 验收、干净目标机安装、发行签名/公证或新的 Linux 冷启动/PSS 同口径性能比较。历史 P0 报告和 evidence 保留为历史记录，不用本轮加固追认旧性能数字。
 
-## 最终独立提交的远端验收
+## 此前独立提交的远端验收（历史）
 
-本表固定源码验收提交 `7c21a490e81149d31b0b0f7cb4fb89bf463a12c1`，其本机产品源码为 `11ff0074a9b19b325cc62808d9e43720f2e71f94`，两者之间仅 HARDENING 文档变化。后续同步主施工四份说明和本段证据，产品源码仍保持等价；不循环改写文档以追逐说明提交触发的新 CI 编号。
+本表保留历史源码验收提交 `7c21a490e81149d31b0b0f7cb4fb89bf463a12c1`，其本机产品源码为 `11ff0074a9b19b325cc62808d9e43720f2e71f94`，当时两者之间仅 HARDENING 文档变化。后续文档同步至 `95bbf31` 仍保持该产品源码等价，但 Windows 原生复验再次失败，见上文。当前有界重试修复是新源码，此表不构成其通过证据，也不循环改写旧表以追逐说明提交触发的新 CI 编号。
 
 | 检查 | 三平台结果 | 范围 |
 | --- | --- | --- |
