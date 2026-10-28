@@ -6,7 +6,7 @@
   "timezone": "Asia/Singapore",
   "branch": "codex/workspace-improvements-20261027",
   "validationSource": {
-    "baseCommit": "eb514f452e910bb8d1b75f71529f13660c15ab9f",
+    "baseCommit": "2f39b31db56c1feddcdec960254883c3282d8871",
     "workingTreeDirty": true
   },
   "local": {
@@ -16,20 +16,22 @@
     "build": "PASS",
     "package": "PASS",
     "tests": {
-      "total": 471,
-      "passed": 471,
+      "total": 475,
+      "passed": 475,
       "failed": 0,
       "skipped": 0
     },
     "platformAcceptance": {
-      "status": "CREDENTIALS_BLOCKED",
+      "status": "NOT_RETESTED_KEYCHAIN_BLOCKED",
       "location": "package GUI startup before renderer/window creation",
       "evidence": "自有Electron主线程在macOS SecItemCopyMatching/SecurityServer.decrypt阻塞；未读取凭据值",
       "artifactIntegrity": {
         "filesWithEqualHashes": 626,
         "equalSymlinkTargets": 14
       },
-      "notClaimedPass": true
+      "notClaimedPass": true,
+      "lastAttemptCommit": "2f39b31db56c1feddcdec960254883c3282d8871",
+      "latestCandidateGui": "NOT_CHECKED"
     },
     "providerEvidence": "仅本机网关、内存响应与合成凭据；未调用真实计费 API",
     "workflowDurabilityCases": 74,
@@ -68,11 +70,20 @@
       "failedBeforeFix": 1,
       "realChromium": true
     },
-    "pngDiagnosticCases": 15
+    "pngDiagnosticCases": 15,
+    "textRasterCandidate": {
+      "flag": "--disable-lcd-text",
+      "actualDefaultThreeShotRegression": "PASS",
+      "size": "1920x1080",
+      "keyFrames": 9,
+      "strictPngHash": true,
+      "windowsOutcome": "PENDING_CI"
+    },
+    "applicationOwnerCases": 16
   },
   "remoteAcceptance": {
     "candidatePending": true,
-    "note": "新字体屏障与严格帧差诊断候选通过本机471回归，等待对应提交三平台隔离CI；本机GUI钥匙串阻塞单独保留"
+    "note": "475项完整回归、重建包及默认三镜头实际严格重复性专项通过；等待对应提交三平台CI，本机GUI上次钥匙串阻塞后未重试"
   },
   "separateExperimentalBranch": "codex/tauri-p0-hardening-20261028",
   "notVerified": [

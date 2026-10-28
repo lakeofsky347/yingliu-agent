@@ -64,6 +64,65 @@ test('不同profile及projects可以并行，但不能把对方内部工程作�
   } finally { await first?.dispose(); await second?.dispose(); await rm(paths.directory, { recursive: true, force: true }); }
 });
 
+test('显式工程目录等待会在真实外部root释放后继续打开，且不会提前修改工程', { timeout: 10_000 }, async () => {
+  const paths = await temporary(), other = { dataDirectory: join(paths.directory, 'waiting-profile'), projectsDirectory: join(paths.directory, 'waiting-projects') };
+  let first: Application | undefined, waiting: Application | undefined, owner: Awaited<ReturnType<typeof acquireApplicationOwner>> | undefined;
+  try {
+    first = await createApplication({ ...paths, credentials: new MemorySecrets(), resumeRemoteTasks: false });
+    const created = await snapshot(first, 'create', { title: '等待释放', blank: true }), projectFile = join(created.root, 'project.json'), before = await readFile(projectFile, 'utf8');
+    owner = await acquireApplicationOwner(other, 'waiting-entry', 1_000);
+    const originalClaim = owner.claim.bind(owner); let entered!: () => void;
+    const claimed = new Promise<void>(resolve => { entered = resolve; });
+    let rootWait: number | undefined, rootOptions: { existingOnly?: boolean } | undefined;
+    owner.claim = (directories, timeoutMs, options) => { if (directories.includes(created.root)) { rootWait = timeoutMs; rootOptions = options; entered(); } return originalClaim(directories, timeoutMs, options); };
+    waiting = await createApplication({ ...other, credentials: new MemorySecrets(), ownership: owner, projectRootWaitMs: 2_000, resumeRemoteTasks: false });
+    let settled = false; const opening = waiting.route('open', { path: created.root }).then(result => { settled = true; return result; });
+    await claimed; assert.equal(rootWait, 2_000); assert.deepEqual(rootOptions, { existingOnly: true });
+    await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(settled, false, 'root仍被占用时应持续等待');
+    assert.equal(await readFile(projectFile, 'utf8'), before);
+    await first.dispose(); first = undefined;
+    const result = await opening; assert.equal(result.ok, true, JSON.stringify(result));
+    if (result.ok) assert.equal((result.value as any).project.id, created.project.id);
+    await assert.rejects(acquireOwner([created.root], 'waiting-app-now-owns-root', 0), BusyError);
+  } finally { await first?.dispose(); await waiting?.dispose(); await owner?.release(); await rm(paths.directory, { recursive: true, force: true }); }
+});
+
+test('等待真实外部root期间沿用lease取消信号，取消不释放入口已有profile锁', { timeout: 10_000 }, async () => {
+  const paths = await temporary(), other = { dataDirectory: join(paths.directory, 'cancel-profile'), projectsDirectory: join(paths.directory, 'cancel-projects') }, controller = new AbortController();
+  let first: Application | undefined, waiting: Application | undefined, owner: Awaited<ReturnType<typeof acquireApplicationOwner>> | undefined;
+  try {
+    first = await createApplication({ ...paths, credentials: new MemorySecrets(), resumeRemoteTasks: false });
+    const created = await snapshot(first, 'create', { title: '可取消等待', blank: true }), projectFile = join(created.root, 'project.json'), before = await readFile(projectFile, 'utf8');
+    owner = await acquireApplicationOwner(other, 'cancel-entry', 1_000, controller.signal);
+    const originalClaim = owner.claim.bind(owner); let entered!: () => void;
+    const claimed = new Promise<void>(resolve => { entered = resolve; });
+    owner.claim = (directories, timeoutMs, options) => { if (directories.includes(created.root)) entered(); return originalClaim(directories, timeoutMs, options); };
+    waiting = await createApplication({ ...other, credentials: new MemorySecrets(), ownership: owner, projectRootWaitMs: 5_000, resumeRemoteTasks: false });
+    let settled = false; const opening = waiting.route('open', { path: created.root }).then(result => { settled = true; return result; });
+    await claimed; await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(settled, false);
+    controller.abort(new Error('测试取消工程锁等待'));
+    const result = await opening; assert.equal(result.ok, false); if (!result.ok) assert.match(result.error.message, /测试取消工程锁等待/);
+    assert.equal(await readFile(projectFile, 'utf8'), before);
+    await assert.rejects(acquireOwner([created.root], 'first-still-owns-root', 0), BusyError);
+    await waiting.dispose(); waiting = undefined;
+    for (const directory of [other.dataDirectory, other.projectsDirectory]) await assert.rejects(acquireOwner([directory], 'entry-not-drained', 0), BusyError);
+    await owner.release(); owner = undefined;
+    const release = await acquireOwner([other.dataDirectory, other.projectsDirectory], 'after-entry-cleanup', 0); await release();
+  } finally { controller.abort(); await first?.dispose(); await waiting?.dispose(); await owner?.release(); await rm(paths.directory, { recursive: true, force: true }); }
+});
+
+test('工程目录等待参数在初始化前拒绝无效值，CLI拒绝秒转毫秒溢出', { timeout: 10_000 }, async () => {
+  const paths = await temporary(); let reads = 0, cli: ReturnType<typeof child> | undefined;
+  const credentials = { async get() { reads++; return undefined; }, async set() {}, async delete() {} };
+  try {
+    for (const projectRootWaitMs of [-1, NaN, Infinity]) await assert.rejects(createApplication({ ...paths, credentials, projectRootWaitMs }), RangeError);
+    assert.equal(reads, 0); await assert.rejects(stat(paths.dataDirectory), { code: 'ENOENT' });
+    cli = child(join(import.meta.dirname, '../src/cli/bin.ts'), ['project', 'list', '--json', '--lock-timeout', '1e308'], { YINGLIU_DATA_DIR: paths.dataDirectory, YINGLIU_PROJECTS: paths.projectsDirectory });
+    assert.equal((await cli.closed).code, 2, cli.errors()); const response = JSON.parse(cli.output()); assert.equal(response.error.code, 'USAGE');
+    await assert.rejects(stat(paths.dataDirectory), { code: 'ENOENT' });
+  } finally { if (cli) await stop(cli.process); await rm(paths.directory, { recursive: true, force: true }); }
+});
+
 test('新建、复制、工程包导入的实际root都在同一个应用lease中', async () => {
   const paths = await temporary(); let app: Application | undefined;
   try {
