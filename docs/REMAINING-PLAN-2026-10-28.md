@@ -14,42 +14,43 @@
 | 编号 | 目标 | 施工与验收条件 | 结果 |
 | --- | --- | --- | --- |
 | R01 | Workflow 回执耐久性 | 文件同步、原子替换、目录同步；导演/场景/审片文本及音频回执独立保存；按请求哈希和工程采纳记录对账；排空终态与关闭期间已接受请求 | 完成；74 项专项通过，不将成功结果重复生成、配音或采纳 |
-| R02 | 多入口共同所有权 | 初始化/恢复前取得入口 lease，实际外部工程根目录动态受保护；同 lease 复用、启动失败、重复关闭和信号持锁排空；CLI 等待与取消覆盖实际目录 | 完成；16 项专项及真实桌面/CLI 互斥通过 |
+| R02 | 多入口共同所有权 | 初始化/恢复前取得入口 lease，实际外部工程根目录动态受保护；同 lease 复用、启动失败、重复关闭和信号持锁排空；CLI 等待与取消覆盖实际目录 | 完成；17 项专项（含一项fixture隔离）及真实桌面/CLI互斥通过 |
 | R03 | Replicate 路由与版本 | 官方 owner/name 分段编码；社区版本使用 predictions 请求体；路径注入在发送前拒绝，默认任务 ID 保持整体编码 | 完成；本机协议及集成回归通过 |
 | R04 | 费用试算和未知费用 | 纯本地填写单价、来源、币种及 token 情景；缺少价格/用量、非法数量或币种不匹配保持未知；历史账本保护币种 | 完成；专项及实际模型/费用界面通过 |
-| R05 | 三平台原生媒体验收 | Chrome/FFmpeg、Linux 显示服务与 Secret Service；实际 sandbox/加密/凭据后端；搬迁包和源服务分阶段隔离；只上传脱敏摘要 | 完成；ef3104c 的快速矩阵与原生媒体三平台全部通过 |
+| R05 | 三平台原生媒体验收 | Chrome/FFmpeg、Linux 显示服务与 Secret Service；实际 sandbox/加密/凭据后端；搬迁包和源服务分阶段隔离；只上传脱敏摘要 | 完成；988a064 的快速矩阵与原生媒体三平台全部通过 |
 | R05.1 | 预览消息和恢复 | 版本切换使用独立 iframe 上下文；布局阶段重置状态；成功帧清除旧错误；死循环后自有 renderer 重置与良好源码恢复 | 完成；三项实际 React/Chromium 回归修前失败、修后通过；最终原生恢复通过 |
 | R05.2 | 完整运行时原子发布 | scene/core/spec 带内容哈希，完整写入后 index 最后发布；HTTP 大小与正文取同一打开句柄；HEAD/非法 range 关闭描述符 | 完成；原四项故障门闩修前失败，五项发布/HTTP/FD 回归通过 |
 | R05.3 | Windows 重复资源发布 | 相同哈希资源须核对完整实际字节后复用；读取最多 expected+1，替换前关闭句柄；缺失/损坏仍耐久原子写；其他错误保留 | 完成；新增六项及组合专项16项通过；旧实现 EPERM 门闩失败；最终主施工 Windows 原生通过 |
 | R05.4 | 源码编辑就绪 | 加载时不显示可编辑空框；忽略迟回旧镜头，保护已加载草稿；实际 GUI 等待镜头/面板/已保存源码和本次任务版本 | 完成；真实 React 修前一项失败、修后三项通过，最终 GUI 通过 |
 | R05.5 | 严格渲染与文字 | 写入实际文字后等待布局/字体；无界面取帧灰阶文字与软件合成；首轮、逆序、冷启动严格 PNG 哈希；诊断只补有界像素统计 | 完成；默认三镜头1920×1080九关键帧、WebGL1/2读回及三平台实际渲染通过；不声称硬件加速 |
 | R05.6 | 平台退出与故障定位 | Windows 用实际浏览器启动预检；截图有界；Linux 只清理自有钥匙环任务；任务诊断固定类别/操作/IO字段，journal恢复与上传二次白名单 | 完成；独立诊断审查通过，不改变任务、审批、重试或哈希判据 |
-| R06 | Tauri P0 已知阻塞 | 凭据事务/旧值保护、worker 总期限/自有进程清理、Rust有界握手、共享lease、故障演练硬断言、测量失败处理与UI重建 | 完成；本机540/540、source/SEA各5/5、三平台专用构建/快速/继承Electron原生均通过 |
+| R05.7 | Windows必要原子替换 | 仅runtime writer的win32实际EPERM/rename可重试；最多8次、100ms间隔、750ms单调重试窗口；每轮完整耐久写，不删除/截断live目标；不同错误立即抛，不race遗留写 | 完成；重试7项与组合23项通过，当前三平台实跑通过 |
+| R06 | Tauri P0 已知阻塞 | 凭据事务/旧值保护、worker 总期限/自有进程清理、Rust有界握手、共享lease、故障演练硬断言、测量失败处理与UI重建 | 完成；本机548/548、source/SEA各5/5、三平台专用构建/快速/继承Electron原生均通过 |
 | R07 | 提交推送和说明 | 源码、锁文件、脱敏样例、文档；提交说明v1.0.0；分别验收和推送；核对本地/远端HEAD；文档封存与产品源码等价 | 完成；源码通过后以v1.0.0封存说明；交付时核对两处分支HEAD与远端一致 |
 
 ## 主施工验收证据
 
-验收源码 `ef3104c6c1cac698671c8a32ed75ab19d8050627`：本机 **504/504，零失败、零跳过**；类型检查、构建、打包、搬迁包布局通过。其三平台 [快速矩阵40687282565](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40687282565) 和 [原生媒体40687282586](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40687282586) 全部通过。
+验收源码 `988a064a4df9c92822e7c6d7a048462758ee6340`：本机 **512/512，零失败、零跳过**；类型检查、构建、打包、搬迁包布局通过。其三平台 [快速矩阵40696564704](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40696564704) 和 [原生媒体40696564703](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40696564703) 全部通过。
 
 | 平台 | 快速矩阵：通过/跳过/失败 | 原生媒体 | 凭据后端 | sandbox/加密/清理 |
 | --- | --- | --- | --- | --- |
-| macOS arm64 | 490/14/0 | 73/73 PASS | macos_keychain | 全部PASS |
-| Windows x64 | 483/21/0 | 73/73 PASS | windows_dpapi | 全部PASS |
-| Linux x64 | 490/14/0 | 74/74 PASS | gnome_libsecret | 全部PASS |
+| macOS arm64 | 498/14/0 | 73/73 PASS | macos_keychain | 全部PASS |
+| Windows x64 | 491/21/0 | 73/73 PASS | windows_dpapi | 全部PASS |
+| Linux x64 | 498/14/0 | 74/74 PASS | gnome_libsecret | 全部PASS |
 
 原生各阶段为预检5、搬迁包GUI20（Linux21）、原生完整流程22、源服务模型/费用11、多模态成片7、编辑安全8；全部阶段和临时数据清理通过。快速测试显式跳过单独计数。三份摘要已核对 clean 提交及 GitHub ZIP SHA-256，详情见 [机器可读记录](acceptance-2026-10-28.json)。
 
-用户处理系统钥匙串后，本机曾于11:19:03 UTC取得单次73/73，通过实际Keychain合成凭据、OS sandbox、死循环恢复和六秒带音成片；记录基线ea7a828、dirty=true，源码随后提交accfdf3。此历史本机记录与最终ef3104c干净CI证据分别保留，不拼接历史分段为通过。
+用户处理系统钥匙串后，本机曾于11:19:03 UTC取得单次73/73，通过实际Keychain合成凭据、OS sandbox、死循环恢复和六秒带音成片；记录基线ea7a828、dirty=true，源码随后提交accfdf3。此历史本机记录与最终988a064干净CI证据分别保留，不拼接历史分段为通过。
 
-历史2cb084b Windows失败根因UNKNOWN；a7c31c7固定诊断明确显示runtime_spec/frame重复发布遇到EPERM/rename，代码和门闩回归确认相同哈希文件存在无谓替换，随后实施最小字节复用修复。未识别具体持锁者，不归因杀软；原失败证据保留，未将专用构建PASS替代Electron失败。
+历史2cb084b Windows失败根因UNKNOWN；a7c31c7固定诊断明确显示runtime_spec/frame重复发布遇到EPERM/rename，代码和门闩回归确认相同哈希文件存在无谓替换，随后实施最小字节复用修复。95bbf31后续实跑明确必要index发布也有EPERM/rename，局部writer按实际系统字段有界重试。6ae旧诊断一次写入断言、e7的并行fixture端口冲突修正均仅改测试，当前产品仍为6ae4103；本机包和产品目录与988等价。未识别具体持锁者，不归因杀软；原失败证据保留，未将专用构建PASS替代Electron失败。
 
 ## 独立Tauri证据
 
-独立验收提交 `7c21a490e81149d31b0b0f7cb4fb89bf463a12c1`：本机540/540、零失败零跳过，类型检查、普通构建、新SEA通过，source/SEA各5/5严格演练通过且无自有残留与自动重投。Rust树0483a15d相同，明确沿用此前四项测试与check。
+独立验收提交 `21f8ba1206eba2f7c9cbf1e4bc210a73a74e3977`：本机548/548、零失败零跳过，类型检查、普通构建、新SEA通过，source/SEA各5/5严格演练通过且无自有残留与自动重投。Rust树0483a15d相同，明确沿用此前四项测试与check。
 
-[快速40688252045](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40688252045)、[专用三平台SEA/stdio/Rust构建40688252168](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40688252168)、[继承Electron原生40688252048](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40688252048)全部通过；Electron原生Mac/Win各73、Linux74项，独立三份摘要clean提交与SHA-256已核对。快速矩阵Mac/Linux各526通过14跳过，Windows511通过29跳过；P0 Windows未支持的POSIX进程用例明确跳过，不计作JobObject验收。
+[快速40697100383](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40697100383)、[专用三平台SEA/stdio/Rust构建40697100421](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40697100421)、[继承Electron原生40697100520](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40697100520)全部通过；Electron原生Mac/Win各73、Linux74项，独立三份摘要clean提交与SHA-256已核对。快速矩阵Mac/Linux各534通过14跳过，Windows519通过29跳过；P0 Windows未支持的POSIX进程用例明确跳过，不计作JobObject验收。
 
-SEA SHA-256 `454296c657534a5236dead5958e8e42e47ab241a436fc2b136b1c0b771602b21`，manifest基线11ff0074，二进制129,362,576字节、连资源131,572,125字节。实际记录见独立分支 `docs/p0/HARDENING-2026-10-28.md`；P0构建不代表正式Tauri GUI或性能结论。
+SEA SHA-256 `6aa562bb793467f3b13906773ef256037fe42ccb60fb290f1d67cdc7ab469ac6`，manifest产品基线4de336a6；原产品全量547、source/SEA演练均保留，测试同步c859e21e后全量548，产品目录等价，二进制129,362,576字节、连资源131,572,125字节。实际记录见独立分支 `docs/p0/HARDENING-2026-10-28.md`；P0构建不代表正式Tauri GUI或性能结论。
 
 ## 保留的验收边界
 

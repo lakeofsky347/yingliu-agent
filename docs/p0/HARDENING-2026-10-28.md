@@ -94,11 +94,11 @@ Rust `SidecarProcess` 从 spawn 开始持有子进程；缺管道、首行错误
 
 前一主线诊断提交 `0f26d9a` 的三平台快速矩阵已通过（Actions run 40683701636），同一干净提交的 Electron 原生媒体验收三平台也全部成功（run 40683701661：macOS 73、Windows 73、Linux 74 项）。主线本机完整 498/498、类型检查、构建与搬迁包布局检查已通过；新增诊断后的 GUI 结果以这次远端干净提交为证，不标成本轮重新执行的本机 73 项。
 
-独立分支此前提交 `2cb084b` 的专用 SEA/stdio/Rust 三平台与通用快速三平台已通过，但继承的 Windows Electron 原生验收失败：package 的 revision 4 预览任务为 `TASK_FAILED`，native 在聊天重试等待处超时；models、film、editor 已通过。当时脱敏摘要没有具体 IO code 或 syscall，不能判定其 Windows 根因，也不将其记为通过。随后 `a7c31c7` 的专用与快速三平台也通过，但 Windows Electron 原生失败并取得上述固定 IO/rename 证据。此前主线 `ef3104c` 及独立分支 `7c21a490e81149d31b0b0f7cb4fb89bf463a12c1` 曾取得各自三平台通过，但其源码等价文档提交 `95bbf31` 的 Windows 原生复验再次失败，不能用旧通过覆盖该失败。当前 `6ae4103` 修改了 runtime 文件发布行为，不再与上述旧源码等价；本次主线和独立分支均须核对自己的新 CI。本轮没有执行 Tauri 原生窗口验收，P0 中断恢复演练也不替代该验收。
+独立分支此前提交 `2cb084b` 的专用 SEA/stdio/Rust 三平台与通用快速三平台已通过，但继承的 Windows Electron 原生验收失败：package 的 revision 4 预览任务为 `TASK_FAILED`，native 在聊天重试等待处超时；models、film、editor 已通过。当时脱敏摘要没有具体 IO code 或 syscall，不能判定其 Windows 根因，也不将其记为通过。随后 `a7c31c7` 的专用与快速三平台也通过，但 Windows Electron 原生失败并取得上述固定 IO/rename 证据。此前主线 `ef3104c` 及独立分支 `7c21a490e81149d31b0b0f7cb4fb89bf463a12c1` 曾取得各自三平台通过，但其源码等价文档提交 `95bbf31` 的 Windows 原生复验再次失败，不能用旧通过覆盖该失败。当前 `6ae4103` 修改了 runtime 文件发布行为，不再与上述旧源码等价；本次主线988a064与独立21f8ba1已分别完成自己的新矩阵核对，见最后新表。本轮没有执行 Tauri 原生窗口验收，P0 中断恢复演练也不替代该验收。
 
-主线 runtime 修复源码 `6ae4103` 的三平台 Electron 原生流程已全部成功（workflow 40693416863）。其 Windows 快速矩阵唯一失败是旧诊断测试仍假定文件只尝试一次，这一测试-only 断言已在 `e7cbf37` 修正；不能把这项旧断言失败写成通过。`e7cbf37` 和本独立分支最新提交仍分别等待自己的完整 CI 结果；旧源码或本机平台 fixture 的通过均不替代它们。
+主线 runtime 修复源码 `6ae4103` 的三平台 Electron 原生流程已全部成功（workflow 40693416863）。其 Windows 快速矩阵唯一失败是旧诊断测试仍假定文件只尝试一次，这一测试-only 断言已在 `e7cbf37` 修正；不能把这项旧断言失败写成通过。`e7cbf37`随后另有下述Linux fixture失败，仍保留为历史；当前988a064和21f8ba1的通过来自各自实际矩阵，不由旧源码或本机平台fixture平移。
 
-`e7cbf37` 的 Linux 快速矩阵随后在不同 profile/projects 的测试 fixture 中遇到目录身份派生锁端口碰撞，保守返回 BUSY；该次失败继续保留，不推断具体锁持有者。`988a064` 仅为 fixture 选择不冲突的临时目录身份，保留原成功、互斥和数据保护断言，并新增碰撞回归；产品锁协议及保守 BUSY 约定未改变。主线 `988a064` 本机全量 512/512 与本分支 548/548 已通过，但 `988a064` 及本独立分支最终提交仍须核对各自 CI，不能用 `6ae4103` 原生通过替代新提交的快速矩阵结果。
+`e7cbf37` 的 Linux 快速矩阵随后在不同 profile/projects 的测试 fixture 中遇到目录身份派生锁端口碰撞，保守返回 BUSY；该次失败继续保留，不推断具体锁持有者。`988a064` 仅为 fixture 选择不冲突的临时目录身份，保留原成功、互斥和数据保护断言，并新增碰撞回归；产品锁协议及保守 BUSY 约定未改变。主线 `988a064` 本机全量 512/512 与本分支 548/548 已通过，当前 `988a064` 与独立 `21f8ba1206eba2f7c9cbf1e4bc210a73a74e3977` 已分别完成三平台快速、原生与可适用专用构建，全部通过；此结论来自新提交自身，不以6ae4103的原生结果代替快速矩阵。
 
 本轮没有执行 sudo/drop_caches、真实计费 API、真实旧凭据迁移、Tauri 原生 GUI 验收、Windows JobObject 验收、干净目标机安装、发行签名/公证或新的 Linux 冷启动/PSS 同口径性能比较。历史 P0 报告和 evidence 保留为历史记录，不用本轮加固追认旧性能数字。
 
@@ -112,4 +112,16 @@ Rust `SidecarProcess` 从 spawn 开始持有子进程；缺管道、首行错误
 | [Tauri P0 spike 40688252168](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40688252168) | Windows/macOS/Linux全部PASS | SEA构建、stdio冒烟、Rust release编译；非Tauri原生GUI |
 | [Native and media acceptance 40688252048](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40688252048) | Mac73/73、Windows73/73、Linux74/74；全部PASS | 继承的Electron搬迁包/原生/媒体/模型费用/编辑安全；非Tauri原生GUI |
 
-三份原生允许字段摘要已分别下载，核对 clean 提交、所有阶段、系统凭据后端、sandbox、加密与临时数据清理，以及 GitHub 公布的 ZIP SHA-256。对应 artifact 为Linux12816042962、macOS12815863062、Windows12815678992，摘要身份完整保存在同步后的 [机器可读交付记录](../acceptance-2026-10-28.json)。此前2cb失败保持UNKNOWN、a7的EPERM/rename实证继续保留；没有把旧失败重标PASS，没有放宽哈希或自动重试任务。
+三份原生允许字段摘要已分别下载，核对 clean 提交、所有阶段、系统凭据后端、sandbox、加密与临时数据清理，以及 GitHub 公布的 ZIP SHA-256。对应 artifact 为Linux12816042962、macOS12815863062、Windows12815678992，此历史摘要身份保存在 [当时2528bfc的机器可读记录](https://github.com/lakeofsky347/yingliu-agent/blob/2528bfc6172ccf20b4f796c3750cd0fa4a5b5c1b/docs/acceptance-2026-10-28.json)，当前记录另存最新21f结果。此前2cb失败保持UNKNOWN、a7的EPERM/rename实证继续保留；没有把旧失败重标PASS，没有放宽哈希或自动重试任务。
+
+## 当前独立源码验收与文档封存
+
+固定验收提交为 `21f8ba1206eba2f7c9cbf1e4bc210a73a74e3977`。运行时产品源码基线 `4de336a6b50e96c2981f1c13a513bd6e0fa98a60` 完成547全量、构建和source/SEA各5项；最后e7/988测试同步后，合并基线 `c859e21e6574e7c2cfa257da682d774d409d22a2` 完成548/548、零失败零跳过和typecheck，产品目录与4de完全等价。SEA未重建或重标，SHA-256仍为 `6aa562bb793467f3b13906773ef256037fe42ccb60fb290f1d67cdc7ab469ac6`；最终文档合并不改变产品或测试源码。
+
+| 当前实际检查 | 结果 | 范围 |
+| --- | --- | --- |
+| [快速矩阵40697100383](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40697100383) | 三平台PASS；Mac/Linux各534通过14跳过，Windows519通过29跳过 | 总数548，平台未支持项明确跳过 |
+| [专用SEA/stdio/Rust构建40697100421](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40697100421) | Windows/macOS/Linux全部PASS | 新构建与stdio、Rust编译；非正式Tauri GUI |
+| [继承Electron原生媒体40697100520](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40697100520) | Mac73/73、Windows73/73、Linux74/74，全部PASS | 搬迁包、原生/真实媒体、隔离模型费用与编辑安全 |
+
+三份允许字段摘要已核对clean的21f提交、全部六阶段、系统凭据后端、sandbox、加密、清理以及GitHub ZIP SHA-256：macOS artifact12820271469、Windows12819194658、Linux12819194266。完整最新身份见 [机器可读交付记录](../acceptance-2026-10-28.json)。主施工988a064自身三平台也全部通过（快速40696564704、原生40696564703）。历史失败未改标，实际Windows文件错误只在runtime局部按系统字段有界处理；付费回执、模型/任务重试、PNG判据与全局持久化规则均保留。

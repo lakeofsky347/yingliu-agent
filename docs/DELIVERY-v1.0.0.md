@@ -10,21 +10,22 @@
 - 预览版本替换 iframe 上下文，隔离旧消息并清除旧错误；源码编辑器在取得源码前保持加载态，忽略迟回旧镜头并保护已有草稿。
 - scene/core/spec 使用不可变哈希地址；完整资源先写入，index 最后原子发布；HTTP 大小与正文读取同一文件句柄，关闭空资源和截断窗口。
 - 修复 Windows 重复发布时的 EPERM/rename：只对哈希 scene/frame/spec 核对完整字节后复用；读取有界且先关闭句柄，缺失或损坏仍耐久原子修复。兼容别名、index、全局耐久回执及任务重试规则保留。
+- Windows 必要的运行时原子替换仅对实际 EPERM/rename 设置 8 次、100ms、750ms 单调重试窗口；每轮完整等待耐久写，耗尽保留原错，其他错误立即抛；不强行中断单次 kernel IO、不删除在线目标、不重试任务或付费请求。
 - 无界面取帧使用灰阶文字与软件合成，编辑器合成设置不变；严格 PNG 检查保留第一轮、逆序和冷启动样本。写入实际文字后等待布局与字体，失败只补有界诊断。
 - 三平台原生/媒体验收采用真实 Chrome、FFmpeg 和系统凭据后端，检查实际 OS sandbox；数据分阶段隔离，只上传允许字段摘要。固定任务错误分类经过 journal 恢复及上传二次白名单，不上传路径、源码、凭据或原始异常。
 - 独立 Tauri P0 完成合成凭据迁移事务与旧值保护、自有 worker 生命周期、Rust 有界握手、共享 lease、严格中断恢复演练及测量门槛。Windows 独立 worker/进程证据在不支持时提前拒绝，JobObject 仍未实现。
 
 ## 主施工验收
 
-验收源码为 `ef3104c6c1cac698671c8a32ed75ab19d8050627`。本机 **504/504，零失败、零跳过**，类型检查、构建、打包和搬迁包布局检查通过。新增资源复用回归六项，连同原发布检查及诊断专项 **16/16** 通过；旧实现的重复替换 EPERM 门闩确定性失败，修后通过，原五项原子发布回归完整保留。
+验收源码为 `988a064a4df9c92822e7c6d7a048462758ee6340`。本机 **512/512，零失败、零跳过**，类型检查、构建、打包和搬迁包布局检查通过。资源复用回归六项、原发布五项保留；新增 Windows rename 专项七项，连同发布及诊断 **23/23** 通过；旧实现的重复替换 EPERM 门闩确定性失败，修后通过，原五项原子发布回归完整保留。两项最后测试同步分别校正旧的一次文件写入断言及并行目录端口选择，不放宽任务失败、原数据保护或互斥判据；所有权专项17项通过。产品源码仍为 `6ae4103919ce511412bc7c4b18eb7101f445fdf5`，本机包基于该源码构建，与988产品目录等价。
 
-[快速矩阵 40687282565](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40687282565) 和 [原生媒体 40687282586](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40687282586) 三平台全部通过。三份原生摘要已核对 clean 源码提交、各阶段、系统凭据、sandbox、加密、清理与 GitHub ZIP SHA-256。
+[快速矩阵 40696564704](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40696564704) 和 [原生媒体 40696564703](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40696564703) 三平台全部通过。三份原生摘要已核对 clean 源码提交、各阶段、系统凭据、sandbox、加密、清理与 GitHub ZIP SHA-256。
 
 | 平台 | 快速测试：通过 / 跳过 / 失败 | 原生媒体检查 | 系统凭据后端 |
 | --- | --- | --- | --- |
-| macOS arm64 | 490 / 14 / 0 | 73/73 PASS | macos_keychain |
-| Windows x64 | 483 / 21 / 0 | 73/73 PASS | windows_dpapi |
-| Linux x64 | 490 / 14 / 0 | 74/74 PASS | gnome_libsecret |
+| macOS arm64 | 498 / 14 / 0 | 73/73 PASS | macos_keychain |
+| Windows x64 | 491 / 21 / 0 | 73/73 PASS | windows_dpapi |
+| Linux x64 | 498 / 14 / 0 | 74/74 PASS | gnome_libsecret |
 
 原生检查覆盖搬迁应用包、真实 GUI、144 帧六秒带音 MP4 的 ffprobe/完整解码与播放、备份恢复、版本冲突、真实系统凭据合成值、sandbox、无限循环超时与良好源码恢复；模型/多模态/编辑安全另以隔离源服务验证。Linux 多一项桌面入口检查，快速测试的显式跳过没有代替原生检查。
 
@@ -32,13 +33,13 @@
 
 ## 独立 Tauri 验收
 
-独立验收提交 `7c21a490e81149d31b0b0f7cb4fb89bf463a12c1` 已同步相同修复。本机完整 **540/540，零失败、零跳过**、类型检查、普通构建及新 SEA 打包通过；源码入口与新 SEA 各 **5/5** 严格中断/取消/断连演练通过，未留自有孤儿进程，未自动重投。Rust 树 `0483a15d` 与先前验收相同，明确沿用四项测试及 check 证据。
+独立验收提交 `21f8ba1206eba2f7c9cbf1e4bc210a73a74e3977` 已同步相同修复。本机完整 **548/548，零失败、零跳过**、类型检查、普通构建及新 SEA 打包通过；源码入口与新 SEA 各 **5/5** 严格中断/取消/断连演练通过，未留自有孤儿进程，未自动重投。Rust 树 `0483a15d` 与先前验收相同，明确沿用四项测试及 check 证据。
 
-其 [快速矩阵40688252045](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40688252045)、[三平台SEA/stdio/Rust构建40688252168](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40688252168)、[继承的Electron原生媒体40688252048](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40688252048) 全部通过。后者 macOS/Windows 各73、Linux74项，三份 clean 提交摘要与 ZIP SHA-256 已独立核对；这是 Electron 验收，专用构建不代表 Tauri 原生 GUI 验收。
+其 [快速矩阵40697100383](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40697100383)、[三平台SEA/stdio/Rust构建40697100421](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40697100421)、[继承的Electron原生媒体40697100520](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40697100520) 全部通过。后者 macOS/Windows 各73、Linux74项，三份 clean 提交摘要与 ZIP SHA-256 已独立核对；这是 Electron 验收，专用构建不代表 Tauri 原生 GUI 验收。
 
-本机新 SEA SHA-256 为 `454296c657534a5236dead5958e8e42e47ab241a436fc2b136b1c0b771602b21`，manifest 源码为 `11ff0074a9b19b325cc62808d9e43720f2e71f94`；验收后至7c21a49仅文档变化。详细实现与范围见独立分支 `docs/p0/HARDENING-2026-10-28.md`。
+本机新 SEA SHA-256 为 `6aa562bb793467f3b13906773ef256037fe42ccb60fb290f1d67cdc7ab469ac6`，manifest 源码为 `4de336a6b50e96c2981f1c13a513bd6e0fa98a60`；产品与source/SEA演练基于该源码完成，原全量547项通过；之后仅测试及文档同步，合并基线c859e21e取得完整548项通过，至21f8ba1的产品目录与4de336a完全等价。详细实现与范围见独立分支 `docs/p0/HARDENING-2026-10-28.md`。
 
-历史 2cb084b 的 Windows 失败保持根因 UNKNOWN；a7c31c7 的新诊断明确记录哈希 spec/frame 发布的 EPERM/rename，由此实施上述最小复用修复。具体持锁者未识别，未归因于杀软；原失败摘要及 SHA-256 保留。
+历史 2cb084b 的 Windows 失败保持根因 UNKNOWN；a7c31c7 的新诊断明确记录哈希 spec/frame 发布的 EPERM/rename，由此实施上述最小复用修复。95bbf31 文档提交的再次实跑进一步确认必要的 index 发布也会遇到 EPERM/rename，随后加入局部有界重试。6ae旧诊断断言及e7并行fixture冲突各自保留为历史测试失败，修正后当前两提交自己的三平台矩阵全部通过。具体持锁者未识别，未归因于杀软；原失败摘要及 SHA-256 保留。
 
 ## 交付记录与边界
 
