@@ -29,6 +29,19 @@ export function detectEnvironment(settings:Partial<EnvironmentSettings>={},optio
 }
 function hash(buffer:Buffer|string):string { return createHash('sha256').update(buffer).digest('hex'); }
 function json(value:unknown):string { return JSON.stringify(value,null,2)+'\n'; }
+/** Content-addressed files are already published when their complete bytes match. */
+async function writeImmutableRuntime(file:string,content:string):Promise<void>{
+  const expected=Buffer.from(content,'utf8');let handle:Awaited<ReturnType<typeof fs.open>>|undefined,matches=false;
+  try{handle=await fs.open(file,'r');}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+  if(handle)try{
+    if((await handle.stat()).size===expected.length){
+      const bytes=Buffer.alloc(expected.length+1);let length=0;
+      while(length<bytes.length){const read=await handle.read(bytes,length,bytes.length-length,null);if(!read.bytesRead)break;length+=read.bytesRead;}
+      matches=length===expected.length&&bytes.subarray(0,length).equals(expected);
+    }
+  }finally{await handle.close();}
+  if(!matches)await writeDurableFile(file,content);
+}
 function aborted(signal?:AbortSignal):void { if(signal?.aborted)throw new Error('Task cancelled'); }
 function keyFrames(spec:VideoSpec):number[] { return [...new Set(spec.shots.flatMap(shot=>[shot.startFrame,Math.floor((shot.startFrame+shot.endFrame-1)/2),shot.endFrame-1]))].sort((a,b)=>a-b); }
 function safeId(id:string):string { if(!/^[a-zA-Z0-9_-]{1,100}$/.test(id))throw new Error('Unsafe scene ID');return id; }
@@ -141,15 +154,15 @@ export class VideoRenderer {
         operation='runtime_scene_source_read';const source=await this.store.readSource(root,shot,project.revision);safeId(shot.id);
         // ESM modules are files served under a restrictive self-only CSP; no privileged APIs are exposed.
         const moduleName=shot.id+'-'+hash(source.js)+'.mjs';
-        operation='runtime_scene_publish';await writeDurableFile(await projectPath(root,'runtime/scenes/'+moduleName),source.js);
+        operation='runtime_scene_publish';await writeImmutableRuntime(await projectPath(root,'runtime/scenes/'+moduleName),source.js);
         // Keep the legacy address complete for older cached runtime documents.
         operation='runtime_scene_alias_publish';await writeDurableFile(await projectPath(root,'runtime/scenes/'+shot.id+'.mjs'),source.js);
         sources.push({id:shot.id,html:source.html,css:source.css,moduleUrl:'./scenes/'+moduleName});
       }catch(error){const e=error as Error&RenderIssue;e.shotId=shot.id;throw e;}
     }
     const manifest=json({spec,sources}),runtimeName='frame-'+hash(browserRuntime)+'.mjs',specName='spec-'+hash(manifest)+'.json';
-    operation='runtime_frame_publish';await writeDurableFile(await projectPath(root,'runtime/'+runtimeName),browserRuntime);
-    operation='runtime_spec_publish';await writeDurableFile(await projectPath(root,'runtime/'+specName),manifest);
+    operation='runtime_frame_publish';await writeImmutableRuntime(await projectPath(root,'runtime/'+runtimeName),browserRuntime);
+    operation='runtime_spec_publish';await writeImmutableRuntime(await projectPath(root,'runtime/'+specName),manifest);
     operation='runtime_frame_alias_publish';await writeDurableFile(await projectPath(root,'runtime/frame.mjs'),browserRuntime);
     operation='runtime_spec_alias_publish';await writeDurableFile(await projectPath(root,'runtime/spec.json'),manifest);
     // index.html is the publication point. Its immutable manifest and modules

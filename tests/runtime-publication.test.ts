@@ -109,3 +109,72 @@ test('runtime HTTP closes the opened descriptor on HEAD and rejected media range
     assert.equal(closed.length,2,'两条早退路径都应先打开用于stat的文件描述符');await bounded(Promise.all(closed),'早退文件描述符关闭');
   }finally{t.mock.restoreAll();syncBuiltinESMExports();await renderer.close();await fs.rm(directory,{recursive:true,force:true});}
 });
+
+test('identical content-addressed runtime resources avoid an existing-target EPERM rename while changed revisions still publish completely',{timeout:30_000},async t=>{
+  const directory=await fs.mkdtemp(join(tmpdir(),'yingliu-runtime-reuse-')),store=new ProjectStore({baseDirectory:directory}),renderer=new VideoRenderer(store),rename=fs.rename.bind(fs);
+  try{
+    const initial=createProject('不可变资源复用'),oldSources=Object.fromEntries(initial.shots.map(shot=>[shot.id,source('old',shot.id)]));
+    const created=await store.create({project:initial,sources:Object.entries(oldSources).map(([shotId,source])=>({shotId,source}))}),url=await renderer.preview(created.root,created.project),old=await graph(url);let replacements=0,newFiles=0;
+    t.mock.method(fs,'rename',async(...[from,to]:Parameters<typeof fs.rename>)=>{
+      const destination=typeof to==='string'?relative(created.root,to).replaceAll('\\','/'):'';
+      if(/^runtime\/(?:frame-[a-f0-9]{64}\.mjs|spec-[a-f0-9]{64}\.json|scenes\/[^/]+-[a-f0-9]{64}\.mjs)$/.test(destination)){
+        let exists=false;try{await fs.stat(to);exists=true;}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+        if(exists){replacements++;throw Object.assign(new Error('synthetic Windows existing-target rename failure'),{code:'EPERM',syscall:'rename'});}newFiles++;
+      }
+      return rename(from,to);
+    });syncBuiltinESMExports();
+    await renderer.preview(created.root,created.project);assert.equal(replacements,0,'相同hash资源不可尝试替换已发布文件');assert.equal(newFiles,0);assert.deepEqual((await graph(url)).resources,old.resources);
+    const next=structuredClone(created.project);next.revision++;next.title='新版本仍须完整发布';const shot=next.shots[0]!,changed=source('new',shot.id),saved=await store.commit(created.root,next,{[shot.id]:changed},{expectedRevision:created.project.revision});
+    const published=await graph(await renderer.preview(created.root,saved));assert.equal(replacements,0);assert.equal(newFiles,2,'变更镜头与新spec应各耐久发布一个新hash文件');
+    for(const item of published.spec.sources){const expected=item.id===shot.id?changed:oldSources[item.id]!;assert.equal(item.html,expected.html);assert.equal(item.css,expected.css);assert.equal(published.resources.get(new URL(item.moduleUrl,new URL('./runtime/',url)).href),expected.js);}
+    for(const [resource,bytes]of old.resources)assert.equal(await text(resource),bytes,'旧hash资源继续保留原完整内容');
+  }finally{t.mock.restoreAll();syncBuiltinESMExports();await renderer.close();await fs.rm(directory,{recursive:true,force:true});}
+});
+
+for(const condition of ['missing','corrupt'] as const)test(`${condition} content-addressed runtime bytes still publish through a synced temporary file and atomic rename`,{timeout:30_000},async t=>{
+  const directory=await fs.mkdtemp(join(tmpdir(),'yingliu-runtime-repair-')),store=new ProjectStore({baseDirectory:directory}),renderer=new VideoRenderer(store),open=fs.open.bind(fs),rename=fs.rename.bind(fs),entered=deferred(),release=deferred();let preparing:Promise<string>|undefined;
+  try{
+    const created=await store.create(createProject('不可变文件修复')),url=await renderer.preview(created.root,created.project),before=await graph(url),file=join(created.root,new URL(before.scriptUrl).pathname.slice(1)),expected=Buffer.from(before.resources.get(before.scriptUrl)!,'utf8'),corrupt=Buffer.from(expected);corrupt[0]=corrupt[0]!^1;
+    const scenes=before.spec.sources.map(item=>new URL(item.moduleUrl,new URL('./runtime/',url)).href);assert.equal(new Set(scenes).size,created.project.shots.length,'相同JS的不同镜头保持独立ID模块URL');assert.equal(new Set(scenes.map(scene=>before.resources.get(scene))).size,1);
+    if(condition==='missing')await fs.rm(file);else await fs.writeFile(file,corrupt);let fileSyncs=0,renames=0;
+    t.mock.method(fs,'open',async(...[destination,flags,mode]:Parameters<typeof fs.open>)=>{
+      const handle=await open(destination,flags,mode);
+      if(typeof destination==='string'&&destination.startsWith(file+'.tmp-')&&flags==='wx'){const sync=handle.sync.bind(handle);t.mock.method(handle,'sync',async()=>{fileSyncs++;await sync();});entered.resolve();await release.promise;}
+      return handle;
+    });
+    t.mock.method(fs,'rename',async(...[from,to]:Parameters<typeof fs.rename>)=>{if(to===file)renames++;return rename(from,to);});syncBuiltinESMExports();
+    preparing=renderer.preview(created.root,created.project);void preparing.catch(()=>{});
+    await bounded(Promise.race([entered.promise,preparing.then(()=>{throw new Error('缺失/损坏资源未经过耐久临时文件门闩');})]),'等待不可变文件修复');assert.equal(renames,0);
+    if(condition==='missing')await assert.rejects(fs.stat(file),{code:'ENOENT'});else assert.deepEqual(await fs.readFile(file),corrupt,'替换前不可原位截断损坏目标');
+    release.resolve();await bounded(preparing,'耐久发布完成');assert.equal(fileSyncs,1);assert.equal(renames,1);assert.deepEqual(await fs.readFile(file),expected);assert.deepEqual((await graph(url)).resources,before.resources);
+  }finally{release.resolve();await preparing?.catch(()=>{});t.mock.restoreAll();syncBuiltinESMExports();await renderer.close();await fs.rm(directory,{recursive:true,force:true});}
+});
+
+test('non-ENOENT immutable read failures retain diagnostics and fail without rename, truncate or retry',{timeout:30_000},async t=>{
+  const directory=await fs.mkdtemp(join(tmpdir(),'yingliu-runtime-read-error-')),store=new ProjectStore({baseDirectory:directory}),renderer=new VideoRenderer(store),open=fs.open.bind(fs),rename=fs.rename.bind(fs);
+  try{
+    const created=await store.create(createProject('不可变读取错误')),url=await renderer.preview(created.root,created.project),before=await graph(url),file=join(created.root,new URL(before.scriptUrl).pathname.slice(1)),expected=await fs.readFile(file);let ioCode='EACCES',reads=0,renames=0,closes=0;
+    t.mock.method(fs,'open',async(...[destination,flags,mode]:Parameters<typeof fs.open>)=>{const handle=await open(destination,flags,mode);if(destination===file&&flags==='r'){t.mock.method(handle,'read',async()=>{reads++;throw Object.assign(new Error('synthetic immutable read failure'),{code:ioCode,syscall:'read'});});const close=handle.close.bind(handle);t.mock.method(handle,'close',async()=>{await close();closes++;});}return handle;});
+    t.mock.method(fs,'rename',async(...[from,to]:Parameters<typeof fs.rename>)=>{if(to===file)renames++;return rename(from,to);});syncBuiltinESMExports();
+    for(ioCode of ['EACCES','EIO'])await assert.rejects(renderer.preview(created.root,created.project),(error:any)=>error.code===ioCode&&error.failure?.operation==='runtime_frame_publish'&&error.failure?.ioCode===ioCode);
+    assert.equal(reads,2);assert.equal(closes,2);assert.equal(renames,0);assert.deepEqual(await fs.readFile(file),expected);
+  }finally{t.mock.restoreAll();syncBuiltinESMExports();await renderer.close();await fs.rm(directory,{recursive:true,force:true});}
+});
+
+for(const condition of ['oversize','grew_after_stat'] as const)test(`${condition} immutable cache cannot trigger unbounded reads and closes its descriptor before repair`,{timeout:30_000},async t=>{
+  const directory=await fs.mkdtemp(join(tmpdir(),'yingliu-runtime-bounded-read-')),store=new ProjectStore({baseDirectory:directory}),renderer=new VideoRenderer(store),open=fs.open.bind(fs),rename=fs.rename.bind(fs);
+  try{
+    const created=await store.create(createProject('不可变读取上限')),url=await renderer.preview(created.root,created.project),before=await graph(url),file=join(created.root,new URL(before.scriptUrl).pathname.slice(1)),expected=Buffer.from(before.resources.get(before.scriptUrl)!,'utf8');await fs.writeFile(file,Buffer.concat([expected,Buffer.alloc(4096,1)]));let bytesRead=0,reads=0,closed=false,renames=0,intercepted=false;
+    t.mock.method(fs,'open',async(...[destination,flags,mode]:Parameters<typeof fs.open>)=>{
+      const handle=await open(destination,flags,mode);if(!intercepted&&destination===file&&flags==='r'){intercepted=true;
+        if(condition==='grew_after_stat'){const info=await handle.stat();t.mock.method(handle,'stat',async()=>Object.assign(info,{size:expected.length}));}
+        const read=handle.read.bind(handle);t.mock.method(handle,'read',async(buffer:Buffer,offset:number,length:number,position:null)=>{reads++;assert.ok(length<=expected.length+1);const result=await read(buffer,offset,length,position);bytesRead+=result.bytesRead;assert.ok(bytesRead<=expected.length+1);return result;});
+        const close=handle.close.bind(handle);t.mock.method(handle,'close',async()=>{await close();closed=true;});
+      }return handle;
+    });
+    t.mock.method(fs,'rename',async(...[from,to]:Parameters<typeof fs.rename>)=>{if(to===file){assert.equal(closed,true,'读取用fd必须在耐久替换前关闭');renames++;}return rename(from,to);});syncBuiltinESMExports();
+    await renderer.preview(created.root,created.project);assert.equal(renames,1);assert.equal(closed,true);
+    if(condition==='oversize'){assert.equal(reads,0);assert.equal(bytesRead,0);}else assert.equal(bytesRead,expected.length+1,'必须检测完整bytes之后的额外字节');
+    assert.deepEqual(await fs.readFile(file),expected);assert.deepEqual((await graph(url)).resources,before.resources);
+  }finally{t.mock.restoreAll();syncBuiltinESMExports();await renderer.close();await fs.rm(directory,{recursive:true,force:true});}
+});
