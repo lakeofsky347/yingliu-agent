@@ -22,9 +22,18 @@ export function failureCategory(value){
 }
 const number=value=>Number.isFinite(value)?value:undefined;
 const version=value=>typeof value==='string'?safeLabel(value.split(/\r?\n/)[0]).slice(0,160):undefined;
+/** Task observations use fixed enums and revision numbers, never task messages or IDs. */
+function taskDiagnostic(value){
+  if(!value||typeof value!=='object')return undefined;
+  const result={};
+  const fields={expected:['complete','ready'],actual:['failed','cancelled','running','no_new_task','wrong_project','wrong_task','not_ready','unknown'],taskKind:['preview','export','audio','storyboard','scenes','modify','unknown'],diagnosticCategory:['FRAME_NOT_REPEATABLE','WAIT_TIMEOUT','SANDBOX_UNAVAILABLE','TASK_FAILED','TASK_IDENTITY_MISMATCH']};
+  for(const [key,allowed]of Object.entries(fields))if(allowed.includes(value[key]))result[key]=value[key];
+  for(const key of ['taskRevision','projectRevision'])if(Number.isSafeInteger(value[key])&&value[key]>=0)result[key]=value[key];
+  return Object.keys(result).length?result:undefined;
+}
 export function summarizePhase(phase,execution,report){
   if(!PHASES.has(phase))throw new Error('Unknown acceptance phase');
-  const checks=Array.isArray(report?.checks)?report.checks.slice(0,120).map(check=>typeof check==='string'?{name:safeLabel(check),status:'PASS'}:{name:safeLabel(check?.name),status:STATES.has(check?.status)?check.status:'NOT_CHECKED'}):[];
+  const checks=Array.isArray(report?.checks)?report.checks.slice(0,120).map(check=>typeof check==='string'?{name:safeLabel(check),status:'PASS'}:{name:safeLabel(check?.name),status:STATES.has(check?.status)?check.status:'NOT_CHECKED',...(check?.status==='FAIL'&&taskDiagnostic(check?.diagnostic)?{diagnostic:taskDiagnostic(check.diagnostic)}:{})}):[];
   const declared=phase==='native'?report?.nativeAcceptance:report?.status;
   const nativeCredentials=phase!=='native'||report?.nativeRuntime?.sandboxEnabled===true&&report?.nativeRuntime?.encryptionAvailable===true&&['macos_keychain','windows_dpapi','gnome_libsecret','kwallet','kwallet5','kwallet6'].includes(report.nativeRuntime.credentialBackend);
   const complete=nativeCredentials&&declared==='PASS'&&checks.length>0&&!checks.some(check=>check.status!=='PASS')&&(phase!=='package'||report.guiVerified===true&&report.sandboxVerified===true);

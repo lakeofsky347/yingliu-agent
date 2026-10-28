@@ -55,6 +55,14 @@ test('failure diagnostics expose only fixed categories, never captured error mes
   assert.equal(summary.diagnosticCategory,'CREDENTIALS_UNAVAILABLE');assert.ok(!JSON.stringify(summary).includes('sk-private-key'));
 });
 
+test('package task failure summaries retain only fixed states, categories and revision numbers',()=>{
+  const phase=summarizePhase('package',{exitCode:1},{status:'FAIL',location:'manual storyboard preview task completion',checks:[{name:'manual storyboard preview task completion',status:'FAIL',diagnostic:{expected:'complete',actual:'failed',taskKind:'preview',diagnosticCategory:'FRAME_NOT_REPEATABLE',taskRevision:4,projectRevision:4,id:'private-id',message:'sk-private-key',path:'/private/fixture'}},{name:'untrusted',status:'FAIL',diagnostic:{expected:'sk-private-key',actual:'/private/fixture',diagnosticCategory:'raw error',taskRevision:-1}}]});
+  assert.deepEqual((phase.checks![0] as any).diagnostic,{expected:'complete',actual:'failed',taskKind:'preview',diagnosticCategory:'FRAME_NOT_REPEATABLE',taskRevision:4,projectRevision:4});
+  assert.equal((phase.checks![1] as any).diagnostic,undefined);
+  assert.equal(phase.failedLocation,'manual storyboard preview task completion');
+  for(const value of ['private-id','sk-private-key','/private/fixture','raw error'])assert.ok(!JSON.stringify(phase).includes(value));
+});
+
 test('sandbox inspection checks the application renderer rather than another sandboxed process',async()=>{
   const {inspectNativeSandbox}=await import('../scripts/acceptance-sandbox.mjs'),{runInNewContext}=await import('node:vm');
   async function inspect(sandboxed:boolean,disabled=false){
