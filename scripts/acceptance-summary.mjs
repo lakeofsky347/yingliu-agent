@@ -86,7 +86,7 @@ export function summarizePhase(phase,execution,report){
 export function platformSummary(metadata,phases){
   const expected=['preflight','package','native','models','film','editor'];
   const complete=metadata.cleanupStatus==='PASS'&&expected.every(name=>phases.some(phase=>phase.phase===name&&phase.status==='PASS'));
-  return {schemaVersion:1,deliveryVersion:'v1.0.0',applicationVersion:version(metadata.applicationVersion),checkedAt:new Date().toISOString(),
+  return {schemaVersion:1,deliveryVersion:'v1.1.0',applicationVersion:version(metadata.applicationVersion),checkedAt:new Date().toISOString(),
     workingTreeDirty:metadata.workingTreeDirty===true,commit:/^[a-f0-9]{40}$/.test(metadata.commit??'')?metadata.commit:null,platform:['darwin','win32','linux'].includes(metadata.platform)?metadata.platform:'unknown',architecture:['x64','arm64'].includes(metadata.architecture)?metadata.architecture:'unknown',
     runtime:{node:version(metadata.node),browser:version(metadata.browser),ffmpeg:version(metadata.ffmpeg),ffprobe:version(metadata.ffprobe)},
     status:complete?'PASS':'FAIL',temporaryDataCleanup:metadata.cleanupStatus==='PASS'?'PASS':metadata.cleanupStatus==='FAIL'?'FAIL':'NOT_CHECKED',phases:expected.map(name=>phases.find(phase=>phase.phase===name)||{phase:name,status:'NOT_CHECKED',failureCode:'NOT_RUN'}),

@@ -1,0 +1,173 @@
+{
+  "release": "/workspace/yingliu-agent-verify/dist-p0/node-linux-x64",
+  "manifest": {
+    "runtime": "node",
+    "runtimeVersion": "v22.20.0",
+    "binary": {
+      "path": "yingliu-sidecar",
+      "bytes": 131140800,
+      "sha256": "374577fa0a7367977aeb199cf302a080d70be0c4b57092efaf0dfedbd67143f8"
+    },
+    "totalBytes": 133331831,
+    "commit": "c03828fb61a9b287460663cb91afeb730ed4cf3b"
+  },
+  "control": [
+    {
+      "type": "ready",
+      "protocolVersion": 1,
+      "resourceVersion": "p0-1",
+      "profileId": "cea24258a114df29b2fdcc770cd3befa",
+      "pid": 1947364,
+      "port": 37681,
+      "origin": "http://127.0.0.1:37681",
+      "token": "<redacted>",
+      "mock": true,
+      "readyMs": 29,
+      "runtime": "node v22.20.0"
+    },
+    {
+      "type": "shutdown",
+      "ok": true,
+      "reason": "request"
+    }
+  ],
+  "steps": [
+    {
+      "t": 203,
+      "step": "install-path",
+      "ok": true,
+      "install": "/tmp/p0 验证 SATOBC/映流 智能体 安装/sidecar",
+      "isolate": true,
+      "hidden": [
+        "/workspace/yingliu-agent-verify",
+        "/opt/yingliu-agent"
+      ]
+    },
+    {
+      "t": 537,
+      "step": "ready-handshake",
+      "ok": true,
+      "readyWallMs": 332,
+      "readyMs": 29,
+      "runtime": "node v22.20.0",
+      "protocolVersion": 1
+    },
+    {
+      "t": 566,
+      "step": "token-required",
+      "ok": true
+    },
+    {
+      "t": 569,
+      "step": "editor-served",
+      "ok": true
+    },
+    {
+      "t": 572,
+      "step": "editor-csp-no-scene-frames",
+      "ok": true,
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http://localhost:*; media-src 'self' http://localhost:*; frame-src 'none'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    },
+    {
+      "t": 598,
+      "step": "project-create",
+      "ok": true,
+      "projectId": "film-449e6d75-61d2-4905-b753-4ad5033b2592",
+      "root": "/tmp/p0 验证 SATOBC/用户 数据/projects/P0-验证-工程-film-449e6d75-61d2-4905-b753-4ad5033b2592",
+      "underProjectsRoot": true
+    },
+    {
+      "t": 601,
+      "step": "project-read",
+      "ok": true
+    },
+    {
+      "t": 616,
+      "step": "project-write",
+      "ok": true,
+      "revision": 1
+    },
+    {
+      "t": 834,
+      "step": "agent-run-mock-until-approval",
+      "ok": true,
+      "status": "awaiting_approval",
+      "tool": "export_mp4"
+    },
+    {
+      "t": 79581,
+      "step": "agent-run-complete-real-render",
+      "ok": true,
+      "status": "complete",
+      "task": {
+        "kind": "export",
+        "status": "complete"
+      },
+      "output": "/tmp/p0 验证 SATOBC/用户 数据/projects/P0-验证-工程-film-449e6d75-61d2-4905-b753-4ad5033b2592/exports/2379c5f2-b0c4-4888-a09e-583c911faf1a/video.mp4",
+      "renderMs": 78746,
+      "chromiumSeen": true
+    },
+    {
+      "t": 80895,
+      "step": "mp4-full-decode",
+      "ok": true,
+      "video": {
+        "codec": "h264",
+        "w": 1920,
+        "h": 1080,
+        "fps": "30/1",
+        "frames": "900"
+      },
+      "duration": "30.000000",
+      "bytes": 141927
+    },
+    {
+      "t": 80959,
+      "step": "archive-export-import",
+      "ok": true,
+      "bytes": 6281,
+      "importedId": "film-a431d8f6-c082-4b30-9659-25352de55a8c",
+      "exported": true
+    },
+    {
+      "t": 81396,
+      "step": "cli-busy-same-profile",
+      "ok": true,
+      "exit": 9,
+      "code": "BUSY"
+    },
+    {
+      "t": 81735,
+      "step": "second-sidecar-busy",
+      "ok": true,
+      "exit": 9
+    },
+    {
+      "t": 82267,
+      "step": "graceful-shutdown",
+      "ok": true,
+      "exit": 0,
+      "shutdownMs": 515
+    },
+    {
+      "t": 82267,
+      "step": "no-leftover-children",
+      "ok": true,
+      "observedDescendants": [
+        "yingliu-sidecar",
+        "chrome",
+        "cat",
+        "ffmpeg",
+        "ffprobe"
+      ],
+      "alive": []
+    },
+    {
+      "t": 82689,
+      "step": "lock-released-after-exit",
+      "ok": true,
+      "exit": 0
+    }
+  ],
+  "stderr": ""
+}

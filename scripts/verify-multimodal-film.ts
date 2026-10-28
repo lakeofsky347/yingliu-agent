@@ -20,7 +20,7 @@ const output=resolve(process.env.YINGLIU_ACCEPTANCE_OUTPUT||'artifacts/acceptanc
 await mkdir(output,{recursive:true});
 const checks:{name:string;status:'PASS';details?:unknown}[]=[],requests:{method:string;path:string;model?:string;authenticated:boolean;imageCount?:number;imageBytes?:number}[]=[];
 const workflows:WorkflowRecord[]=[];let app:Application|undefined,baseUrl='';
-let report:Record<string,unknown>={application:'映流智能体',version:'0.5.0',checkedAt:new Date().toISOString(),status:'RUNNING',checks,providerEvidence:'仅本机 HTTP 模拟供应商；不代表真实模型画质或语音质量',renderEvidence:'真实 Chromium 捕帧与 FFmpeg 编解码',platform:process.platform,architecture:process.arch};
+let report:Record<string,unknown>={application:'映流智能体',version:'1.1.0',checkedAt:new Date().toISOString(),status:'RUNNING',checks,providerEvidence:'仅本机 HTTP 模拟供应商；不代表真实模型画质或语音质量',renderEvidence:'真实 Chromium 捕帧与 FFmpeg 编解码',platform:process.platform,architecture:process.arch};
 function passed(name:string,details?:unknown){checks.push({name,status:'PASS',...(details===undefined?{}:{details})});console.log('PASS '+name);}
 async function waitFor<T>(read:()=>Promise<T>,predicate:(value:T)=>boolean,label:string,timeoutMs=120_000):Promise<T>{const end=Date.now()+timeoutMs;while(true){const result=await read();if(predicate(result))return result;if(Date.now()>end)throw new Error(label+'超时');await new Promise(accept=>setTimeout(accept,40));}}
 const fixtureFiles={image:join(temporary,'image.png'),video:join(temporary,'video.mp4'),speech:join(temporary,'speech.wav')};

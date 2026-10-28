@@ -30,7 +30,7 @@ test('native success requires a real safeStorage encryption capability in the su
 test('overall pass requires every native, package and media phase and keeps unsupported evidence explicit',()=>{
   const names=['preflight','package','native','models','film','editor'];
   const summary=platformSummary({applicationVersion:'0.5.0',platform:'darwin',architecture:'arm64',commit:'b'.repeat(40),cleanupStatus:'PASS'},names.map(phase=>({phase,status:'PASS'})));
-  assert.equal(summary.status,'PASS');assert.equal(summary.deliveryVersion,'v1.0.0');assert.equal(summary.applicationVersion,'0.5.0');
+  assert.equal(summary.status,'PASS');assert.equal(summary.deliveryVersion,'v1.1.0');assert.equal(summary.applicationVersion,'0.5.0');
   assert.equal(platformSummary({cleanupStatus:'FAIL'},names.map(phase=>({phase,status:'PASS'}))).status,'FAIL','cleanup failure cannot leave a passing summary');
   assert.equal(summary.evidenceLimits.realPaidProviders,'NOT_CHECKED');assert.equal(summary.evidenceLimits.cleanMachineInstallation,'NOT_CHECKED');assert.equal(summary.evidenceLimits.humanFullViewingAndListening,'NOT_CHECKED');
 });
