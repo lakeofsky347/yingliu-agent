@@ -53,7 +53,7 @@ export interface SceneSource { html:string; css:string; js:string; shotPatch?:Pa
 export interface TaskState {
   id:string; kind:'storyboard'|'scenes'|'modify'|'preview'|'export'|'audio';
   status:'running'|'complete'|'failed'|'cancelled'; progress:number; message:string;
-  startedAt:string; finishedAt?:string; error?:string; shotId?:string; logPath?:string;
+  startedAt:string; finishedAt?:string; error?:string; shotId?:string; logPath?:string; failure?:import('./task-diagnostic.ts').TaskFailureDiagnostic;
 }
 export interface EnvironmentSettings { browserPath:string; ffmpegPath:string; ffprobePath:string; maxVideoBytes?:number }
 export interface EnvironmentInfo extends EnvironmentSettings { browserAvailable:boolean; ffmpegAvailable:boolean; ffprobeAvailable:boolean; platform?:string; localSpeechAvailable?:boolean }

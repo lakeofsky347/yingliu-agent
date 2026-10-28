@@ -89,7 +89,7 @@ try{
 }catch(error){
   let diagnostic=error?.acceptanceDiagnostic??(phase==='preview iframe ready handshake'?{expected:'ready',actual:'not_ready',diagnosticCategory:'WAIT_TIMEOUT'}:undefined);
   if(phase.startsWith('source editor: ')){diagnostic={...(diagnostic??{diagnosticCategory:'UI_ACTION_FAILED'}),sourceUi:await readSourceUiState(sourcePage)};}
-  if(diagnostic?.diagnosticCategory==='FRAME_NOT_REPEATABLE'&&latestSnapshot?.root){const owned=relative(env.YINGLIU_PROJECTS,latestSnapshot.root);if(owned&&!owned.startsWith('..')&&!isAbsolute(owned))diagnostic.render=await readRenderDiagnostics(latestSnapshot.root,latestSnapshot.project.revision);}
+  if(['FRAME_NOT_REPEATABLE','TASK_FAILED','WAIT_TIMEOUT'].includes(diagnostic?.diagnosticCategory)&&latestSnapshot?.root){const owned=relative(env.YINGLIU_PROJECTS,latestSnapshot.root);if(owned&&!owned.startsWith('..')&&!isAbsolute(owned))diagnostic.render=await readRenderDiagnostics(latestSnapshot.root,latestSnapshot.project.revision);}
   checks.push({name:phase,status:'FAIL',message:error instanceof Error?error.message:String(error),...(diagnostic?{diagnostic}:{})});console.error(error);process.exitCode=1;
 }finally{
   if(native)await native.close().catch(error=>{checks.push({name:'desktop shutdown',status:'FAIL',message:String(error)});process.exitCode=1;});
