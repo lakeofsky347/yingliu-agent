@@ -1,3 +1,4 @@
+import {taskFailureDiagnostic,snapshotTaskDiagnostic} from './acceptance-task.mjs';
 /** Deliberate allowlist for CI uploads. Raw reports, commands, paths, logs, keys and media never cross this boundary. */
 const PHASES=new Set(['preflight','package','native','models','film','editor']);
 const STATES=new Set(['PASS','FAIL','NOT_CHECKED','PARTIAL','SKIP']);
@@ -29,6 +30,8 @@ function taskDiagnostic(value){
   const fields={expected:['complete','ready'],actual:['failed','cancelled','running','no_new_task','wrong_project','wrong_task','not_ready','unknown'],taskKind:['preview','export','audio','storyboard','scenes','modify','unknown'],diagnosticCategory:['FRAME_NOT_REPEATABLE','WAIT_TIMEOUT','SANDBOX_UNAVAILABLE','TASK_FAILED','TASK_IDENTITY_MISMATCH','UI_ACTION_FAILED']};
   for(const [key,allowed]of Object.entries(fields))if(allowed.includes(value[key]))result[key]=value[key];
   for(const key of ['taskRevision','projectRevision'])if(Number.isSafeInteger(value[key])&&value[key]>=0)result[key]=value[key];
+  const failure=taskFailureDiagnostic(value.failure);if(failure)result.failure=failure;
+  Object.assign(result,snapshotTaskDiagnostic({task:value.currentTask},{turns:[{status:value.lastChatStatus}]}));
   if(Array.isArray(value.render))result.render=value.render.slice(0,12).map(renderDiagnostic).filter(Boolean);
   const sourceUi=sourceUiDiagnostic(value.sourceUi);if(sourceUi)result.sourceUi=sourceUi;
   return Object.keys(result).length?result:undefined;
@@ -56,8 +59,10 @@ function sourceUiDiagnostic(value){
   return result;
 }
 function renderDiagnostic(value){
-  if(!value||typeof value!=='object'||!['backward','cold'].includes(value.phase))return undefined;
-  const result={phase:value.phase};
+  if(!value||typeof value!=='object')return undefined;
+  const failure=taskFailureDiagnostic(value.failure),hasPhase=['backward','cold'].includes(value.phase);
+  if(!failure&&!hasPhase)return undefined;
+  const result={...(hasPhase?{phase:value.phase}:{}),...(failure?{failure}:{})};
   for(const [key,max] of Object.entries({frame:1000000,width:8192,height:8192,differingPixels:8192*8192,maxChannelDelta:255,fontFaces:4096}))if(Number.isSafeInteger(value[key])&&value[key]>=0&&value[key]<=max)result[key]=value[key];
   for(const key of ['expectedHash','actualHash'])if(typeof value[key]==='string'&&/^[a-f0-9]{64}$/.test(value[key]))result[key]=value[key];
   if(['equal','different','unavailable'].includes(value.pixelComparison))result.pixelComparison=value.pixelComparison;

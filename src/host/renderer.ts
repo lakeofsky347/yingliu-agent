@@ -15,10 +15,12 @@ import {AudioMixer, type AudioMix} from './audio.js';
 import {inspectToolEnvironment, type ToolEnvironmentOptions} from './tool-environment.js';
 import {compareFramePng} from './frame-comparison.js';
 import {writeDurableFile} from '../agent/durable-file.js';
+import {taskFailure,withTaskFailure,type TaskFailureDiagnostic} from '../shared/task-diagnostic.ts';
 
 export interface FrameCapture { frame:number; shotId:string; path:string; sha256:string }
-export interface RenderIssue { shotId?:string; frame?:number; message:string;comparison?:ReturnType<typeof compareFramePng>&{phase:'backward'|'cold';frame:number;expectedHash:string;actualHash:string;fontsStatus:'loaded'|'loading'|'unavailable';fontFaces:number;deviceScaleFactor:number} }
+export interface RenderIssue { shotId?:string; frame?:number; message:string;failure?:TaskFailureDiagnostic;comparison?:ReturnType<typeof compareFramePng>&{phase:'backward'|'cold';frame:number;expectedHash:string;actualHash:string;fontsStatus:'loaded'|'loading'|'unavailable';fontFaces:number;deviceScaleFactor:number} }
 export interface RenderCheckResult { ok:boolean; errors:RenderIssue[]; frames:FrameCapture[]; reportPath?:string }
+export function renderCheckError(result:RenderCheckResult):Error{const error=new Error(result.errors.map(issue=>issue.message).join('\n'));return Object.assign(error,{failure:result.errors.find(issue=>issue.failure)?.failure??taskFailure(error,'render_check')});}
 interface ProjectServer { server:Server; origin:string; root:string }
 const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.txt':'text/plain; charset=utf-8','.woff2':'font/woff2','.mp4':'video/mp4','.wav':'audio/wav','.mp3':'audio/mpeg','.m4a':'audio/mp4','.aac':'audio/aac','.flac':'audio/flac','.ogg':'audio/ogg'};
 
@@ -131,28 +133,31 @@ export class VideoRenderer {
   }
   private async prepare(root:string,project:VideoProject):Promise<VideoSpec> {
     const spec=compileSpec(project);const sources:{id:string;html:string;css:string;moduleUrl:string}[]=[];
+    let operation:TaskFailureDiagnostic['operation']='runtime_directory_create';
+    try{
     await fs.mkdir(await projectPath(root,'runtime/scenes'),{recursive:true});
     for(const shot of spec.shots){
       try{
-        const source=await this.store.readSource(root,shot,project.revision);safeId(shot.id);
+        operation='runtime_scene_source_read';const source=await this.store.readSource(root,shot,project.revision);safeId(shot.id);
         // ESM modules are files served under a restrictive self-only CSP; no privileged APIs are exposed.
         const moduleName=shot.id+'-'+hash(source.js)+'.mjs';
-        await writeDurableFile(await projectPath(root,'runtime/scenes/'+moduleName),source.js);
+        operation='runtime_scene_publish';await writeDurableFile(await projectPath(root,'runtime/scenes/'+moduleName),source.js);
         // Keep the legacy address complete for older cached runtime documents.
-        await writeDurableFile(await projectPath(root,'runtime/scenes/'+shot.id+'.mjs'),source.js);
+        operation='runtime_scene_alias_publish';await writeDurableFile(await projectPath(root,'runtime/scenes/'+shot.id+'.mjs'),source.js);
         sources.push({id:shot.id,html:source.html,css:source.css,moduleUrl:'./scenes/'+moduleName});
       }catch(error){const e=error as Error&RenderIssue;e.shotId=shot.id;throw e;}
     }
     const manifest=json({spec,sources}),runtimeName='frame-'+hash(browserRuntime)+'.mjs',specName='spec-'+hash(manifest)+'.json';
-    await writeDurableFile(await projectPath(root,'runtime/'+runtimeName),browserRuntime);
-    await writeDurableFile(await projectPath(root,'runtime/'+specName),manifest);
-    await writeDurableFile(await projectPath(root,'runtime/frame.mjs'),browserRuntime);
-    await writeDurableFile(await projectPath(root,'runtime/spec.json'),manifest);
+    operation='runtime_frame_publish';await writeDurableFile(await projectPath(root,'runtime/'+runtimeName),browserRuntime);
+    operation='runtime_spec_publish';await writeDurableFile(await projectPath(root,'runtime/'+specName),manifest);
+    operation='runtime_frame_alias_publish';await writeDurableFile(await projectPath(root,'runtime/frame.mjs'),browserRuntime);
+    operation='runtime_spec_alias_publish';await writeDurableFile(await projectPath(root,'runtime/spec.json'),manifest);
     // index.html is the publication point. Its immutable manifest and modules
     // already exist in full; an old document keeps its old complete graph while
     // another preview/check prepares a new revision in the same project.
-    await writeDurableFile(await projectPath(root,'index.html'),runtimeHtml(spec.target.width,spec.target.height,{runtimeUrl:'./runtime/'+runtimeName,specUrl:'./runtime/'+specName}));
+    operation='runtime_index_publish';await writeDurableFile(await projectPath(root,'index.html'),runtimeHtml(spec.target.width,spec.target.height,{runtimeUrl:'./runtime/'+runtimeName,specUrl:'./runtime/'+specName}));
     return spec;
+    }catch(error){throw withTaskFailure(error,operation);}
   }
   private async openPage(url:string,spec:VideoSpec,settings:EnvironmentSettings,issues:RenderIssue[],signal?:AbortSignal):Promise<{browser:Browser;page:Page;removeAbort:()=>void}> {
     aborted(signal);const env=detectEnvironment(settings);if(!env.browserAvailable)throw new Error('Chrome/Chromium unavailable. Set browserPath in environment settings.');
@@ -162,7 +167,7 @@ export class VideoRenderer {
     // Windows 首帧文字仍观察到 1 级通道差：候选固定灰阶与软件合成，
     // 保留 WebGL/3D API；只用于无界面取帧，不改变编辑器的合成配置。
     // 实际首次采样、逆序和冷启动仍按原 PNG 哈希严格验收。
-    const browser=await chromium.launch({executablePath:env.browserPath,headless:true,chromiumSandbox:true,args:[...RENDER_BROWSER_ARGS]});this.browsers.add(browser);
+    const browser=await chromium.launch({executablePath:env.browserPath,headless:true,chromiumSandbox:true,args:[...RENDER_BROWSER_ARGS]}).catch(error=>{throw withTaskFailure(error,'render_browser_launch');});this.browsers.add(browser);
     const cancel=()=>{void browser.close().catch(()=>{});};signal?.addEventListener('abort',cancel,{once:true});
     try {
       const context=await browser.newContext({viewport:{width:spec.target.width,height:spec.target.height},deviceScaleFactor:1,serviceWorkers:'block'});
@@ -178,12 +183,12 @@ export class VideoRenderer {
       page.on('pageerror',error=>issues.push({message:error.message}));
       page.on('console',message=>{if(message.type()==='error')issues.push({message:message.text()});});
       page.on('response',response=>{if(response.status()>=400)issues.push({message:'HTTP '+response.status()+': '+new URL(response.url()).pathname});});
-      await page.goto(url,{waitUntil:'load',timeout:30_000});
-      await page.waitForFunction(()=>!!(window as any).__VIDEO_WORKPACK__);
+      await page.goto(url,{waitUntil:'load',timeout:30_000}).catch(error=>{throw withTaskFailure(error,'render_page_load');});
+      await page.waitForFunction(()=>!!(window as any).__VIDEO_WORKPACK__).catch(error=>{throw withTaskFailure(error,'render_scene_ready');});
       const ready=await deadline(page.evaluate(async()=>{
         try{await (window as any).__VIDEO_WORKPACK__.ready();return {ok:true};}
         catch(error){const e=error as any;return {ok:false,message:e.message,shotId:e.shotId};}
-      }),'Scene ready');
+      }),'Scene ready').catch(error=>{throw withTaskFailure(error,'render_scene_ready');});
       if(!ready.ok){issues.push({shotId:ready.shotId,message:ready.message??'Renderer ready failed'});throw new Error(ready.message);}
       return {browser,page,removeAbort:()=>signal?.removeEventListener('abort',cancel)};
     }catch(error){signal?.removeEventListener('abort',cancel);await browser.close().catch(()=>{});this.browsers.delete(browser);throw error;}
@@ -232,21 +237,23 @@ export class VideoRenderer {
   }
   async check(root:string,project:VideoProject,settings:EnvironmentSettings,signal?:AbortSignal):Promise<RenderCheckResult> {
     const errors:RenderIssue[]=[],frames:FrameCapture[]=[];let connection:Awaited<ReturnType<VideoRenderer['openPage']>>|undefined;
+    let operation:TaskFailureDiagnostic['operation']='render_check';
     const reportRoot=await projectPath(root,'validation/check-'+randomUUID());await fs.mkdir(reportRoot,{recursive:true});
     try {
       const spec=await this.prepare(root,project),url=(await this.server(root)).origin+'/index.html';
       connection=await this.openPage(url,spec,settings,errors,signal);
       for(const frame of keyFrames(spec)){
-        aborted(signal);const result=await this.frame(connection.page,spec,frame);
+        operation='render_frame';aborted(signal);const result=await this.frame(connection.page,spec,frame);
         const file=path.join(reportRoot,String(frame).padStart(6,'0')+'.png');await fs.writeFile(file,result.buffer);
         frames.push({frame,shotId:result.shotId,path:file,sha256:hash(result.buffer)});
       }
-      await this.verifySeek(connection.page,spec,frames,errors,signal);
-      if(errors.length===0)for(const shot of project.shots)await this.store.markSourceGood(root,shot);
-    }catch(error){const e=error as Error&RenderIssue;errors.push({shotId:e.shotId,frame:e.frame,message:signal?.aborted?'Task cancelled':e.message});}
+      operation='render_seek';await this.verifySeek(connection.page,spec,frames,errors,signal);
+      operation='source_mark_good';if(errors.length===0)for(const shot of project.shots)await this.store.markSourceGood(root,shot);
+    }catch(error){const e=error as Error&RenderIssue;errors.push({shotId:e.shotId,frame:e.frame,message:signal?.aborted?'Task cancelled':e.message,failure:taskFailure(error,operation)});}
     finally{if(connection){connection.removeAbort();await connection.browser.close().catch(()=>{});this.browsers.delete(connection.browser);}}
+    for(const issue of errors)issue.failure??=taskFailure(new Error(issue.message),'render_check');
     const reportPath=path.join(reportRoot,'check.json');const result={ok:errors.length===0,errors:deduplicate(errors),frames,reportPath,projectRevision:project.revision};
-    await fs.writeFile(reportPath,json(result));return result;
+    try{await fs.writeFile(reportPath,json(result));}catch(error){throw withTaskFailure(error,'render_report_write');}return result;
   }
   private async verifySeek(page:Page,spec:VideoSpec,frames:FrameCapture[],errors:RenderIssue[],signal?:AbortSignal):Promise<void> {
     const expected=new Map(frames.map(frame=>[frame.frame,frame]));

@@ -69,6 +69,14 @@ test('render mismatch summaries retain bounded pixels, hashes and readiness with
   for(const secret of ['/private/raw.png','sk-private-key','https://secret.test'])assert.ok(!JSON.stringify(phase).includes(secret));
 });
 
+test('generic TASK_FAILED summaries retain fixed IO stages and current task/chat states but drop raw exception fields',()=>{
+  const failure={category:'IO_ERROR',operation:'runtime_scene_alias_publish',ioCode:'EPERM',syscall:'rename',message:'sk-private-key',path:'/private/fixture',errno:-4048},safe={category:'IO_ERROR',operation:'runtime_scene_alias_publish',ioCode:'EPERM',syscall:'rename'};
+  const phase=summarizePhase('native',{exitCode:1},{nativeAcceptance:'FAIL',checks:[{name:'preview',status:'FAIL',diagnostic:{diagnosticCategory:'TASK_FAILED',failure,currentTask:{status:'failed',kind:'preview',revision:4,failure,id:'private-id'},lastChatStatus:'failed',render:[{failure,message:'raw check text',path:'/private/fixture'},{failure:{...failure,operation:'/private/fixture'}}]}}]});
+  assert.deepEqual((phase.checks![0] as any).diagnostic,{diagnosticCategory:'TASK_FAILED',failure:safe,currentTask:{status:'failed',kind:'preview',revision:4,failure:safe},lastChatStatus:'failed',render:[{failure:safe}]});
+  const invalid=summarizePhase('package',{exitCode:1},{checks:[{name:'bad labels',status:'FAIL',diagnostic:{failure:{...failure,operation:'sk-private-key'},currentTask:{status:'private-status'},lastChatStatus:'sk-private-key',render:[{failure:{category:'UNKNOWN',operation:'task_work',ioCode:'sk-private-key',syscall:'/private/fixture'}}]}}]});
+  for(const raw of ['private-id','sk-private-key','/private/fixture','errno','raw check text','private-status'])assert.ok(!JSON.stringify([phase,invalid]).includes(raw));
+});
+
 test('sandbox inspection checks the application renderer rather than another sandboxed process',async()=>{
   const {inspectNativeSandbox}=await import('../scripts/acceptance-sandbox.mjs'),{runInNewContext}=await import('node:vm');
   async function inspect(sandboxed:boolean,disabled=false){
