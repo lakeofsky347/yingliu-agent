@@ -1,15 +1,36 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, writeFile, rm, stat, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, stat, symlink, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import { createApplication, MemorySecrets, type Application } from '../src/app/application.ts';
 import { acquireApplicationOwner, applicationDirectories } from '../src/app/ownership.ts';
-import { acquireOwner, acquireOwnerLease, BusyError } from '../src/cli/lock.ts';
+import { acquireOwner, acquireOwnerLease, BusyError, lockPortFor } from '../src/cli/lock.ts';
 
 async function temporary() { const directory = await mkdtemp(join(tmpdir(), 'yingliu-app-owner-')); return { directory, dataDirectory: join(directory, 'profile'), projectsDirectory: join(directory, 'projects') }; }
+/** Match targetFor's real filesystem identity; do not replace the ownership protocol. */
+async function directoryPort(directory: string) {
+  const canonical = await realpath(directory), info = await stat(canonical, { bigint: true });
+  const identity = info.ino !== 0n ? `${info.dev}:${info.ino}` : process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+  return lockPortFor(identity);
+}
+async function availableDirectory(candidates: string[], livePorts: Set<number>) {
+  for (const directory of candidates) {
+    await mkdir(directory, { recursive: true });
+    const port = await directoryPort(directory);if (livePorts.has(port)) continue;
+    const probe = createServer(socket => socket.destroy());
+    const available = await new Promise<boolean>((resolve, reject) => {
+      probe.once('error', (error: NodeJS.ErrnoException) => error.code === 'EADDRINUSE' ? resolve(false) : reject(error));
+      probe.listen({ host: '127.0.0.1', port, exclusive: true }, () => resolve(true));
+    });
+    if (!available) continue;
+    await new Promise<void>((resolve, reject) => probe.close(error => error ? reject(error) : resolve()));
+    livePorts.add(port);return { directory, port };
+  }
+  throw new Error('Independent ownership fixture could not select a distinct available directory port');
+}
 const snapshot = async (app: Application, endpoint: string, payload: unknown = {}) => { const result = await app.route(endpoint, payload); assert.equal(result.ok, true, JSON.stringify(result)); return result.ok ? result.value as any : undefined; };
 function child(file: string, args: string[], environment: Record<string, string>) {
   const process = spawn(globalThis.process.execPath, ['--import', 'tsx', file, ...args], { env: { ...globalThis.process.env, ...environment }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
@@ -51,9 +72,12 @@ test('不同profile及projects可以并行，但不能把对方内部工程作�
     const created = await snapshot(first, 'create', { title: '独占工程', blank: true });
     const projectFile = join(created.root, 'project.json'), stage = join(created.root, '.studio', 'staging', 'must-survive.json');
     await writeFile(projectFile, 'owned projection marker'); await mkdir(join(created.root, '.studio', 'staging'), { recursive: true }); await writeFile(stage, 'owned staging marker');
-    const otherProjects = join(paths.directory, 'other-projects'); await mkdir(otherProjects);
+    const livePorts = new Set(await Promise.all([paths.dataDirectory, paths.projectsDirectory, created.root].map(directoryPort)));
+    const candidates = (name: string) => Array.from({ length: 64 }, (_, index) => join(paths.directory, `${name}-${index}`));
+    const otherProjects = (await availableDirectory(candidates('other-projects'), livePorts)).directory;
+    const otherProfile = (await availableDirectory(candidates('other-profile'), livePorts)).directory;
     await writeFile(join(otherProjects, 'registry.json'), JSON.stringify({ version: 1, selected: created.project.id, projects: [{ id: created.project.id, path: created.root, title: '外部工程' }], sessions: {} }));
-    second = await createApplication({ dataDirectory: join(paths.directory, 'other-profile'), projectsDirectory: otherProjects, credentials: new MemorySecrets(), resumeRemoteTasks: false });
+    second = await createApplication({ dataDirectory: otherProfile, projectsDirectory: otherProjects, credentials: new MemorySecrets(), resumeRemoteTasks: false });
     assert.equal((await snapshot(second, 'current')).project, null, '启动恢复不能接管正在被其他profile使用的外部工程');
     const denied = await second.route('open', { path: created.root }); assert.equal(denied.ok, false); if (!denied.ok) assert.equal(denied.error.code, 'BUSY');
     assert.equal(await readFile(projectFile, 'utf8'), 'owned projection marker'); assert.equal(await readFile(stage, 'utf8'), 'owned staging marker');
@@ -62,6 +86,25 @@ test('不同profile及projects可以并行，但不能把对方内部工程作�
     const opened = await snapshot(second, 'open', { path: created.root }); assert.equal(opened.project.id, created.project.id);
     await assert.rejects(stat(stage), { code: 'ENOENT' }); assert.equal(JSON.parse(await readFile(projectFile, 'utf8')).id, created.project.id);
   } finally { await first?.dispose(); await second?.dispose(); await rm(paths.directory, { recursive: true, force: true }); }
+});
+
+test('并行目录fixture排除已持端口和真实监听冲突，不把BUSY当作应用创建成功', async () => {
+  const paths = await temporary(), setupPorts = new Set<number>(), foreign = createServer();
+  const candidates = (name: string) => Array.from({ length: 64 }, (_, index) => join(paths.directory, `${name}-${index}`));
+  let release: (() => Promise<void>) | undefined, releaseHeld: (() => Promise<void>) | undefined;
+  try {
+    const held = await availableDirectory(candidates('held'), setupPorts);releaseHeld = await acquireOwner([held.directory], 'existing-live-fixture', 0);
+    const occupied = await availableDirectory(candidates('occupied'), setupPorts);
+    // This candidate is intentionally unavailable, exactly as a conservative
+    // hash collision would be. Select another fixture before creating an app.
+    await new Promise<void>((resolve, reject) => { foreign.once('error', reject);foreign.listen({ host: '127.0.0.1', port: occupied.port, exclusive: true }, resolve); });
+    await assert.rejects(acquireOwner([occupied.directory], 'unselected-fixture', 0), BusyError);
+    const livePorts = new Set([held.port]);
+    const chosen = await availableDirectory([held.directory, occupied.directory, ...candidates('available')], livePorts);
+    assert.notEqual(chosen.directory, held.directory);assert.notEqual(chosen.directory, occupied.directory);assert.notEqual(chosen.port, held.port);assert.notEqual(chosen.port, occupied.port);
+    release = await acquireOwner([chosen.directory], 'selected-independent-fixture', 0);
+    await assert.rejects(acquireOwner([chosen.directory], 'competing-owner', 0), BusyError);
+  } finally { await release?.();await releaseHeld?.();if (foreign.listening) await new Promise<void>((resolve, reject) => foreign.close(error => error ? reject(error) : resolve()));await rm(paths.directory, { recursive: true, force: true }); }
 });
 
 test('显式工程目录等待会在真实外部root释放后继续打开，且不会提前修改工程', { timeout: 10_000 }, async () => {
