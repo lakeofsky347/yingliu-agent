@@ -62,6 +62,12 @@ test('package task failure summaries retain only fixed states, categories and re
   assert.equal(phase.failedLocation,'manual storyboard preview task completion');
   for(const value of ['private-id','sk-private-key','/private/fixture','raw error'])assert.ok(!JSON.stringify(phase).includes(value));
 });
+test('render mismatch summaries retain bounded pixels, hashes and readiness without paths or raw text',()=>{
+  const comparison={phase:'cold',frame:0,width:1920,height:1080,differingPixels:12,maxChannelDelta:1,bounds:{x:20,y:30,width:5,height:4},expectedHash:'a'.repeat(64),actualHash:'b'.repeat(64),fontsStatus:'loaded',fontFaces:0,deviceScaleFactor:1,pixelComparison:'different',path:'/private/raw.png',message:'sk-private-key'};
+  const phase=summarizePhase('package',{exitCode:1},{status:'FAIL',checks:[{name:'preview',status:'FAIL',diagnostic:{expected:'complete',actual:'failed',render:[comparison,{phase:'https://secret.test'}, {...comparison,frame:-1,expectedHash:'sk-private-key',differingPixels:Infinity,bounds:{x:-1,y:0,width:1,height:1}}]}}]});
+  const render=(phase.checks![0] as any).diagnostic.render;assert.equal(render.length,2);assert.equal(render[0].differingPixels,12);assert.deepEqual(render[0].bounds,{x:20,y:30,width:5,height:4});assert.equal(render[1].frame,undefined);assert.equal(render[1].expectedHash,undefined);assert.equal(render[1].bounds,undefined);
+  for(const secret of ['/private/raw.png','sk-private-key','https://secret.test'])assert.ok(!JSON.stringify(phase).includes(secret));
+});
 
 test('sandbox inspection checks the application renderer rather than another sandboxed process',async()=>{
   const {inspectNativeSandbox}=await import('../scripts/acceptance-sandbox.mjs'),{runInNewContext}=await import('node:vm');

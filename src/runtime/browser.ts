@@ -117,6 +117,11 @@ async function draw(input) {
     if(module.ready)await module.ready(context);
     await document.fonts.ready;
     await module.render(context);
+    // render() may introduce text and change font families/sizes. Force layout
+    // before taking the new FontFaceSet.ready promise, so a frame never reports
+    // completion while fonts first used by this draw are still loading.
+    stage.getBoundingClientRect();
+    await document.fonts.ready;
     // The business transition belongs to the runtime, independently of AI scene motion.
     const fps=data.spec.target.fps.num/data.spec.target.fps.den;
     const fadeFrames=Math.min(Math.max(1,Math.round(.25*fps)),Math.floor(shot.durationFrames/2));

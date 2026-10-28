@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {waitForNewTask} from '../scripts/acceptance-task.mjs';
+import {waitForNewTask,readRenderDiagnostics} from '../scripts/acceptance-task.mjs';
 
 function fixture(states:any[],timeoutMs=100){let index=0,clock=0;return {read:async()=>states[Math.min(index++,states.length-1)],previousTaskId:'old',projectId:'project',minimumRevision:4,timeoutMs,pollMs:10,now:()=>clock,sleep:async(ms:number)=>{clock+=ms;}};}
 const state=(id:string,status:string,extra:Record<string,unknown>={})=>({project:{id:'project',revision:4},task:{id,status,kind:'preview',revision:4,...extra}});
@@ -21,4 +21,11 @@ test('missing and indefinitely running new tasks fail within the original bounde
 });
 test('a cancelled task fails explicitly instead of looking like completed work',async()=>{
   await assert.rejects(waitForNewTask(fixture([state('new','cancelled')])),(error:any)=>error.acceptanceDiagnostic.actual==='cancelled');
+});
+test('render diagnostics read only comparison fields from the newest matching fixture revision',async()=>{
+  const {mkdtemp,mkdir,writeFile,rm,utimes}=await import('node:fs/promises'),{tmpdir}=await import('node:os'),{join}=await import('node:path');const root=await mkdtemp(join(tmpdir(),'render-diagnostic-'));
+  try{
+    for(const [name,revision,phase,time]of [['check-old',4,'backward',1],['check-current',4,'cold',2],['check-other',3,'backward',3]] as const){const folder=join(root,'validation',name);await mkdir(folder,{recursive:true});const file=join(folder,'check.json');await writeFile(file,JSON.stringify({projectRevision:revision,errors:[{message:'raw secret',path:'/private/file',comparison:{phase,frame:0}}]}));await utimes(file,time,time);}
+    assert.deepEqual(await readRenderDiagnostics(root,4),[{phase:'cold',frame:0}]);assert.deepEqual(await readRenderDiagnostics(root,9),[]);
+  }finally{await rm(root,{recursive:true,force:true});}
 });

@@ -29,7 +29,19 @@ function taskDiagnostic(value){
   const fields={expected:['complete','ready'],actual:['failed','cancelled','running','no_new_task','wrong_project','wrong_task','not_ready','unknown'],taskKind:['preview','export','audio','storyboard','scenes','modify','unknown'],diagnosticCategory:['FRAME_NOT_REPEATABLE','WAIT_TIMEOUT','SANDBOX_UNAVAILABLE','TASK_FAILED','TASK_IDENTITY_MISMATCH']};
   for(const [key,allowed]of Object.entries(fields))if(allowed.includes(value[key]))result[key]=value[key];
   for(const key of ['taskRevision','projectRevision'])if(Number.isSafeInteger(value[key])&&value[key]>=0)result[key]=value[key];
+  if(Array.isArray(value.render))result.render=value.render.slice(0,12).map(renderDiagnostic).filter(Boolean);
   return Object.keys(result).length?result:undefined;
+}
+function renderDiagnostic(value){
+  if(!value||typeof value!=='object'||!['backward','cold'].includes(value.phase))return undefined;
+  const result={phase:value.phase};
+  for(const [key,max] of Object.entries({frame:1000000,width:8192,height:8192,differingPixels:8192*8192,maxChannelDelta:255,fontFaces:4096}))if(Number.isSafeInteger(value[key])&&value[key]>=0&&value[key]<=max)result[key]=value[key];
+  for(const key of ['expectedHash','actualHash'])if(typeof value[key]==='string'&&/^[a-f0-9]{64}$/.test(value[key]))result[key]=value[key];
+  if(['equal','different','unavailable'].includes(value.pixelComparison))result.pixelComparison=value.pixelComparison;
+  if(['loaded','loading','unavailable'].includes(value.fontsStatus))result.fontsStatus=value.fontsStatus;
+  if(Number.isFinite(value.deviceScaleFactor)&&value.deviceScaleFactor>=0&&value.deviceScaleFactor<=16)result.deviceScaleFactor=value.deviceScaleFactor;
+  if(value.bounds&&['x','y','width','height'].every(key=>Number.isSafeInteger(value.bounds[key])&&value.bounds[key]>=0&&value.bounds[key]<=8192))result.bounds=Object.fromEntries(['x','y','width','height'].map(key=>[key,value.bounds[key]]));
+  return result;
 }
 export function summarizePhase(phase,execution,report){
   if(!PHASES.has(phase))throw new Error('Unknown acceptance phase');
