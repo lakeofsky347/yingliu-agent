@@ -1,9 +1,9 @@
 import { _electron as electron } from 'playwright-core';
 import {inspectNativeSandbox} from './acceptance-sandbox.mjs';
-import {waitForNewTask} from './acceptance-task.mjs';
+import {waitForNewTask,readRenderDiagnostics} from './acceptance-task.mjs';
 import { cp, mkdtemp, mkdir, readFile, writeFile, readdir, stat, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve,relative,isAbsolute } from 'node:path';
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { assertHostTarget, assertRelativeSymlinks, electronRuntime, packageLayout, parsePackageOptions, probeElectron } from './package-layout.mjs';
@@ -14,7 +14,7 @@ const layout=packageLayout(root,options.platform,options.arch);
 const source=options.bundle?resolve(options.bundle):layout.destination,app=join(temp,layout.name);
 const executable=join(app,layout.executableRelative),appRoot=join(app,layout.appRelative);
 const env={...process.env,YINGLIU_DATA_DIR:join(temp,'user-data'),YINGLIU_PROJECTS:join(temp,'user-data/projects')};delete env.ELECTRON_RUN_AS_NODE;
-let native,manifest,phase='relocation',sandboxVerified=false;
+let native,manifest,phase='relocation',sandboxVerified=false,latestSnapshot;
 const checks=[];const pass=name=>{checks.push({name,status:'PASS'});console.log('PASS '+name);};
 try{
   await cp(source,app,{recursive:true,verbatimSymlinks:true});
@@ -56,7 +56,7 @@ try{
   native=await electron.launch({chromiumSandbox:true,executablePath:executable,args:[],cwd:temp,env,timeout:45000});
   await native.evaluate(({dialog})=>{dialog.showMessageBox=async()=>({response:1,checkboxChecked:false});});
   let page=await native.firstWindow();await page.getByRole('heading',{name:'我的影片',exact:false}).waitFor();pass('relocated app starts outside source workspace');sandboxVerified=(await inspectNativeSandbox(native)).sandboxEnabled;assert.equal(sandboxVerified,true);pass('relocated desktop keeps Chromium sandbox enabled');
-  const call=async(endpoint,payload={})=>{const response=await page.evaluate(async({endpoint,payload})=>window.yingliu.call(endpoint,payload),{endpoint,payload});if(!response.ok)throw new Error(response.error.message);return response.value;};
+  const call=async(endpoint,payload={})=>{const response=await page.evaluate(async({endpoint,payload})=>window.yingliu.call(endpoint,payload),{endpoint,payload});if(!response.ok)throw new Error(response.error.message);if(response.value?.root&&response.value?.project)latestSnapshot=response.value;return response.value;};
   if(process.env.CHROME_PATH)await call('environment',{browserPath:process.env.CHROME_PATH});
   await page.getByRole('button',{name:'新建影片',exact:true}).first().click();await page.getByRole('textbox',{name:'影片名称',exact:true}).fill('打包后手动制作');await page.getByRole('textbox',{name:'主题与创作简报',exact:true}).fill('独立目录中继续制作自己的影片');await page.getByRole('button',{name:'创建空白影片',exact:true}).click();await page.getByRole('button',{name:'镜头',exact:true}).waitFor();let snapshot=await call('current');assert.equal(snapshot.project.shots.length,0);pass('blank storyboard graph');
   const detectedBrowser=snapshot.environment.browserPath;await page.getByRole('tab',{name:'运行环境',exact:true}).click();await page.getByRole('textbox',{name:'Chromium 浏览器路径',exact:true}).fill(join(temp,'missing-browser'));await page.getByRole('button',{name:'保存并检查环境',exact:true}).click();await page.getByText('部分工具无法执行。工程可以继续编辑；请修正路径后重新检查。',{exact:true}).waitFor();assert.equal((await call('app.health')).canRender,false);pass('invalid executable reports actual readiness failure');await page.getByRole('textbox',{name:'Chromium 浏览器路径',exact:true}).fill(detectedBrowser);await page.getByRole('button',{name:'保存并检查环境',exact:true}).click();await page.getByText('本地浏览器、编码器和媒体检查工具已就绪。',{exact:true}).first().waitFor();assert.equal((await call('app.health')).canRender,true);pass('environment form executes and validates real tool versions');await page.getByRole('tab',{name:'影片预览',exact:true}).click();
@@ -73,6 +73,7 @@ try{
   }
 }catch(error){
   const diagnostic=error?.acceptanceDiagnostic??(phase==='preview iframe ready handshake'?{expected:'ready',actual:'not_ready',diagnosticCategory:'WAIT_TIMEOUT'}:undefined);
+  if(diagnostic?.diagnosticCategory==='FRAME_NOT_REPEATABLE'&&latestSnapshot?.root){const owned=relative(env.YINGLIU_PROJECTS,latestSnapshot.root);if(owned&&!owned.startsWith('..')&&!isAbsolute(owned))diagnostic.render=await readRenderDiagnostics(latestSnapshot.root,latestSnapshot.project.revision);}
   checks.push({name:phase,status:'FAIL',message:error instanceof Error?error.message:String(error),...(diagnostic?{diagnostic}:{})});console.error(error);process.exitCode=1;
 }finally{
   if(native)await native.close().catch(error=>{checks.push({name:'desktop shutdown',status:'FAIL',message:String(error)});process.exitCode=1;});

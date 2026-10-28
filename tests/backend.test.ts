@@ -144,14 +144,17 @@ test('scene generator sends text metadata and an explicit no-image-pixels bounda
 
 
 async function finished(backend:AppBackend,projectId:string):Promise<StudioSnapshot>{
-  for(let i=0;i<100;i++){
+  const deadline=performance.now()+10_000;
+  for(;;){
     const current=await backend.call<StudioSnapshot>('current',{projectId});
-    if(current.task?.status!=='running'){
-      if(!current.task?.logPath||JSON.parse(await readFile(current.task.logPath,'utf8')).status===current.task.status)return current;
+    if(current.task&&['complete','failed','cancelled'].includes(current.task.status)){
+      if(!current.task.logPath)return current;
+      const durable=JSON.parse(await readFile(current.task.logPath,'utf8'));
+      if(durable.id===current.task.id&&durable.status===current.task.status)return current;
     }
+    if(performance.now()>=deadline)throw new Error('Local fixture task did not reach a durable terminal state before the 10 second deadline');
     await new Promise(resolve=>setTimeout(resolve,5));
   }
-  throw new Error('Local fixture task did not finish');
 }
 
 test('backend full apply is one durable undo step across restart and source restoration',async()=>{

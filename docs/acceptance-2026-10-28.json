@@ -6,7 +6,7 @@
   "timezone": "Asia/Singapore",
   "branch": "codex/workspace-improvements-20261027",
   "validationSource": {
-    "baseCommit": "9137eb7b7921423c9039704b4872cc2eff77b334",
+    "baseCommit": "eb514f452e910bb8d1b75f71529f13660c15ab9f",
     "workingTreeDirty": true
   },
   "local": {
@@ -16,26 +16,20 @@
     "build": "PASS",
     "package": "PASS",
     "tests": {
-      "total": 453,
-      "passed": 453,
+      "total": 471,
+      "passed": 471,
       "failed": 0,
       "skipped": 0
     },
     "platformAcceptance": {
-      "status": "PASS",
-      "preflight": 5,
-      "relocatedPackageGui": 20,
-      "packagedNativeFilm": 22,
-      "sourceModelAndCostUi": 11,
-      "sourceMultimodalFilm": 7,
-      "sourceEditorSafety": 8,
-      "rendererOsSandbox": true,
-      "credentialBackend": "macos_keychain",
-      "cliDesktopBusyExitCode": 9,
-      "checkedAt": "2026-10-28T09:05:44.984Z",
-      "totalChecks": 73,
-      "temporaryDataCleanup": "PASS",
-      "runtimeCommittedAs": "9137eb7b7921423c9039704b4872cc2eff77b334"
+      "status": "CREDENTIALS_BLOCKED",
+      "location": "package GUI startup before renderer/window creation",
+      "evidence": "自有Electron主线程在macOS SecItemCopyMatching/SecurityServer.decrypt阻塞；未读取凭据值",
+      "artifactIntegrity": {
+        "filesWithEqualHashes": 626,
+        "equalSymlinkTargets": 14
+      },
+      "notClaimedPass": true
     },
     "providerEvidence": "仅本机网关、内存响应与合成凭据；未调用真实计费 API",
     "workflowDurabilityCases": 74,
@@ -52,14 +46,33 @@
       "newRegressionCases": 6,
       "productCodeChanged": false,
       "status": "PASS"
-    }
+    },
+    "previousCompletePlatformAcceptance": {
+      "status": "PASS",
+      "preflight": 5,
+      "relocatedPackageGui": 20,
+      "packagedNativeFilm": 22,
+      "sourceModelAndCostUi": 11,
+      "sourceMultimodalFilm": 7,
+      "sourceEditorSafety": 8,
+      "rendererOsSandbox": true,
+      "credentialBackend": "macos_keychain",
+      "cliDesktopBusyExitCode": 9,
+      "checkedAt": "2026-10-28T09:05:44.984Z",
+      "totalChecks": 73,
+      "temporaryDataCleanup": "PASS",
+      "runtimeCommittedAs": "9137eb7b7921423c9039704b4872cc2eff77b334"
+    },
+    "postRenderFontRegression": {
+      "passed": 1,
+      "failedBeforeFix": 1,
+      "realChromium": true
+    },
+    "pngDiagnosticCases": 15
   },
   "remoteAcceptance": {
-    "validatedCommit": "9137eb7b7921423c9039704b4872cc2eff77b334",
-    "fastRun": 40661704196,
-    "fastStatus": "PASS",
-    "nativeRun": 40661704269,
-    "nativeStatus": "Windows package failed; macOS/Linux complete PASS, Windows native/models/film/editor PASS; next commit verifies task identity barriers without retrying failed tasks"
+    "candidatePending": true,
+    "note": "新字体屏障与严格帧差诊断候选通过本机471回归，等待对应提交三平台隔离CI；本机GUI钥匙串阻塞单独保留"
   },
   "separateExperimentalBranch": "codex/tauri-p0-hardening-20261028",
   "notVerified": [

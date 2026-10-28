@@ -1,3 +1,5 @@
+import {readdir,readFile,stat} from 'node:fs/promises';
+import {join} from 'node:path';
 /** A GUI click can finish before its async handler submits a task. Observe that
  * action's new task, never a previous terminal record. A failed task stays failed. */
 export async function waitForNewTask({read,previousTaskId,projectId,minimumRevision,kind='preview',timeoutMs=120000,pollMs=300,now=Date.now,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}){
@@ -24,4 +26,15 @@ export async function waitForNewTask({read,previousTaskId,projectId,minimumRevis
     if(now()>=deadline)fail(task?.id&&task.id!==previousTaskId?'running':'no_new_task','WAIT_TIMEOUT');
     await sleep(Math.min(pollMs,Math.max(0,deadline-now())));
   }
+}
+
+/** Read only the isolated fixture's newest matching render report. The upload
+ * boundary applies its own enum/number/hash allowlist to these observations. */
+export async function readRenderDiagnostics(root,revision){
+  try{
+    const folder=join(root,'validation'),names=(await readdir(folder)).filter(name=>/^check-[\w-]+$/.test(name)).slice(-200),reports=[];
+    for(const name of names){try{const file=join(folder,name,'check.json'),report=JSON.parse(await readFile(file,'utf8'));if(report.projectRevision===revision)reports.push({report,time:(await stat(file)).mtimeMs});}catch{}}
+    const latest=reports.sort((a,b)=>b.time-a.time)[0]?.report;
+    return Array.isArray(latest?.errors)?latest.errors.map(error=>error?.comparison).filter(value=>value&&typeof value==='object').slice(0,12):[];
+  }catch{return [];}
 }

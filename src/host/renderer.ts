@@ -13,9 +13,10 @@ import { ProjectStore, projectPath } from './store.js';
 import { browserRuntime, runtimeHtml } from '../runtime/browser.js';
 import {AudioMixer, type AudioMix} from './audio.js';
 import {inspectToolEnvironment, type ToolEnvironmentOptions} from './tool-environment.js';
+import {compareFramePng} from './frame-comparison.js';
 
 export interface FrameCapture { frame:number; shotId:string; path:string; sha256:string }
-export interface RenderIssue { shotId?:string; frame?:number; message:string }
+export interface RenderIssue { shotId?:string; frame?:number; message:string;comparison?:ReturnType<typeof compareFramePng>&{phase:'backward'|'cold';frame:number;expectedHash:string;actualHash:string;fontsStatus:'loaded'|'loading'|'unavailable';fontFaces:number;deviceScaleFactor:number} }
 export interface RenderCheckResult { ok:boolean; errors:RenderIssue[]; frames:FrameCapture[]; reportPath?:string }
 interface ProjectServer { server:Server; origin:string; root:string }
 const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.txt':'text/plain; charset=utf-8','.woff2':'font/woff2','.mp4':'video/mp4','.wav':'audio/wav','.mp3':'audio/mpeg','.m4a':'audio/mp4','.aac':'audio/aac','.flac':'audio/flac','.ogg':'audio/ogg'};
@@ -227,20 +228,26 @@ export class VideoRenderer {
       if(errors.length===0)for(const shot of project.shots)await this.store.markSourceGood(root,shot);
     }catch(error){const e=error as Error&RenderIssue;errors.push({shotId:e.shotId,frame:e.frame,message:signal?.aborted?'Task cancelled':e.message});}
     finally{if(connection){connection.removeAbort();await connection.browser.close().catch(()=>{});this.browsers.delete(connection.browser);}}
-    const reportPath=path.join(reportRoot,'check.json');const result={ok:errors.length===0,errors:deduplicate(errors),frames,reportPath};
+    const reportPath=path.join(reportRoot,'check.json');const result={ok:errors.length===0,errors:deduplicate(errors),frames,reportPath,projectRevision:project.revision};
     await fs.writeFile(reportPath,json(result));return result;
   }
   private async verifySeek(page:Page,spec:VideoSpec,frames:FrameCapture[],errors:RenderIssue[],signal?:AbortSignal):Promise<void> {
-    const expected=new Map(frames.map(frame=>[frame.frame,frame.sha256]));
+    const expected=new Map(frames.map(frame=>[frame.frame,frame]));
     for(const frame of [...expected.keys()].reverse()){
       aborted(signal);const result=await this.frame(page,spec,frame);
-      if(hash(result.buffer)!==expected.get(frame))errors.push({shotId:result.shotId,frame,message:'Frame is not repeatable after seeking backwards'});
+      if(hash(result.buffer)!==expected.get(frame)!.sha256)errors.push(await this.repeatabilityIssue(page,expected.get(frame)!,result,'backward'));
     }
     await page.reload({waitUntil:'load'});await page.waitForFunction(()=>!!(window as any).__VIDEO_WORKPACK__);await deadline(page.evaluate(()=>(window as any).__VIDEO_WORKPACK__.ready()),'Cold scene ready');
     for(const frame of expected.keys()){
       aborted(signal);const result=await this.frame(page,spec,frame);
-      if(hash(result.buffer)!==expected.get(frame))errors.push({shotId:result.shotId,frame,message:'Frame is not repeatable after a cold page reload'});
+      if(hash(result.buffer)!==expected.get(frame)!.sha256)errors.push(await this.repeatabilityIssue(page,expected.get(frame)!,result,'cold'));
     }
+  }
+  private async repeatabilityIssue(page:Page,expected:FrameCapture,actual:{buffer:Buffer;shotId:string},phase:'backward'|'cold'):Promise<RenderIssue>{
+    // Diagnostics never decide acceptance: the original encoded-byte hash above
+    // remains exact. Keep only aggregate pixels/font state in the local report.
+    const readiness=await page.evaluate(()=>({fontsStatus:document.fonts.status,fontFaces:document.fonts.size,deviceScaleFactor:devicePixelRatio})).catch(()=>({fontsStatus:'unavailable' as const,fontFaces:0,deviceScaleFactor:0}));
+    return {shotId:actual.shotId,frame:expected.frame,message:phase==='backward'?'Frame is not repeatable after seeking backwards':'Frame is not repeatable after a cold page reload',comparison:{...compareFramePng(await fs.readFile(expected.path),actual.buffer),phase,frame:expected.frame,expectedHash:expected.sha256,actualHash:hash(actual.buffer),...readiness}};
   }
   async export(root:string,project:VideoProject,settings:EnvironmentSettings,signal:AbortSignal,onProgress:(progress:number,message:string)=>void):Promise<ExportResult> {
     aborted(signal);const env=detectEnvironment(settings);
