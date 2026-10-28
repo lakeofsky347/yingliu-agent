@@ -29,6 +29,22 @@ export function detectEnvironment(settings:Partial<EnvironmentSettings>={},optio
 }
 function hash(buffer:Buffer|string):string { return createHash('sha256').update(buffer).digest('hex'); }
 function json(value:unknown):string { return JSON.stringify(value,null,2)+'\n'; }
+/** Runtime-only: retry the observed Windows EPERM/rename without weakening publication.
+ * Await each complete durable write; never race an abandoned write against a timeout. */
+export async function writeRuntimeFile(file:string,content:string,platform:NodeJS.Platform=process.platform):Promise<void>{
+  const deadline=performance.now()+750;let firstError:unknown;
+  for(let attempt=1;;attempt++){
+    try{await writeDurableFile(file,content);return;}
+    catch(error){
+      const io=error&&typeof error==='object'?error as NodeJS.ErrnoException:undefined;
+      if(platform!=='win32'||io?.code!=='EPERM'||io.syscall!=='rename')throw error;
+      firstError??=error;
+      if(attempt>=8||performance.now()+100>=deadline)throw firstError;
+      await new Promise(resolve=>setTimeout(resolve,100));
+      if(performance.now()>=deadline)throw firstError;
+    }
+  }
+}
 /** Content-addressed files are already published when their complete bytes match. */
 async function writeImmutableRuntime(file:string,content:string):Promise<void>{
   const expected=Buffer.from(content,'utf8');let handle:Awaited<ReturnType<typeof fs.open>>|undefined,matches=false;
@@ -40,7 +56,7 @@ async function writeImmutableRuntime(file:string,content:string):Promise<void>{
       matches=length===expected.length&&bytes.subarray(0,length).equals(expected);
     }
   }finally{await handle.close();}
-  if(!matches)await writeDurableFile(file,content);
+  if(!matches)await writeRuntimeFile(file,content);
 }
 function aborted(signal?:AbortSignal):void { if(signal?.aborted)throw new Error('Task cancelled'); }
 function keyFrames(spec:VideoSpec):number[] { return [...new Set(spec.shots.flatMap(shot=>[shot.startFrame,Math.floor((shot.startFrame+shot.endFrame-1)/2),shot.endFrame-1]))].sort((a,b)=>a-b); }
@@ -156,19 +172,19 @@ export class VideoRenderer {
         const moduleName=shot.id+'-'+hash(source.js)+'.mjs';
         operation='runtime_scene_publish';await writeImmutableRuntime(await projectPath(root,'runtime/scenes/'+moduleName),source.js);
         // Keep the legacy address complete for older cached runtime documents.
-        operation='runtime_scene_alias_publish';await writeDurableFile(await projectPath(root,'runtime/scenes/'+shot.id+'.mjs'),source.js);
+        operation='runtime_scene_alias_publish';await writeRuntimeFile(await projectPath(root,'runtime/scenes/'+shot.id+'.mjs'),source.js);
         sources.push({id:shot.id,html:source.html,css:source.css,moduleUrl:'./scenes/'+moduleName});
       }catch(error){const e=error as Error&RenderIssue;e.shotId=shot.id;throw e;}
     }
     const manifest=json({spec,sources}),runtimeName='frame-'+hash(browserRuntime)+'.mjs',specName='spec-'+hash(manifest)+'.json';
     operation='runtime_frame_publish';await writeImmutableRuntime(await projectPath(root,'runtime/'+runtimeName),browserRuntime);
     operation='runtime_spec_publish';await writeImmutableRuntime(await projectPath(root,'runtime/'+specName),manifest);
-    operation='runtime_frame_alias_publish';await writeDurableFile(await projectPath(root,'runtime/frame.mjs'),browserRuntime);
-    operation='runtime_spec_alias_publish';await writeDurableFile(await projectPath(root,'runtime/spec.json'),manifest);
+    operation='runtime_frame_alias_publish';await writeRuntimeFile(await projectPath(root,'runtime/frame.mjs'),browserRuntime);
+    operation='runtime_spec_alias_publish';await writeRuntimeFile(await projectPath(root,'runtime/spec.json'),manifest);
     // index.html is the publication point. Its immutable manifest and modules
     // already exist in full; an old document keeps its old complete graph while
     // another preview/check prepares a new revision in the same project.
-    operation='runtime_index_publish';await writeDurableFile(await projectPath(root,'index.html'),runtimeHtml(spec.target.width,spec.target.height,{runtimeUrl:'./runtime/'+runtimeName,specUrl:'./runtime/'+specName}));
+    operation='runtime_index_publish';await writeRuntimeFile(await projectPath(root,'index.html'),runtimeHtml(spec.target.width,spec.target.height,{runtimeUrl:'./runtime/'+runtimeName,specUrl:'./runtime/'+specName}));
     return spec;
     }catch(error){throw withTaskFailure(error,operation);}
   }
