@@ -6,7 +6,7 @@
   "timezone": "Asia/Singapore",
   "branch": "codex/workspace-improvements-20261027",
   "validationSource": {
-    "baseCommit": "dd711feb955e5e5c363af95e5e7f96e392b1c3a0",
+    "baseCommit": "07b291884cb74f92cb446644c69bb2d402d0d6da",
     "workingTreeDirty": true
   },
   "local": {
@@ -16,22 +16,27 @@
     "build": "PASS",
     "package": "PASS",
     "tests": {
-      "total": 475,
-      "passed": 475,
+      "total": 477,
+      "passed": 477,
       "failed": 0,
       "skipped": 0
     },
     "platformAcceptance": {
-      "status": "NOT_RETESTED_KEYCHAIN_BLOCKED",
-      "location": "package GUI startup before renderer/window creation",
-      "evidence": "自有Electron主线程在macOS SecItemCopyMatching/SecurityServer.decrypt阻塞；未读取凭据值",
-      "artifactIntegrity": {
-        "filesWithEqualHashes": 626,
-        "equalSymlinkTargets": 14
-      },
-      "notClaimedPass": true,
-      "lastAttemptCommit": "2f39b31db56c1feddcdec960254883c3282d8871",
-      "latestCandidateGui": "NOT_CHECKED"
+      "status": "FAIL",
+      "checkedAt": "2026-10-28T10:44:35.696Z",
+      "preflight": "5/5 PASS",
+      "relocatedPackageGui": "20/20 PASS",
+      "native": "4 passed then WAIT_TIMEOUT",
+      "failedLocation": "after capture: 02-model-settings.png",
+      "exactUiCause": "UNCONFIRMED",
+      "sourceModels": "11/11 PASS",
+      "sourceFilm": "7/7 PASS",
+      "sourceEditor": "8/8 PASS",
+      "credentialBackend": "macos_keychain",
+      "encryptionAvailable": true,
+      "rendererOsSandbox": true,
+      "temporaryDataCleanup": "PASS",
+      "followUp": "同包原生专项采证中，不自动重试或记PASS"
     },
     "providerEvidence": "仅本机网关、内存响应与合成凭据；未调用真实计费 API",
     "workflowDurabilityCases": 74,
@@ -78,13 +83,22 @@
       "keyFrames": 9,
       "strictPngHash": true,
       "windowsOutcome": "PENDING_CI",
-      "compositorBarrier": "--run-all-compositor-stages-before-draw"
+      "compositorBarrier": "--run-all-compositor-stages-before-draw",
+      "composition": "software capture only",
+      "editorCompositionChanged": false
     },
-    "applicationOwnerCases": 16
+    "applicationOwnerCases": 16,
+    "webglCapability": {
+      "platform": "darwin arm64",
+      "casesPassed": 2,
+      "baselineAndCandidateAvailable": true,
+      "clearAndReadPixelsEqual": true,
+      "hardwareAcceleration": "NOT_CHECKED"
+    }
   },
   "remoteAcceptance": {
     "candidatePending": true,
-    "note": "灰阶将Windows最大通道差由13降至1，仍严格失败；新增完整合成阶段屏障候选475项回归和重建包通过，等待对应提交三平台CI"
+    "note": "合成阶段屏障后Windows仍有最大1级通道差，保持严格失败；无界面软件合成候选477项回归、重建包和WebGL能力专项通过，等待对应三平台CI"
   },
   "separateExperimentalBranch": "codex/tauri-p0-hardening-20261028",
   "notVerified": [

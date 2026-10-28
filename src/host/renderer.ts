@@ -92,6 +92,8 @@ async function closeServer(server:Server):Promise<void> {
  * UDP at all) and remove the WebRTC constructors from every frame before scene code runs.
  */
 export const WEBRTC_LOCKDOWN_ARGS=['--force-webrtc-ip-handling-policy=disable_non_proxied_udp','--webrtc-ip-handling-policy=disable_non_proxied_udp'];
+/** One immutable capture profile, shared by the renderer and capability checks. */
+export const RENDER_BROWSER_ARGS=Object.freeze([...WEBRTC_LOCKDOWN_ARGS,'--disable-background-timer-throttling','--disable-renderer-backgrounding','--disable-accelerated-2d-canvas','--disable-accelerated-video-decode','--disable-lcd-text','--run-all-compositor-stages-before-draw','--disable-gpu-compositing']);
 import { WEBRTC_LOCKDOWN_SCRIPT } from '../shared/webrtc-lockdown.ts';
 export { WEBRTC_LOCKDOWN_SCRIPT };
 export class VideoRenderer {
@@ -144,11 +146,10 @@ export class VideoRenderer {
     await fs.access(env.browserPath,constants.X_OK);
     // 逐帧契约要求同一帧可复现：GPU 光栅的 2D canvas 在不同页面状态下会出现 ±1 的采样差异，
     // 会让逆序 seek / 冷启动的字节比对偶发失败。固定用 Skia 软件光栅画 2D canvas，
-    // Windows 首帧差异限于 DOM 文字区域，候选机制是合成层历史影响 LCD/灰阶
-    // 抗锯齿选择；固定为灰阶文字栅格，并继续用严格 hash 检查该策略。
-    // 剩余首帧透明度的 ±1 差异采用完整合成阶段完成后再绘制的候选策略。
-    // 保留 GPU 合成与 WebGL，最终效果仍须 Windows 实跑确认。
-    const browser=await chromium.launch({executablePath:env.browserPath,headless:true,chromiumSandbox:true,args:[...WEBRTC_LOCKDOWN_ARGS,'--disable-background-timer-throttling','--disable-renderer-backgrounding','--disable-accelerated-2d-canvas','--disable-accelerated-video-decode','--disable-lcd-text','--run-all-compositor-stages-before-draw']});this.browsers.add(browser);
+    // Windows 首帧文字仍观察到 1 级通道差：候选固定灰阶与软件合成，
+    // 保留 WebGL/3D API；只用于无界面取帧，不改变编辑器的合成配置。
+    // 实际首次采样、逆序和冷启动仍按原 PNG 哈希严格验收。
+    const browser=await chromium.launch({executablePath:env.browserPath,headless:true,chromiumSandbox:true,args:[...RENDER_BROWSER_ARGS]});this.browsers.add(browser);
     const cancel=()=>{void browser.close().catch(()=>{});};signal?.addEventListener('abort',cancel,{once:true});
     try {
       const context=await browser.newContext({viewport:{width:spec.target.width,height:spec.target.height},deviceScaleFactor:1,serviceWorkers:'block'});
