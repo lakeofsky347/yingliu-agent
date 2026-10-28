@@ -113,7 +113,7 @@ test('app integration: capabilities follow the registry; async music template ge
     assert.equal(current.status, 'complete', current.message + JSON.stringify(current.steps.filter(s => s.error)));
     const after = await call<StudioSnapshot>('current', { projectId: created.project!.id });
     assert.equal(after.project!.assets.filter(a => a.kind === 'audio').length, 2);
-    assert.ok(media.requests.some(r => r.path === '/v1/models/meta%2Fmusicgen/predictions'));
+    assert.ok(media.requests.some(r => r.path === '/v1/models/meta/musicgen/predictions'));
   } finally { await app.dispose(); await media.close(); await rm(directory, { recursive: true, force: true }); }
 });
 

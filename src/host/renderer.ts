@@ -13,10 +13,14 @@ import { ProjectStore, projectPath } from './store.js';
 import { browserRuntime, runtimeHtml } from '../runtime/browser.js';
 import {AudioMixer, type AudioMix} from './audio.js';
 import {inspectToolEnvironment, type ToolEnvironmentOptions} from './tool-environment.js';
+import {compareFramePng} from './frame-comparison.js';
+import {writeDurableFile} from '../agent/durable-file.js';
+import {taskFailure,withTaskFailure,type TaskFailureDiagnostic} from '../shared/task-diagnostic.ts';
 
 export interface FrameCapture { frame:number; shotId:string; path:string; sha256:string }
-export interface RenderIssue { shotId?:string; frame?:number; message:string }
+export interface RenderIssue { shotId?:string; frame?:number; message:string;failure?:TaskFailureDiagnostic;comparison?:ReturnType<typeof compareFramePng>&{phase:'backward'|'cold';frame:number;expectedHash:string;actualHash:string;fontsStatus:'loaded'|'loading'|'unavailable';fontFaces:number;deviceScaleFactor:number} }
 export interface RenderCheckResult { ok:boolean; errors:RenderIssue[]; frames:FrameCapture[]; reportPath?:string }
+export function renderCheckError(result:RenderCheckResult):Error{const error=new Error(result.errors.map(issue=>issue.message).join('\n'));return Object.assign(error,{failure:result.errors.find(issue=>issue.failure)?.failure??taskFailure(error,'render_check')});}
 interface ProjectServer { server:Server; origin:string; root:string }
 const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.txt':'text/plain; charset=utf-8','.woff2':'font/woff2','.mp4':'video/mp4','.wav':'audio/wav','.mp3':'audio/mpeg','.m4a':'audio/mp4','.aac':'audio/aac','.flac':'audio/flac','.ogg':'audio/ogg'};
 
@@ -25,6 +29,35 @@ export function detectEnvironment(settings:Partial<EnvironmentSettings>={},optio
 }
 function hash(buffer:Buffer|string):string { return createHash('sha256').update(buffer).digest('hex'); }
 function json(value:unknown):string { return JSON.stringify(value,null,2)+'\n'; }
+/** Runtime-only: retry the observed Windows EPERM/rename without weakening publication.
+ * Await each complete durable write; never race an abandoned write against a timeout. */
+export async function writeRuntimeFile(file:string,content:string,platform:NodeJS.Platform=process.platform):Promise<void>{
+  const deadline=performance.now()+750;let firstError:unknown;
+  for(let attempt=1;;attempt++){
+    try{await writeDurableFile(file,content);return;}
+    catch(error){
+      const io=error&&typeof error==='object'?error as NodeJS.ErrnoException:undefined;
+      if(platform!=='win32'||io?.code!=='EPERM'||io.syscall!=='rename')throw error;
+      firstError??=error;
+      if(attempt>=8||performance.now()+100>=deadline)throw firstError;
+      await new Promise(resolve=>setTimeout(resolve,100));
+      if(performance.now()>=deadline)throw firstError;
+    }
+  }
+}
+/** Content-addressed files are already published when their complete bytes match. */
+async function writeImmutableRuntime(file:string,content:string):Promise<void>{
+  const expected=Buffer.from(content,'utf8');let handle:Awaited<ReturnType<typeof fs.open>>|undefined,matches=false;
+  try{handle=await fs.open(file,'r');}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+  if(handle)try{
+    if((await handle.stat()).size===expected.length){
+      const bytes=Buffer.alloc(expected.length+1);let length=0;
+      while(length<bytes.length){const read=await handle.read(bytes,length,bytes.length-length,null);if(!read.bytesRead)break;length+=read.bytesRead;}
+      matches=length===expected.length&&bytes.subarray(0,length).equals(expected);
+    }
+  }finally{await handle.close();}
+  if(!matches)await writeRuntimeFile(file,content);
+}
 function aborted(signal?:AbortSignal):void { if(signal?.aborted)throw new Error('Task cancelled'); }
 function keyFrames(spec:VideoSpec):number[] { return [...new Set(spec.shots.flatMap(shot=>[shot.startFrame,Math.floor((shot.startFrame+shot.endFrame-1)/2),shot.endFrame-1]))].sort((a,b)=>a-b); }
 function safeId(id:string):string { if(!/^[a-zA-Z0-9_-]{1,100}$/.test(id))throw new Error('Unsafe scene ID');return id; }
@@ -44,6 +77,7 @@ function stopChild(child:ChildProcess):void {
 async function projectServer(root:string):Promise<ProjectServer> {
   const absoluteRoot=path.resolve(root);
   const server=createServer(async(req,res)=>{
+    let file:Awaited<ReturnType<typeof fs.open>>|undefined;
     try {
       if(!['GET','HEAD'].includes(req.method??'')){res.writeHead(405);res.end();return;}
       // A loopback listener is insufficient if a foreign website can send a forged Host header.
@@ -52,12 +86,14 @@ async function projectServer(root:string):Promise<ProjectServer> {
       const pathname=decodeURIComponent(new URL(req.url??'/','http://'+host).pathname);
       const relative=pathname.replace(/^\//,'')||'index.html';
       // Scene code may read render resources, never editor state, journals or source history.
-      const allowed=relative==='index.html'||/^runtime\/(?:frame\.mjs|spec\.json|scenes\/[\w-]+\.mjs|audio\/mix-[\w-]+\.wav)$/.test(relative)||
+      const allowed=relative==='index.html'||/^runtime\/(?:frame(?:-[a-f0-9]{64})?\.mjs|spec(?:-[a-f0-9]{64})?\.json|scenes\/[\w-]+\.mjs|audio\/mix-[\w-]+\.wav)$/.test(relative)||
         /^assets\/[\w./-]+$/.test(relative)||/^\.studio\/inspection\/[\w-]+\.png$/.test(relative)||/^exports\/[\w-]+\/video\.mp4$/.test(relative);
       if(!allowed){res.writeHead(403);res.end('Resource is private');return;}
       const full=await projectPath(absoluteRoot,relative),type=mime[path.extname(full).toLowerCase()];
       if(!type){res.writeHead(415);res.end('Unsupported file type');return;}
-      const stat=await fs.stat(full);if(!stat.isFile())throw new Error('File expected');
+      // Match headers and bytes to one inode even if prepare atomically replaces
+      // the public path while this request is in flight.
+      file=await fs.open(full,'r');const stat=await file.stat();if(!stat.isFile())throw new Error('File expected');
       const headers:Record<string,string|number>={'Content-Type':type,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff',
         'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; worker-src 'none'"};
       const media=type==='video/mp4'||type.startsWith('audio/');if(media)headers['Accept-Ranges']='bytes';
@@ -72,9 +108,9 @@ async function projectServer(root:string):Promise<ProjectServer> {
       }
       headers['Content-Length']=Math.max(0,end-start+1);res.writeHead(status,headers);
       if(req.method==='HEAD'){res.end();return;}
-      const file=await fs.open(full,'r');
-      const stream=file.createReadStream({start,end,autoClose:true});stream.on('error',()=>res.destroy());res.on('close',()=>stream.destroy());stream.pipe(res);
+      const stream=file.createReadStream({start,end,autoClose:true});file=undefined;stream.on('error',()=>res.destroy());res.on('close',()=>stream.destroy());stream.pipe(res);
     }catch { if(!res.headersSent)res.writeHead(404);res.end('Not found'); }
+    finally{if(file)try{await file.close();}catch{res.destroy();}}
   });
   await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',()=>{server.off('error',reject);resolve();});});
   const address=server.address();if(!address||typeof address==='string')throw new Error('Unable to bind preview server');
@@ -91,6 +127,8 @@ async function closeServer(server:Server):Promise<void> {
  * UDP at all) and remove the WebRTC constructors from every frame before scene code runs.
  */
 export const WEBRTC_LOCKDOWN_ARGS=['--force-webrtc-ip-handling-policy=disable_non_proxied_udp','--webrtc-ip-handling-policy=disable_non_proxied_udp'];
+/** One immutable capture profile, shared by the renderer and capability checks. */
+export const RENDER_BROWSER_ARGS=Object.freeze([...WEBRTC_LOCKDOWN_ARGS,'--disable-background-timer-throttling','--disable-renderer-backgrounding','--disable-accelerated-2d-canvas','--disable-accelerated-video-decode','--disable-lcd-text','--run-all-compositor-stages-before-draw','--disable-gpu-compositing']);
 import { WEBRTC_LOCKDOWN_SCRIPT } from '../shared/webrtc-lockdown.ts';
 export { WEBRTC_LOCKDOWN_SCRIPT };
 export class VideoRenderer {
@@ -124,27 +162,41 @@ export class VideoRenderer {
   }
   private async prepare(root:string,project:VideoProject):Promise<VideoSpec> {
     const spec=compileSpec(project);const sources:{id:string;html:string;css:string;moduleUrl:string}[]=[];
+    let operation:TaskFailureDiagnostic['operation']='runtime_directory_create';
+    try{
     await fs.mkdir(await projectPath(root,'runtime/scenes'),{recursive:true});
     for(const shot of spec.shots){
       try{
-        const source=await this.store.readSource(root,shot,project.revision);safeId(shot.id);
+        operation='runtime_scene_source_read';const source=await this.store.readSource(root,shot,project.revision);safeId(shot.id);
         // ESM modules are files served under a restrictive self-only CSP; no privileged APIs are exposed.
-        await fs.writeFile(await projectPath(root,'runtime/scenes/'+shot.id+'.mjs'),source.js);
-        sources.push({id:shot.id,html:source.html,css:source.css,moduleUrl:'./scenes/'+shot.id+'.mjs'});
+        const moduleName=shot.id+'-'+hash(source.js)+'.mjs';
+        operation='runtime_scene_publish';await writeImmutableRuntime(await projectPath(root,'runtime/scenes/'+moduleName),source.js);
+        // Keep the legacy address complete for older cached runtime documents.
+        operation='runtime_scene_alias_publish';await writeRuntimeFile(await projectPath(root,'runtime/scenes/'+shot.id+'.mjs'),source.js);
+        sources.push({id:shot.id,html:source.html,css:source.css,moduleUrl:'./scenes/'+moduleName});
       }catch(error){const e=error as Error&RenderIssue;e.shotId=shot.id;throw e;}
     }
-    await fs.writeFile(await projectPath(root,'runtime/frame.mjs'),browserRuntime);
-    await fs.writeFile(await projectPath(root,'runtime/spec.json'),json({spec,sources}));
-    await fs.writeFile(await projectPath(root,'index.html'),runtimeHtml(spec.target.width,spec.target.height));
+    const manifest=json({spec,sources}),runtimeName='frame-'+hash(browserRuntime)+'.mjs',specName='spec-'+hash(manifest)+'.json';
+    operation='runtime_frame_publish';await writeImmutableRuntime(await projectPath(root,'runtime/'+runtimeName),browserRuntime);
+    operation='runtime_spec_publish';await writeImmutableRuntime(await projectPath(root,'runtime/'+specName),manifest);
+    operation='runtime_frame_alias_publish';await writeRuntimeFile(await projectPath(root,'runtime/frame.mjs'),browserRuntime);
+    operation='runtime_spec_alias_publish';await writeRuntimeFile(await projectPath(root,'runtime/spec.json'),manifest);
+    // index.html is the publication point. Its immutable manifest and modules
+    // already exist in full; an old document keeps its old complete graph while
+    // another preview/check prepares a new revision in the same project.
+    operation='runtime_index_publish';await writeRuntimeFile(await projectPath(root,'index.html'),runtimeHtml(spec.target.width,spec.target.height,{runtimeUrl:'./runtime/'+runtimeName,specUrl:'./runtime/'+specName}));
     return spec;
+    }catch(error){throw withTaskFailure(error,operation);}
   }
   private async openPage(url:string,spec:VideoSpec,settings:EnvironmentSettings,issues:RenderIssue[],signal?:AbortSignal):Promise<{browser:Browser;page:Page;removeAbort:()=>void}> {
     aborted(signal);const env=detectEnvironment(settings);if(!env.browserAvailable)throw new Error('Chrome/Chromium unavailable. Set browserPath in environment settings.');
     await fs.access(env.browserPath,constants.X_OK);
     // 逐帧契约要求同一帧可复现：GPU 光栅的 2D canvas 在不同页面状态下会出现 ±1 的采样差异，
     // 会让逆序 seek / 冷启动的字节比对偶发失败。固定用 Skia 软件光栅画 2D canvas，
-    // 合成与 WebGL 仍走原路径，渲染结果与截图因此稳定可复现。
-    const browser=await chromium.launch({executablePath:env.browserPath,headless:true,args:[...WEBRTC_LOCKDOWN_ARGS,'--disable-background-timer-throttling','--disable-renderer-backgrounding','--disable-accelerated-2d-canvas','--disable-accelerated-video-decode']});this.browsers.add(browser);
+    // Windows 首帧文字仍观察到 1 级通道差：候选固定灰阶与软件合成，
+    // 保留 WebGL/3D API；只用于无界面取帧，不改变编辑器的合成配置。
+    // 实际首次采样、逆序和冷启动仍按原 PNG 哈希严格验收。
+    const browser=await chromium.launch({executablePath:env.browserPath,headless:true,chromiumSandbox:true,args:[...RENDER_BROWSER_ARGS]}).catch(error=>{throw withTaskFailure(error,'render_browser_launch');});this.browsers.add(browser);
     const cancel=()=>{void browser.close().catch(()=>{});};signal?.addEventListener('abort',cancel,{once:true});
     try {
       const context=await browser.newContext({viewport:{width:spec.target.width,height:spec.target.height},deviceScaleFactor:1,serviceWorkers:'block'});
@@ -160,12 +212,12 @@ export class VideoRenderer {
       page.on('pageerror',error=>issues.push({message:error.message}));
       page.on('console',message=>{if(message.type()==='error')issues.push({message:message.text()});});
       page.on('response',response=>{if(response.status()>=400)issues.push({message:'HTTP '+response.status()+': '+new URL(response.url()).pathname});});
-      await page.goto(url,{waitUntil:'load',timeout:30_000});
-      await page.waitForFunction(()=>!!(window as any).__VIDEO_WORKPACK__);
+      await page.goto(url,{waitUntil:'load',timeout:30_000}).catch(error=>{throw withTaskFailure(error,'render_page_load');});
+      await page.waitForFunction(()=>!!(window as any).__VIDEO_WORKPACK__).catch(error=>{throw withTaskFailure(error,'render_scene_ready');});
       const ready=await deadline(page.evaluate(async()=>{
         try{await (window as any).__VIDEO_WORKPACK__.ready();return {ok:true};}
         catch(error){const e=error as any;return {ok:false,message:e.message,shotId:e.shotId};}
-      }),'Scene ready');
+      }),'Scene ready').catch(error=>{throw withTaskFailure(error,'render_scene_ready');});
       if(!ready.ok){issues.push({shotId:ready.shotId,message:ready.message??'Renderer ready failed'});throw new Error(ready.message);}
       return {browser,page,removeAbort:()=>signal?.removeEventListener('abort',cancel)};
     }catch(error){signal?.removeEventListener('abort',cancel);await browser.close().catch(()=>{});this.browsers.delete(browser);throw error;}
@@ -214,33 +266,41 @@ export class VideoRenderer {
   }
   async check(root:string,project:VideoProject,settings:EnvironmentSettings,signal?:AbortSignal):Promise<RenderCheckResult> {
     const errors:RenderIssue[]=[],frames:FrameCapture[]=[];let connection:Awaited<ReturnType<VideoRenderer['openPage']>>|undefined;
+    let operation:TaskFailureDiagnostic['operation']='render_check';
     const reportRoot=await projectPath(root,'validation/check-'+randomUUID());await fs.mkdir(reportRoot,{recursive:true});
     try {
       const spec=await this.prepare(root,project),url=(await this.server(root)).origin+'/index.html';
       connection=await this.openPage(url,spec,settings,errors,signal);
       for(const frame of keyFrames(spec)){
-        aborted(signal);const result=await this.frame(connection.page,spec,frame);
+        operation='render_frame';aborted(signal);const result=await this.frame(connection.page,spec,frame);
         const file=path.join(reportRoot,String(frame).padStart(6,'0')+'.png');await fs.writeFile(file,result.buffer);
         frames.push({frame,shotId:result.shotId,path:file,sha256:hash(result.buffer)});
       }
-      await this.verifySeek(connection.page,spec,frames,errors,signal);
-      if(errors.length===0)for(const shot of project.shots)await this.store.markSourceGood(root,shot);
-    }catch(error){const e=error as Error&RenderIssue;errors.push({shotId:e.shotId,frame:e.frame,message:signal?.aborted?'Task cancelled':e.message});}
+      operation='render_seek';await this.verifySeek(connection.page,spec,frames,errors,signal);
+      operation='source_mark_good';if(errors.length===0)for(const shot of project.shots)await this.store.markSourceGood(root,shot);
+    }catch(error){const e=error as Error&RenderIssue;errors.push({shotId:e.shotId,frame:e.frame,message:signal?.aborted?'Task cancelled':e.message,failure:taskFailure(error,operation)});}
     finally{if(connection){connection.removeAbort();await connection.browser.close().catch(()=>{});this.browsers.delete(connection.browser);}}
-    const reportPath=path.join(reportRoot,'check.json');const result={ok:errors.length===0,errors:deduplicate(errors),frames,reportPath};
-    await fs.writeFile(reportPath,json(result));return result;
+    for(const issue of errors)issue.failure??=taskFailure(new Error(issue.message),'render_check');
+    const reportPath=path.join(reportRoot,'check.json');const result={ok:errors.length===0,errors:deduplicate(errors),frames,reportPath,projectRevision:project.revision};
+    try{await fs.writeFile(reportPath,json(result));}catch(error){throw withTaskFailure(error,'render_report_write');}return result;
   }
   private async verifySeek(page:Page,spec:VideoSpec,frames:FrameCapture[],errors:RenderIssue[],signal?:AbortSignal):Promise<void> {
-    const expected=new Map(frames.map(frame=>[frame.frame,frame.sha256]));
+    const expected=new Map(frames.map(frame=>[frame.frame,frame]));
     for(const frame of [...expected.keys()].reverse()){
       aborted(signal);const result=await this.frame(page,spec,frame);
-      if(hash(result.buffer)!==expected.get(frame))errors.push({shotId:result.shotId,frame,message:'Frame is not repeatable after seeking backwards'});
+      if(hash(result.buffer)!==expected.get(frame)!.sha256)errors.push(await this.repeatabilityIssue(page,expected.get(frame)!,result,'backward'));
     }
     await page.reload({waitUntil:'load'});await page.waitForFunction(()=>!!(window as any).__VIDEO_WORKPACK__);await deadline(page.evaluate(()=>(window as any).__VIDEO_WORKPACK__.ready()),'Cold scene ready');
     for(const frame of expected.keys()){
       aborted(signal);const result=await this.frame(page,spec,frame);
-      if(hash(result.buffer)!==expected.get(frame))errors.push({shotId:result.shotId,frame,message:'Frame is not repeatable after a cold page reload'});
+      if(hash(result.buffer)!==expected.get(frame)!.sha256)errors.push(await this.repeatabilityIssue(page,expected.get(frame)!,result,'cold'));
     }
+  }
+  private async repeatabilityIssue(page:Page,expected:FrameCapture,actual:{buffer:Buffer;shotId:string},phase:'backward'|'cold'):Promise<RenderIssue>{
+    // Diagnostics never decide acceptance: the original encoded-byte hash above
+    // remains exact. Keep only aggregate pixels/font state in the local report.
+    const readiness=await page.evaluate(()=>({fontsStatus:document.fonts.status,fontFaces:document.fonts.size,deviceScaleFactor:devicePixelRatio})).catch(()=>({fontsStatus:'unavailable' as const,fontFaces:0,deviceScaleFactor:0}));
+    return {shotId:actual.shotId,frame:expected.frame,message:phase==='backward'?'Frame is not repeatable after seeking backwards':'Frame is not repeatable after a cold page reload',comparison:{...compareFramePng(await fs.readFile(expected.path),actual.buffer),phase,frame:expected.frame,expectedHash:expected.sha256,actualHash:hash(actual.buffer),...readiness}};
   }
   async export(root:string,project:VideoProject,settings:EnvironmentSettings,signal:AbortSignal,onProgress:(progress:number,message:string)=>void):Promise<ExportResult> {
     aborted(signal);const env=detectEnvironment(settings);

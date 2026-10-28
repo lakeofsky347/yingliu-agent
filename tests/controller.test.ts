@@ -92,3 +92,77 @@ test('an unsaved source draft blocks project navigation but can still be saved',
   await controller.action('open',{path:'/other'});assert.equal(requests.includes('open'),false);assert.match(controller.getSnapshot().error,/源码尚未保存/);const selected=controller.getSnapshot().selected;controller.select('another-shot');assert.equal(controller.getSnapshot().selected,selected);
   await controller.saveSource(snapshot.project!.shots[0]!.id,{html:'<p>已保存</p>',css:'',js:''});assert.equal(requests.includes('saveSource'),true);controller.setSourceDraftDirty(false);assert.equal(controller.hasUnsavedChanges,false);await controller.dispose();
 });
+
+test('character and budget drafts block navigation and agent execution until saved or discarded',async()=>{
+  const snapshot=initialSnapshot(),requests:string[]=[];
+  const controller=new StudioController(apiFor(async(endpoint)=>{requests.push(endpoint);return structuredClone(snapshot);}));
+  await controller.load();
+  controller.setPanelDraftDirty('characters:'+snapshot.project!.id,'角色库',true);
+  controller.setPanelDraftDirty('budget:'+snapshot.project!.id,'项目预算',true);
+  assert.equal(controller.hasUnsavedChanges,true);assert.equal(controller.hasPanelDraft,true);assert.match(controller.getSnapshot().panelDraft,/角色库、项目预算/);
+  await controller.action('open',{path:'/other'});assert.equal(requests.includes('open'),false);assert.match(controller.getSnapshot().error,/保存或放弃/);
+  for(const endpoint of ['agent.start','agent.approve','agent.resume','agent.reject'])await assert.rejects(controller.mediaCommand(endpoint,{runId:'test'}),/角色库、项目预算尚未保存/);
+  assert.equal(requests.some(endpoint=>endpoint.startsWith('agent.')),false);
+  controller.setPanelDraftDirty('characters:'+snapshot.project!.id,'角色库',false);
+  assert.equal(controller.hasUnsavedChanges,true);assert.match(controller.unsavedMessage,/项目预算尚未保存/);
+  controller.setPanelDraftDirty('budget:'+snapshot.project!.id,'项目预算',false);
+  assert.equal(controller.hasUnsavedChanges,false);assert.equal(controller.getSnapshot().error,'');
+  await controller.mediaCommand('agent.start');assert.ok(requests.includes('agent.start'));
+  await controller.dispose();
+});
+
+test('catalog refresh cannot move manual drafts to a different project, including forced reload',async()=>{
+  let snapshot=initialSnapshot();const firstId=snapshot.project!.id;
+  const controller=new StudioController(apiFor(()=>structuredClone(snapshot)));await controller.load();
+  controller.setPanelDraftDirty('characters:'+firstId,'角色库',true);
+  snapshot={...snapshot,project:{...snapshot.project!,id:'other-project',title:'其他工程'}};
+  await controller.load();assert.equal(controller.getSnapshot().snapshot?.project?.id,firstId);assert.match(controller.getSnapshot().error,/角色库尚未保存/);
+  await controller.load(true);assert.equal(controller.getSnapshot().snapshot?.project?.id,firstId);assert.equal(controller.hasUnsavedChanges,true);
+  controller.setPanelDraftDirty('characters:'+firstId,'角色库',false);await controller.load();assert.equal(controller.getSnapshot().snapshot?.project?.id,'other-project');
+  await controller.dispose();
+});
+
+test('a late catalog response cannot replace a newer explicit project focus',async()=>{
+  const initial=initialSnapshot(),delayed=deferred<StudioSnapshot>();let catalogs=0;
+  const focused={...initial,project:{...initial.project!,id:'new-project'}};
+  const controller=new StudioController(apiFor(endpoint=>endpoint==='catalog'?(++catalogs===1?initial:delayed.promise):focused));
+  await controller.load();const loading=controller.load();await controller.focusProject('new-project');delayed.resolve(initial);await loading;
+  assert.equal(controller.getSnapshot().snapshot?.project?.id,'new-project');await controller.dispose();
+});
+
+test('agent execution waits for the graph save and uses the saved revision',async()=>{
+  let snapshot=initialSnapshot();const requests:Request[]=[];
+  const controller=new StudioController(apiFor((endpoint,payload)=>{requests.push({endpoint,payload});if(endpoint==='save')snapshot={...snapshot,project:{...payload.project as VideoProject,revision:snapshot.project!.revision+1}};return structuredClone(snapshot);}));
+  await controller.load();const revision=snapshot.project!.revision;controller.edit({...snapshot.project!,title:'新标题'});
+  await controller.mediaCommand('agent.start',{goal:'继续'});
+  const save=requests.findIndex(request=>request.endpoint==='save'),start=requests.findIndex(request=>request.endpoint==='agent.start');
+  assert.ok(save>=0&&start>save);assert.equal(requests[start]!.payload.expectedRevision,revision+1);assert.equal(controller.hasUnsavedChanges,false);await controller.dispose();
+});
+
+test('failed graph saves stop agent start, approval and resume without losing the draft',async()=>{
+  const snapshot=initialSnapshot(),requests:string[]=[];
+  const controller=new StudioController(apiFor(endpoint=>{requests.push(endpoint);if(endpoint==='save')throw new Error('磁盘写入失败');return structuredClone(snapshot);}));
+  await controller.load();controller.edit({...snapshot.project!,title:'保留的标题'});
+  for(const endpoint of ['agent.start','agent.approve','agent.resume','agent.reject'])await assert.rejects(controller.mediaCommand(endpoint),/磁盘写入失败/);
+  assert.equal(requests.some(endpoint=>endpoint.startsWith('agent.')),false);assert.equal(controller.getSnapshot().snapshot?.project?.title,'保留的标题');assert.equal(controller.hasUnsavedChanges,true);await controller.dispose();
+});
+
+test('audio and asset import mutations use the latest saved revision and allow an explicit revision',async()=>{
+  let snapshot=initialSnapshot();const requests:Request[]=[];
+  const controller=new StudioController(apiFor((endpoint,payload)=>{requests.push({endpoint,payload});if(endpoint==='audio'||endpoint==='import')snapshot={...snapshot,project:{...snapshot.project!,revision:snapshot.project!.revision+1}};return structuredClone(snapshot);}));
+  await controller.load();const revision=snapshot.project!.revision;
+  await controller.audio({action:'remove',clipId:'old'});await controller.action('import',{name:'note.txt',text:'notes'});await controller.action('import',{expectedRevision:99});
+  assert.equal(requests.find(request=>request.endpoint==='audio')?.payload.expectedRevision,revision);
+  assert.deepEqual(requests.filter(request=>request.endpoint==='import').map(request=>request.payload.expectedRevision),[revision+1,99]);await controller.dispose();
+});
+
+test('saving a panel draft holds the project navigation lock until the request settles',async()=>{
+  const snapshot=initialSnapshot(),save=deferred<unknown>(),requests:Request[]=[];
+  const controller=new StudioController(apiFor((endpoint,payload)=>{requests.push({endpoint,payload});if(endpoint==='story.save')return save.promise;return structuredClone(snapshot);}));
+  await controller.load();controller.setPanelDraftDirty('characters:'+snapshot.project!.id,'角色库',true);
+  const saving=controller.panelCommand('story.save',{story:{characters:[]},expectedVersion:2});
+  await new Promise(resolve=>setTimeout(resolve,0));assert.equal(controller.getSnapshot().pending,true);
+  await controller.action('open',{path:'/other'});assert.equal(requests.some(request=>request.endpoint==='open'),false);
+  save.resolve({version:3});await saving;assert.equal(controller.getSnapshot().pending,false);assert.equal(controller.hasPanelDraft,true,'only the panel can acknowledge or discard its saved draft');
+  controller.setPanelDraftDirty('characters:'+snapshot.project!.id,'角色库',false);await controller.dispose();
+});

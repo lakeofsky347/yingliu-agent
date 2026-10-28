@@ -149,7 +149,8 @@ test('local speech ignores an inaccessible unrelated API key while remote speech
     const speechFile=join(f.directory,'projects','tts.json');await writeFile(speechFile,JSON.stringify({endpoint:'local:say',model:'',voice:'',speed:1,enabled:true}));
     application=await createApplication({dataDirectory:f.directory,credentials:store});const project=await application.backend.call('create',{title:'本机语音与密钥隔离'}),id=project.project!.id,shotId=project.project!.shots[0]!.id;
     async function finishSpeech(){
-      let snapshot=await application!.backend.call('audio',{projectId:id,operation:'synthesize',shotId,text:'合成测试，不执行真实本机语音'});const started=Date.now();
+      const current=await application!.backend.call('current',{projectId:id});
+      let snapshot=await application!.backend.call('audio',{projectId:id,expectedRevision:current.project!.revision,operation:'synthesize',shotId,text:'合成测试，不执行真实本机语音'});const started=Date.now();
       while(snapshot.task?.status==='running'){assert.ok(Date.now()-started<5000,'synthetic speech task timed out');await new Promise(resolve=>setTimeout(resolve,10));snapshot=await application!.backend.call('current',{projectId:id});}
       return snapshot;
     }

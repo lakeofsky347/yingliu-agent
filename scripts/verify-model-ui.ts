@@ -10,9 +10,10 @@ import { chromium, type Browser, type Page } from 'playwright-core';
 import { createApplication, MemorySecrets } from '../src/app/application.ts';
 import { startUiServer } from '../src/app/ui-server.ts';
 import { defaultSceneSource } from '../src/core/index.ts';
+import { findBrowserExecutable } from '../src/host/tool-environment.ts';
 import type { StudioSnapshot } from '../src/shared/types.ts';
 
-const workspace=resolve('.'),temporary=await mkdtemp(join(tmpdir(),'yingliu-model-ui-')),output=join(workspace,'artifacts/acceptance-multimodal');await mkdir(output,{recursive:true});
+const workspace=resolve('.'),temporary=await mkdtemp(join(tmpdir(),'yingliu-model-ui-')),output=resolve(process.env.YINGLIU_ACCEPTANCE_OUTPUT||join(workspace,'artifacts/acceptance-multimodal'));await mkdir(output,{recursive:true});
 const png=join(temporary,'sample.png'),video=join(temporary,'sample.mp4'),ui=join(temporary,'ui');await mkdir(ui);
 for(const args of [ ['-v','error','-f','lavfi','-i','color=c=blue:s=64x64','-frames:v','1','-threads','1','-y',png], ['-v','error','-f','lavfi','-i','testsrc2=size=320x180:rate=24','-f','lavfi','-i','sine=frequency=330:sample_rate=48000','-t','2','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-threads','1','-y',video] ]){const result=spawnSync('ffmpeg',args,{encoding:'utf8'});assert.equal(result.status,0,result.stderr);}
 const pngBytes=await readFile(png),videoBytes=await readFile(video);let imageRequests=0,textRequests=0,videoRequests=0,origin='';
@@ -33,13 +34,14 @@ const gateway=createServer(async(req,res)=>{try{
   res.writeHead(404);res.end('{}');
 }catch(error){res.writeHead(500);res.end(JSON.stringify({error:String(error)}));}});
 await new Promise<void>(accept=>gateway.listen(0,'127.0.0.1',accept));origin='http://127.0.0.1:'+(gateway.address() as {port:number}).port;
-const checks:string[]=[],pageErrors:string[]=[];let browser:Browser|undefined,application:Awaited<ReturnType<typeof createApplication>>|undefined,server:Awaited<ReturnType<typeof startUiServer>>|undefined;
+const checks:string[]=[],pageErrors:string[]=[];let status:'PASS'|'FAIL'='FAIL';let browser:Browser|undefined,application:Awaited<ReturnType<typeof createApplication>>|undefined,server:Awaited<ReturnType<typeof startUiServer>>|undefined;
 const pass=(name:string)=>{checks.push(name);process.stdout.write('PASS '+name+'\n');};
 async function until(check:()=>Promise<boolean>,timeout=45000){const end=Date.now()+timeout;while(!await check()){if(Date.now()>end)throw new Error('等待界面状态超时');await new Promise(accept=>setTimeout(accept,150));}}
 try{
   await build({entryPoints:[join(workspace,'src/client/index.tsx')],bundle:true,format:'esm',platform:'browser',outfile:join(ui,'app.js'),loader:{'.css':'css'},target:['chrome120'],logLevel:'silent'});await writeFile(join(ui,'index.html'),await readFile(join(workspace,'public/index.html')));
   application=await createApplication({dataDirectory:join(temporary,'data'),credentials:new MemorySecrets()});server=await startUiServer(application,ui);
-  browser=await chromium.launch({executablePath:process.env.CHROME_PATH||'/usr/bin/chromium',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  const executablePath=process.env.CHROME_PATH||findBrowserExecutable();assert.ok(executablePath,'缺少 Chrome/Chromium，可设置 CHROME_PATH');
+  browser=await chromium.launch({chromiumSandbox:true,executablePath,headless:true,args:['--disable-dev-shm-usage']});
   const page=await browser.newPage({viewport:{width:1440,height:1000}});page.on('pageerror',error=>pageErrors.push(error.message));await page.goto(server.origin);await page.getByRole('heading',{name:'我的影片',exact:false}).waitFor();
   await page.getByRole('button',{name:'模型设置',exact:true}).click();
   async function connection(name:string,protocol:string,model:string,role:string){
@@ -47,6 +49,17 @@ try{
   }
   const textId=await connection('本地验收文本','chat-completions','local-text','导演与讨论');await page.getByRole('dialog').getByLabel('场景代码模型',{exact:true}).selectOption(textId);
   await connection('本地验收图片','images','local-image','图片生成');await connection('本地验收视频','video-gateway','local-video','视频生成');
+  const center=page.getByRole('dialog').getByRole('region',{name:'模型中心'}),textDefinition=(await application.providers.registry.list()).models.find(model=>model.id===textId)!;
+  await center.getByLabel('已保存的模型连接',{exact:true}).selectOption(textDefinition.connectionId);await center.getByLabel('编辑已保存模型',{exact:true}).selectOption(textId);
+  await center.getByText('文本费用情景试算',{exact:true}).click();const estimate=center.locator('details').filter({hasText:'文本费用情景试算'}),estimateStatus=estimate.getByRole('status');
+  assert.match(await estimateStatus.textContent()??'',/费用未知/);pass('文本费用情景未填单价时明确显示未知');
+  await estimate.getByLabel('每百万输入 token 单价',{exact:true}).fill('2');await estimate.getByLabel('每百万输出 token 单价',{exact:true}).fill('8');
+  await estimate.getByLabel('试算输入 token',{exact:true}).fill('10000');await estimate.getByLabel('试算输出 token',{exact:true}).fill('2000');await estimate.getByLabel('试算轮数',{exact:true}).fill('3');
+  assert.match(await estimateStatus.textContent()??'',/0\.108000 CNY/);await estimate.getByLabel('试算输入 token',{exact:true}).fill('0.5');assert.match(await estimateStatus.textContent()??'',/费用未知.*安全整数/);pass('文本情景计算 0.108000 CNY，非整数 token 保持未知');
+  await estimate.getByLabel('试算输入 token',{exact:true}).fill('10000');await estimate.getByLabel('单价币种',{exact:true}).selectOption('USD');assert.match(await estimateStatus.textContent()??'',/0\.108000 USD/);assert.match(await estimate.textContent()??'',/不自动换汇/);
+  const priceSource='合成账户价格页，2026-10-28';await estimate.getByLabel('价格来源与核对日期',{exact:true}).fill(priceSource);await center.getByRole('button',{name:'保存模型',exact:true}).click();
+  await until(async()=>{const saved=(await application!.providers.registry.list()).models.find(model=>model.id===textId);return saved?.parameters.priceSource===priceSource&&saved.parameters.priceCurrency==='USD';});
+  assert.equal(textRequests+imageRequests+videoRequests,0);pass('单价币种与来源通过真实表单保存，试算不生成请求也不自动换汇');
   assert.equal((await application.providers.registry.list()).connections.filter(value=>value.baseUrl===origin+'/v1').length,3);assert.equal(textRequests+imageRequests+videoRequests,0);assert.equal(await page.getByRole('dialog').evaluate(element=>element.scrollWidth>element.clientWidth+2),false);assert.equal(await page.getByRole('dialog').evaluate(element=>{const rect=element.getBoundingClientRect();return [...element.querySelectorAll('input,select,textarea,button')].filter(value=>value.getClientRects().length).some(value=>{const box=value.getBoundingClientRect();return box.left<rect.left-1||box.right>rect.right+1;});}),false);pass('模型中心通过真实表单保存三类连接、模型与角色，配置不触发生成');await page.screenshot({path:join(output,'model-center.png'),fullPage:true});await page.getByRole('button',{name:'关闭模型设置',exact:true}).click();
   await page.getByRole('button',{name:'新建影片',exact:true}).first().click();await page.getByLabel('影片名称',{exact:true}).fill('多模态界面验收');await page.getByLabel('主题与创作简报',{exact:true}).fill('本地测试网关与实际媒体的界面操作验收');await page.getByRole('button',{name:'创建空白影片',exact:true}).click();await page.locator('.vs-studio').waitFor();await page.getByTitle('添加镜头',{exact:true}).click();
   await until(async()=>{const value=await application!.backend.call<StudioSnapshot>('current');return !!value.project?.shots.length;});
@@ -57,6 +70,6 @@ try{
   await page.getByRole('tab',{name:'模型与素材生成',exact:true}).click();await page.getByLabel('媒体生成方式',{exact:true}).selectOption('text-to-video');await page.getByLabel('素材画面描述',{exact:true}).fill('生成一个本地验收视频');await page.getByRole('button',{name:'开始生成素材',exact:true}).click();await page.getByRole('button',{name:'采用结果',exact:true}).waitFor({timeout:45000});await page.getByRole('button',{name:'采用结果',exact:true}).click();await until(async()=>{const tasks=await application!.media.list(snapshot.project!.id);return tasks.some(task=>task.operation==='text-to-video'&&task.phase==='complete');});assert.equal(videoRequests,1);pass('异步视频网关生成与采用通过真实界面完成');await page.screenshot({path:join(output,'media-generation.png'),fullPage:true});
   await page.getByRole('tab',{name:'协作制作',exact:true}).click();await page.getByLabel('协作制作要求',{exact:true}).fill('保留当前镜头，完善可编辑的代码画面');await page.getByRole('button',{name:'开始协作制作',exact:true}).click();await until(async()=>{const result=await application!.route('workflows.list',{projectId:snapshot.project!.id});return result.ok&&(result.value as {workflows:{status:string}[]}).workflows.some(value=>value.status==='complete');},60000);await page.locator('[data-workflow-id]').getByText('已完成',{exact:true}).waitFor();assert.ok(textRequests>=2);pass('导演与场景模型协作完成，界面自动刷新工程');await page.screenshot({path:join(output,'workflow.png'),fullPage:true});
   await page.getByRole('tab',{name:'运行环境',exact:true}).click();await page.getByLabel('视频文件上限（MiB）',{exact:true}).fill('16');await page.getByRole('button',{name:'保存并检查环境',exact:true}).click();await until(async()=>{const value=await application!.backend.call<StudioSnapshot>('current');return value.environment.maxVideoBytes===16*1024*1024;});pass('运行环境视频文件限额通过界面保存并回读');
-  await page.setViewportSize({width:1180,height:800});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth+2),false);pass('紧凑窗口无页面横向溢出');assert.deepEqual(pageErrors,[]);pass('模型与媒体界面无浏览器未捕获异常');
+  await page.setViewportSize({width:1180,height:800});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth+2),false);pass('紧凑窗口无页面横向溢出');assert.deepEqual(pageErrors,[]);pass('模型与媒体界面无浏览器未捕获异常');status='PASS';
 }catch(error){await writeFile(join(output,'ui-error.txt'),String(error));throw error;}
-finally{await browser?.close();await server?.close();await application?.dispose();await new Promise<void>(accept=>gateway.close(()=>accept()));await writeFile(join(output,'ui-verification.json'),JSON.stringify({checkedAt:new Date().toISOString(),checks,pageErrors,requests:{text:textRequests,image:imageRequests,video:videoRequests},gateway:'isolated localhost fixture',realProvider:'NOT_CHECKED'},null,2)+'\n');await rm(temporary,{recursive:true,force:true});}
+finally{await browser?.close().catch(()=>{});await server?.close();await application?.dispose();await new Promise<void>(accept=>gateway.close(()=>accept()));await writeFile(join(output,'ui-verification.json'),JSON.stringify({checkedAt:new Date().toISOString(),status,platform:process.platform,architecture:process.arch,checks,pageErrors,requests:{text:textRequests,image:imageRequests,video:videoRequests},gateway:'isolated localhost fixture',realProvider:'NOT_CHECKED'},null,2)+'\n');await rm(temporary,{recursive:true,force:true});}

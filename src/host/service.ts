@@ -6,7 +6,8 @@ import {createProject,compileSpec,defaultSceneSource,updateShot,updateTarget,val
 import type {VideoProject,StudioSnapshot,TaskState,EnvironmentSettings,ProviderGroup,RpcResult,SceneSource,Shot,ModelRoute,TtsSettings,AudioClip,VideoClip,Asset} from '../shared/types.ts';
 import type {HostContext} from './platform.ts';
 import {ProjectStore,projectPath,validateStoredProject,validateSources} from './store.ts';
-import {VideoRenderer,detectEnvironment} from './renderer.ts';
+import {VideoRenderer,detectEnvironment,renderCheckError} from './renderer.ts';
+import {sanitizeTaskFailure,taskFailure} from '../shared/task-diagnostic.ts';
 import {AppSceneGenerator,parseSceneSource,normalizeStoryboard} from './generator.ts';
 import {SpeechSynthesizer,extractVideoAudio} from './audio.ts';
 import type {MediaProjectPort} from '../jobs/contracts.ts';
@@ -33,7 +34,7 @@ export class StudioService {
   constructor(private ctx:HostContext,config:{baseDirectory?:string;restoreRecent?:boolean}={}){
     this.baseDirectory=resolve(config.baseDirectory??process.env.YINGLIU_PROJECTS??join(homedir(),'Documents','YingliuAgentProjects'));
     this.restoreRecent=config.restoreRecent!==false;
-    this.store=new ProjectStore({baseDirectory:this.baseDirectory});
+    this.store=new ProjectStore({baseDirectory:this.baseDirectory,claimRoot:ctx.claimProjectRoot});
     const env=detectEnvironment();this.settings={browserPath:env.browserPath,ffmpegPath:env.ffmpegPath,ffprobePath:env.ffprobePath};this.tts=defaultTtsSettings(env);
     this.initialized=this.initialize();
   }
@@ -101,7 +102,7 @@ export class StudioService {
       this.previewUrl=null;this.previewRevision=null;this.audioUrl=null;
       if(this.task?.status==='running')throw error;
       const message=await this.redact(error instanceof Error?error.message:String(error)),now=new Date().toISOString();
-      this.task={id:randomUUID(),kind:'preview',status:'failed',progress:0,message:'工程已保存，预览准备失败：'+message,error:message,startedAt:now,finishedAt:now,revision:this.required().project.revision,appRecordVersion:1,request:this.recordedRequest('preview',{})};
+      this.task={id:randomUUID(),kind:'preview',status:'failed',progress:0,message:'工程已保存，预览准备失败：'+message,error:message,failure:taskFailure(error,'preview_refresh'),startedAt:now,finishedAt:now,revision:this.required().project.revision,appRecordVersion:1,request:this.recordedRequest('preview',{})};
       try{await this.writeTaskJournal(this.required().root,this.task);}catch{this.task.message+='；任务日志写入失败，请检查工程目录权限';}
     }
   }
@@ -203,7 +204,7 @@ export class StudioService {
     for(const name of names.filter(name=>/^[a-zA-Z0-9_-]+\.json$/.test(name))){
       try{const value=JSON.parse(await readFile(await projectPath(root,'.studio/tasks/'+name),'utf8')) as RecordedTask;
         if(value.id+'.json'!==name||typeof value.startedAt!=='string'||!['storyboard','scenes','modify','preview','export','audio'].includes(value.kind)||!['running','complete','failed','cancelled'].includes(value.status))continue;
-        const task:RecordedTask={id:value.id,kind:value.kind,status:value.status,startedAt:value.startedAt,progress:Number.isFinite(value.progress)?value.progress:0,message:await this.redact(String(value.message??'')),logPath:await projectPath(root,'.studio/tasks/'+name),finishedAt:typeof value.finishedAt==='string'?value.finishedAt:undefined,error:typeof value.error==='string'?await this.redact(value.error):undefined,shotId:typeof value.shotId==='string'?value.shotId:undefined,appRecordVersion:value.appRecordVersion===1?1:undefined,revision:Number.isSafeInteger(value.revision)?value.revision:undefined,retryOf:typeof value.retryOf==='string'?value.retryOf:undefined,outputId:typeof value.outputId==='string'?value.outputId:undefined};
+        const task:RecordedTask={id:value.id,kind:value.kind,status:value.status,startedAt:value.startedAt,progress:Number.isFinite(value.progress)?value.progress:0,message:await this.redact(String(value.message??'')),logPath:await projectPath(root,'.studio/tasks/'+name),finishedAt:typeof value.finishedAt==='string'?value.finishedAt:undefined,error:typeof value.error==='string'?await this.redact(value.error):undefined,failure:sanitizeTaskFailure(value.failure),shotId:typeof value.shotId==='string'?value.shotId:undefined,appRecordVersion:value.appRecordVersion===1?1:undefined,revision:Number.isSafeInteger(value.revision)?value.revision:undefined,retryOf:typeof value.retryOf==='string'?value.retryOf:undefined,outputId:typeof value.outputId==='string'?value.outputId:undefined};
         const request=value.appRecordVersion===1&&value.request?this.recordedRequest(value.request.endpoint,value.request.payload):undefined;
         if(request&&((request.endpoint==='preview'||request.endpoint==='export')?request.endpoint===value.kind:request.payload.kind===value.kind)){
           for(const key of Object.keys(request.payload))request.payload[key]=await this.redact(request.payload[key]!);task.request=request;
@@ -224,13 +225,13 @@ export class StudioService {
     this.assertIdle();const root=this.required().root;
     const task:RecordedTask={id:randomUUID(),kind,status:'running',progress:0,message:'准备中',startedAt:new Date().toISOString(),shotId,appRecordVersion:1,revision:this.required().project.revision,request,retryOf};
     const controller=new AbortController();this.controller=controller;this.task=task;
-    try{await this.writeTaskJournal(root,task);}catch(error){task.status='failed';task.error='任务记录保存失败：'+String(error);task.message=task.error;throw error;}
+    try{await this.writeTaskJournal(root,task);}catch(error){task.status='failed';task.failure=taskFailure(error,'task_journal_start');task.error='任务记录保存失败：'+String(error);task.message=task.error;throw error;}
     this.job=(async()=>{
       try{await work(controller.signal,task);controller.signal.throwIfAborted();task.status='complete';task.progress=1;task.message='已完成';}
-      catch(error){task.status=controller.signal.aborted?'cancelled':'failed';task.error=error instanceof Error?error.message:String(error);task.message=task.status==='cancelled'?'已取消':task.error;}
+      catch(error){task.status=controller.signal.aborted?'cancelled':'failed';task.failure=taskFailure(error,'task_work');task.error=error instanceof Error?error.message:String(error);task.message=task.status==='cancelled'?'已取消':task.error;}
       finally{
         task.error=task.error?await this.redact(task.error):undefined;task.message=await this.redact(task.message);task.finishedAt=new Date().toISOString();
-        try{await this.writeTaskJournal(root,task);}catch(error){task.status='failed';task.error='任务结束记录保存失败：'+String(error);task.message=task.error;}
+        try{await this.writeTaskJournal(root,task);}catch(error){task.status='failed';task.failure=taskFailure(error,'task_journal_finish');task.error='任务结束记录保存失败：'+String(error);task.message=task.error;}
       }
     })();
   }
@@ -254,11 +255,11 @@ export class StudioService {
     let checked=await this.renderer.check(root,this.required().project,this.settings,signal);
     if(!checked.ok){
       this.progress(this.task?.progress??0,'发现代码错误，正在修复');
-      const errors=checked.errors.filter(e=>!e.shotId||e.shotId===shotId);if(!errors.length)throw new Error(checked.errors.map(e=>e.message).join('\n'));
+      const errors=checked.errors.filter(e=>!e.shotId||e.shotId===shotId);if(!errors.length)throw renderCheckError(checked);
       const repaired=await generator.scene(this.required().project,this.required().project.shots.find(s=>s.id===shotId)!,route,signal,source,`修复运行错误，保留当前设计和可编辑参数：${JSON.stringify(errors)}`);
       signal.throwIfAborted();await this.enqueue(async()=>{signal.throwIfAborted();await this.persist(this.required().project,{[shotId]:{html:repaired.html,css:repaired.css,js:repaired.js}},'模型修复镜头',this.task?.id);});checked=await this.renderer.check(root,this.required().project,this.settings,signal);
     }
-    if(!checked.ok)throw new Error(checked.errors.map(e=>`镜头 ${e.shotId??shotId} 帧 ${e.frame??'?'}：${e.message}`).join('\n'));
+    if(!checked.ok)throw Object.assign(new Error(checked.errors.map(e=>`镜头 ${e.shotId??shotId} 帧 ${e.frame??'?'}：${e.message}`).join('\n')),{failure:taskFailure(renderCheckError(checked),'render_check')});
     await this.enqueue(()=>this.store.markSourceGood(root,shot));
   }
   async rpc(endpoint:string,payload:unknown):Promise<RpcResult>{
@@ -269,8 +270,8 @@ export class StudioService {
   private async performRpc(endpoint:string,payload:unknown):Promise<RpcResult>{
     try{
       await this.initialized;if(this.disposed)throw new Error('应用服务已停止');const data=(payload??{}) as any;
-      if(['save','apply','saveSource','restoreSource','undo','redo','rename','retry','job.retry','video.clip.save','video.clip.remove','video.clip.extract'].includes(endpoint))this.assertRevision(data,true);
-      else if(['import','audio','generate','export','preview'].includes(endpoint)&&data.expectedRevision!==undefined)this.assertRevision(data);
+      if(['save','apply','saveSource','restoreSource','undo','redo','rename','retry','job.retry','import','audio','video.clip.save','video.clip.remove','video.clip.extract'].includes(endpoint))this.assertRevision(data,true);
+      else if(['generate','export','preview'].includes(endpoint)&&data.expectedRevision!==undefined)this.assertRevision(data);
       switch(endpoint){
         case 'catalog':this.providers=await Promise.all(this.ctx.llm.listProviders().map(async p=>{try{return {...p,models:await this.ctx.llm.listModels(p.id)};}catch(error){return {...p,models:[],error:error instanceof Error?error.message:'模型目录读取失败'};}}));break;
         case 'current':break;
@@ -334,9 +335,9 @@ export class StudioService {
           return {ok:true,value:{projectId:project.id,revision:project.revision,spec,source,frame}};
         }
         case 'source':{const {root,project}=this.required();const shot=project.shots.find(s=>s.id===data.shotId);if(!shot)throw new Error('镜头已不存在');return {ok:true,value:await this.store.readSource(root,shot)};}
-        case 'saveSource':{this.assertIdle();const {root,project}=this.required();const shot=project.shots.find(s=>s.id===data.shotId);if(!shot)throw new Error('镜头已不存在');const source=parseSceneSource(JSON.stringify(data.source));await this.persist(project,{[shot.id]:source},'保存镜头源码');await this.start('preview',async signal=>{const checked=await this.renderer.check(root,this.required().project,this.settings,signal);if(!checked.ok)throw new Error(checked.errors.map(e=>e.message).join('\n'));await this.store.markSourceGood(root,shot);},shot.id,this.recordedRequest('preview',data));break;}
+        case 'saveSource':{this.assertIdle();const {root,project}=this.required();const shot=project.shots.find(s=>s.id===data.shotId);if(!shot)throw new Error('镜头已不存在');const source=parseSceneSource(JSON.stringify(data.source));await this.persist(project,{[shot.id]:source},'保存镜头源码');await this.start('preview',async signal=>{const checked=await this.renderer.check(root,this.required().project,this.settings,signal);if(!checked.ok)throw renderCheckError(checked);await this.store.markSourceGood(root,shot);},shot.id,this.recordedRequest('preview',data));break;}
         case 'restoreSource':{this.assertIdle();const {root,project}=this.required();const shot=project.shots.find(s=>s.id===data.shotId);if(!shot)throw new Error('镜头已不存在');const source=await this.store.restorationSource(root,shot);await this.persist(project,{[shot.id]:source},'恢复镜头源码');break;}
-        case 'preview':{const {root,project}=this.required();compileSpec(project);await this.start('preview',async signal=>{await this.refreshPreview();signal.throwIfAborted();this.progress(.1,'检查资源与关键帧');const checked=await this.renderer.check(root,this.required().project,this.settings,signal);if(!checked.ok)throw new Error(checked.errors.map(e=>e.message).join('\n'));for(const shot of this.required().project.shots)await this.store.markSourceGood(root,shot);},undefined,this.recordedRequest('preview',data),data._retryOf);break;}
+        case 'preview':{const {root,project}=this.required();compileSpec(project);await this.start('preview',async signal=>{await this.refreshPreview();signal.throwIfAborted();this.progress(.1,'检查资源与关键帧');const checked=await this.renderer.check(root,this.required().project,this.settings,signal);if(!checked.ok)throw renderCheckError(checked);for(const shot of this.required().project.shots)await this.store.markSourceGood(root,shot);},undefined,this.recordedRequest('preview',data),data._retryOf);break;}
         case 'generate':{
           const {root,project}=this.required(),route={provider:String(data.provider??''),model:String(data.model??'')},kind=data.kind as 'storyboard'|'scenes'|'modify';if(!['storyboard','scenes','modify'].includes(kind))throw new Error('生成类型无效');
           await this.start(kind,async signal=>{
@@ -369,5 +370,8 @@ export class StudioService {
       return {ok:true,value:await this.snapshot()};
     }catch(error){return {ok:false,error:{code:error instanceof Error&&'code' in error?String(error.code):'STUDIO_ERROR',message:error instanceof Error?error.message:String(error)}};}
   }
-  async dispose(){this.disposed=true;this.controller?.abort(new Error('应用已停止'));await this.commands;await this.job;await this.commands;await this.speech.close();await this.renderer.close();}
+  async dispose(){
+    this.disposed=true;this.controller?.abort(new Error('应用已停止'));await Promise.allSettled([this.initialized,this.commands,this.job]);await this.commands.catch(()=>{});
+    const results=await Promise.allSettled([this.speech.close(),this.renderer.close()]);const failed=results.find(result=>result.status==='rejected');if(failed?.status==='rejected')throw failed.reason;
+  }
 }

@@ -12,7 +12,7 @@ import { detectEnvironment } from '../host/renderer.ts';
 import type { SecretStore } from '../app/contracts.ts';
 import { MODEL_PROTOCOLS, MODEL_ROLES, ROLE_OUTPUT, ROLE_PROTOCOLS, type Modality, type ModelProtocol, type ModelRole } from '../models/contracts.ts';
 import { MOCK_BASE_URL, mockFetch, installMockNetworkGuard } from './mock.ts';
-import { acquireOwner, BusyError, LockConfigError } from './lock.ts';
+import { acquireOwnerLease, BusyError, LockConfigError, type OwnerLease } from './lock.ts';
 import { installCliLifecycle, CliInterruptedError, type CliLifecycle } from './lifecycle.ts';
 
 export const EXIT = { OK: 0, ERROR: 1, USAGE: 2, NOT_FOUND: 3, NEEDS_APPROVAL: 4, BUDGET: 5, ENVIRONMENT: 6, RUN_FAILED: 7, TIMEOUT: 8, BUSY: 9, CONFIG: 10, STARTUP: 11 } as const;
@@ -72,7 +72,7 @@ async function call<T = any>(ctx: Ctx, endpoint: string, payload: unknown = {}):
   ctx.lifecycle.throwIfInterrupted();
   const r = await ctx.app.route(endpoint, payload);
   ctx.lifecycle.throwIfInterrupted();
-  if (!r.ok) { const m = r.error.message; throw new CliError(/未找到|不存在|not found/i.test(m) ? 'NOT_FOUND' : 'ERROR', m); }
+  if (!r.ok) { const m = r.error.message; throw new CliError(r.error.code === 'BUSY' ? 'BUSY' : /未找到|不存在|not found/i.test(m) ? 'NOT_FOUND' : 'ERROR', m); }
   return r.value as T;
 }
 async function ensureMockModels(ctx: Ctx) {
@@ -282,15 +282,16 @@ export async function runCli(argv: string[], io: { out: (s: string) => void; err
   // C07: every startup failure becomes a single ok:false line with code STARTUP (BUSY/CONFIG/USAGE keep their own codes).
   const startup = async <T,>(what: string, work: () => Promise<T>): Promise<T> => { try { return await work(); } catch (e) { if (e instanceof CliError) throw e; throw new CliError('STARTUP', `启动失败（${what}）：${e instanceof Error ? e.message : String(e)}`); } };
   const lifecycle = installCliLifecycle();
-  let app: App | undefined, release: (() => Promise<void>) | undefined; const unguard = mock ? installMockNetworkGuard() : undefined;
+  let app: App | undefined, ownership: OwnerLease | undefined; const unguard = mock ? installMockNetworkGuard() : undefined;
   let result: { ok: boolean; payload: unknown; code: number };
   try {
     const projects = process.env.YINGLIU_PROJECTS ? resolve(process.env.YINGLIU_PROJECTS) : join(dir, 'projects'), readOnly = isReadOnly(positional, flags);
-    const lockSeconds = flags['lock-timeout'] === undefined ? 30 : Number(flags['lock-timeout']); if (!Number.isFinite(lockSeconds) || lockSeconds < 0) throw new CliError('USAGE', '--lock-timeout 必须是非负数字');
+    const lockSeconds = flags['lock-timeout'] === undefined ? 30 : Number(flags['lock-timeout']), lockTimeoutMs = lockSeconds * 1000;
+    if (!Number.isFinite(lockSeconds) || lockSeconds < 0 || !Number.isFinite(lockTimeoutMs)) throw new CliError('USAGE', '--lock-timeout 必须是可转换为有限毫秒的非负数字');
     await startup('创建数据目录 ' + dir, () => mkdir(dir, { recursive: true }));
-    await startup('获取数据目录锁', async () => { try { release = await acquireOwner([dir, projects], positional.slice(0, 2).join(' '), lockSeconds * 1000, { signal: lifecycle.signal }); } catch (e) { if (e instanceof BusyError) throw new CliError('BUSY', e.message); if (e instanceof LockConfigError) throw new CliError('CONFIG', e.message); throw e; } });
+    await startup('获取数据目录锁', async () => { try { ownership = await acquireOwnerLease([dir, projects], positional.slice(0, 2).join(' '), lockTimeoutMs, { signal: lifecycle.signal }); } catch (e) { if (e instanceof BusyError) throw new CliError('BUSY', e.message); if (e instanceof LockConfigError) throw new CliError('CONFIG', e.message); throw e; } });
     if (!readOnly || positional[0] === 'models') await secrets.check(); // C06: a broken key map fails up front with CONFIG instead of surfacing as a provider error
-    app = await startup('初始化应用', () => createApplication({ dataDirectory: dir, projectsDirectory: projects, credentials: secrets, ...(mock ? { fetch: mockFetch(), resumeRemoteTasks: false } : {}), ...(readOnly ? { recover: false } : {}) }));
+    app = await startup('初始化应用', () => createApplication({ dataDirectory: dir, projectsDirectory: projects, credentials: secrets, ownership, projectRootWaitMs: lockTimeoutMs, ...(mock ? { fetch: mockFetch(), resumeRemoteTasks: false } : {}), ...(readOnly ? { recover: false } : {}) }));
     lifecycle.throwIfInterrupted();
     const ctx: Ctx = { app, secrets, flags, mock, lifecycle };
     if (mock && !readOnly) await ensureMockModels(ctx);
@@ -300,7 +301,7 @@ export async function runCli(argv: string[], io: { out: (s: string) => void; err
     const e = error instanceof CliError ? error : new CliError('ERROR', error instanceof Error ? error.message : String(error));
     result = { ok: false, payload: { code: e.code, message: e.message, ...(e.details ?? {}) }, code: EXIT[e.code] };
   } finally {
-    try { await lifecycle.shutdown(async () => { await app?.dispose(); }, release); }
+    try { await lifecycle.shutdown(async () => { await app?.dispose(); }, () => ownership?.release() ?? Promise.resolve()); }
     catch (error) { result = { ok: false, payload: { code: 'ERROR', message: '退出清理失败：' + (error instanceof Error ? error.message : String(error)) }, code: EXIT.ERROR }; }
     finally { unguard?.(); }
   }

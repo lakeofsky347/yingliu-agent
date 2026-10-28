@@ -182,5 +182,9 @@ export class ProjectHub {
       await this.remember(await service.snapshot());return {ok:true,value:await this.decorate(service,sessionId)};
     }catch(error){return {ok:false,error:{code:error instanceof Error&&'code' in error?String(error.code):'STUDIO_ERROR',message:error instanceof Error?error.message:String(error)}};}
   }
-  async dispose(){this.disposed=true;await this.initialized;await this.openings;await Promise.allSettled(this.pendingServices.values());await Promise.all([...new Set([this.bootstrap,...this.services.values()])].map(service=>service.dispose()));await this.writes;}
+  async dispose(){
+    this.disposed=true;await this.initialized.catch(()=>{});await this.openings.catch(()=>{});await Promise.allSettled(this.pendingServices.values());
+    const results=await Promise.allSettled([...new Set([this.bootstrap,...this.services.values()])].map(service=>service.dispose()));await this.writes;
+    const failed=results.find(result=>result.status==='rejected');if(failed?.status==='rejected')throw failed.reason;
+  }
 }

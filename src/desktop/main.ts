@@ -6,6 +6,8 @@ import { startUiServer } from '../app/ui-server.ts';
 import { NativeSecrets } from './native-secrets.ts';
 import { editorWebPreferences } from './web-preferences.ts';
 import { ownedSceneProcesses, sameSceneProcess } from './scene-recovery.ts';
+import { acquireApplicationOwner, applicationDirectories, drainOwned, type OwnerLease } from '../app/ownership.ts';
+import { acquireDesktopOwner, busyDialogOptions, choiceFor } from './startup-owner.ts';
 
 app.setName('映流智能体');
 app.commandLine.appendSwitch('site-per-process');
@@ -18,11 +20,26 @@ const ownsApplication=app.requestSingleInstanceLock();
 if(!ownsApplication)app.quit();
 app.on('second-instance',()=>{const window=BrowserWindow.getAllWindows()[0];if(window){if(window.isMinimized())window.restore();window.show();window.focus();}});
 let closing=false,preparing=false,dispose:(()=>Promise<void>)|undefined,prepareQuit:(()=>Promise<void>)|undefined;
-if(ownsApplication)void app.whenReady().then(async()=>{
+let ownership:OwnerLease|undefined,applicationInstance:Awaited<ReturnType<typeof createApplication>>|undefined,uiServer:Awaited<ReturnType<typeof startUiServer>>|undefined;
+let cleanup:Promise<void>|undefined,startup:Promise<void>|undefined,cleanupFinished=false;
+const startupAbort=new AbortController();
+dispose=()=>cleanup??=(async()=>{try{await drainOwned([()=>applicationInstance?.dispose(),()=>uiServer?.close()]);}finally{try{await ownership?.release();}finally{cleanupFinished=true;}}})();
+async function stopImmediately(){
+  if(closing)return;closing=true;startupAbort.abort(new Error('应用正在关闭'));
+  await startup?.catch(()=>{});try{await dispose?.();}finally{app.quit();}
+}
+if(ownsApplication){process.on('SIGINT',()=>void stopImmediately());process.on('SIGTERM',()=>void stopImmediately());}
+if(ownsApplication)void (startup=app.whenReady().then(async()=>{
   const dataDirectory=app.getPath('userData');
-  const application=await createApplication({dataDirectory,credentials:new NativeSecrets(dataDirectory,safeStorage),reveal:async path=>shell.showItemInFolder(path)});
-  const server=await startUiServer(application,join(__dirname,'../ui'));
-  dispose=async()=>{await application.dispose();await server.close();};
+  const directories=applicationDirectories({dataDirectory});
+  // Another CLI/web/desktop owner holds this profile: ask (retry / wait / quit) instead of exiting silently.
+  ownership=await acquireDesktopOwner(timeoutMs=>acquireApplicationOwner(directories,'desktop',timeoutMs,startupAbort.signal),
+    async error=>choiceFor((await dialog.showMessageBox({...busyDialogOptions(error),signal:startupAbort.signal})).response));
+  if(!ownership){closing=true;try{await dispose?.();}finally{app.quit();}return;}
+  startupAbort.signal.throwIfAborted();
+  const ownedApplication=await createApplication({...directories,credentials:new NativeSecrets(dataDirectory,safeStorage),reveal:async path=>shell.showItemInFolder(path),ownership});applicationInstance=ownedApplication;startupAbort.signal.throwIfAborted();
+  const ownedServer=await startUiServer(ownedApplication,join(__dirname,'../ui'));uiServer=ownedServer;startupAbort.signal.throwIfAborted();
+  const application=ownedApplication,server=ownedServer;
   const editorSession=session.fromPartition('persist:yingliu-editor');
   editorSession.setPermissionRequestHandler((_webContents,_permission,callback)=>callback(false));
   editorSession.setPermissionCheckHandler(()=>false);
@@ -102,9 +119,9 @@ if(ownsApplication)void app.whenReady().then(async()=>{
       for(const project of registry.projects){const state=await application.backend.call('current',{projectId:project.id});if(state.task?.status==='running'){running=true;break;}}
       if(running){const choice=await dialog.showMessageBox(window,{type:'question',title:'还有制作任务在运行',message:'退出会取消当前制作任务。已保存的工程和任务记录将保留，重新打开后可以重试。',buttons:['继续制作','取消任务并退出'],defaultId:0,cancelId:0});if(choice.response===0)return;}
       closing=true;await dispose?.();app.quit();
-    }catch(error){await dialog.showMessageBox(window,{type:'error',title:'关闭前保存失败',message:error instanceof Error?error.message:'关闭前保存失败，请保留窗口重试。'});}finally{preparing=false;}
+    }catch(error){if(closing&&cleanupFinished){console.error(error instanceof Error?error.message:'关闭清理失败');app.quit();}else await dialog.showMessageBox(window,{type:'error',title:'关闭前保存失败',message:error instanceof Error?error.message:'关闭前保存失败，请保留窗口重试。'});}finally{preparing=false;}
   };
-  window.on('close',event=>{if(!closing){event.preventDefault();void prepareQuit?.();}});
+  window.on('close',event=>{if(!cleanupFinished){event.preventDefault();if(!closing)void prepareQuit?.();}});
   window.webContents.setWindowOpenHandler(({url})=>{
     const target=new URL(url);if(target.hostname==='localhost'&&/^\/\.studio\/inspection\/[\w-]+\.png$/.test(target.pathname))return {action:'allow',overrideBrowserWindowOptions:{webPreferences:{preload:undefined,contextIsolation:true,nodeIntegration:false,sandbox:true}}};
     return {action:'deny'};
@@ -115,6 +132,8 @@ if(ownsApplication)void app.whenReady().then(async()=>{
   window.webContents.on('render-process-gone',()=>{if(!closing)void window.loadURL(server.origin);});
   await window.loadURL(server.origin);window.setMenuBarVisibility(false);
   console.log('映流智能体 desktop ready');
-}).catch(error=>{console.error(error instanceof Error?error.message:'启动失败');closing=true;app.quit();});
+})).catch(async error=>{console.error(error instanceof Error?error.message:'启动失败');closing=true;try{await dispose?.();}finally{app.quit();}});
 app.on('window-all-closed',()=>{if(!closing)void prepareQuit?.();});
-app.on('before-quit',event=>{if(closing||!ownsApplication)return;event.preventDefault();if(prepareQuit)void prepareQuit();else{closing=true;void (dispose?.()??Promise.resolve()).finally(()=>app.quit());}});
+app.on('before-quit',event=>{if(cleanupFinished||!ownsApplication)return;event.preventDefault();if(closing)return;if(prepareQuit)void prepareQuit();else{
+  void stopImmediately();
+}});

@@ -35,6 +35,7 @@
 - 写入后模型宣布完成时，自动运行 `visual_review`（未配置视觉模型时改为 `render_check`）；不通过则把问题交还模型修复。
 - 网络错误、HTTP 429/5xx 按指数退避重试 3 次；版本冲突和参数错误作为工具结果交还模型处理。
 - 应用重启时，进行中的运行标记为「已暂停」，可从队列中的下一个工具调用继续；等待审批的运行保持等待。
+- 同工程的启动、审批、拒绝、恢复、暂停与取消通过生命周期队列串行化；旧循环排空后重新检查占用，避免同工程两个智能体同时执行。不同工程可独立运行。此边界位于单个应用服务内，不代表跨 CLI/桌面进程锁。
 - 模型使用 `director` 角色绑定的模型，默认可配置 `deepseek-chat`；在模型参数里设 `supportsTools:false` 可强制使用计划 JSON。
 
 ## 测试
@@ -69,12 +70,13 @@
 | `kling-video` 可灵 | 视频 | `https://api-beijing.klingai.com`（需填可灵 JWT 作为 API Key，见下） |
 | `ark-video` 火山方舟 / 即梦 Seedance | 视频 | `https://ark.cn-beijing.volces.com/api/v3` |
 | `runway-video` Runway | 视频 | `https://api.dev.runwayml.com` |
-| `replicate` 任意 Replicate 模型 | 图片/视频/音频 | `https://api.replicate.com/v1` |
+| `replicate` 官方模型，模型 ID 填 owner/name | 图片/视频/音频 | `https://api.replicate.com/v1` |
+| `replicate-version` 社区指定版本，模型 ID 填版本哈希或 owner/name:版本哈希 | 图片/视频/音频 | 同上 |
 | `elevenlabs-sfx` 音效 | 音频 | `https://api.elevenlabs.io` |
 | `openai-speech` OpenAI 兼容 TTS | 音频 | `https://api.openai.com/v1` |
 | `generic-async` 自定义 | 任意 | 自定义 |
 
-> **Replicate 模型名编码待真实验证**：`replicate` 预设的提交路径是 `/models/{{model}}/predictions`，模板路径变量统一做 URL 编码，`owner/name` 中的 `/` 会被编码为 `%2F`。Replicate 是否接受这种写法尚未用真实账号验证（本仓库测试只用本地网关）；本轮不改变行为。如果真实服务返回 404，请改用 `generic-async` 模板，并把 owner 和 name 分开写进路径。
+Replicate 默认官方模型路径为 `/models/{{modelOwner}}/{{modelName}}/predictions`，owner 与 name 分别编码；通用 `{{model}}`、任务 ID 等变量仍整体编码。社区指定版本模板通过 `/predictions` 的 `version` 字段提交，依据 [官方 HTTP API](https://replicate.com/docs/reference/http)。路径、请求体与恢复由本机协议回归验证；实际模型类型、输入参数、权限和真实生成质量仍需账户验收。自定义覆盖的模板路径不会被自动重写。
 
 连接检查只发 GET 请求（`checkPath` 或根路径），不提交生成；401/403 会提示凭据被拒绝。
 
@@ -107,6 +109,8 @@
 ### 项目预算
 - `<数据目录>/agent-data/ledger/<工程 ID>.json`：`spent`、`unknownCostCalls`、`byTool`、`maxCost`。导演模型的 token 费用（如果模型配置了价格）记为 `director`；媒体任务完成后回报的费用记入 `media`。
 - 设置了 `maxCost` 时，收费调用即使在自动批准名单中，也会因为「费用未知」或「将超过项目上限」而要求审批；累计花费达到上限时运行停止（`budget_exceeded`）。
+- 项目累计费用在每个排队工具执行前检查，用户已批准的调用也受当前上限约束；同一模型回合返回多项收费操作不能跨过上限。已经成功的工具回执优先完成本地结算，不重新提交。
+- 模型中心的「文本费用情景试算」按用户填写的每百万输入/输出 token 单价、币种、来源和轮数计算，不发模型请求，也不批准媒体费用。未填、空白或非法单价、缺失/非法 usage 以及单价/运行/账本币种不一致都保留未知；未知导演费用也记入项目账本。历史花费或未知费用存在时不能直接换账本币种标签，不自动换汇。
 
 ### 质检
 - `quality_check` 工具 / `agent.qc` 端点；结果保存在 `agent-data/qc/`，可用 `agent.qc.last` 读取。

@@ -12,13 +12,14 @@ export interface AppBackendOptions {
   reveal?:(path:string)=>Promise<void>;
   /** Project root directory; defaults to <dataDirectory>/projects. */
   projectsDirectory?:string;
+  claimProjectRoot?:(root:string)=>Promise<void>;
 }
 
 /** Native shell and conversation coordinator share this application backend. */
 export class AppBackend implements BackendPort {
   private readonly hub:ProjectHub;
   constructor(options:AppBackendOptions){
-    this.hub=new ProjectHub({llm:options.providers,credentials:options.credentials,reveal:options.reveal},
+    this.hub=new ProjectHub({llm:options.providers,credentials:options.credentials,reveal:options.reveal,claimProjectRoot:options.claimProjectRoot},
       {baseDirectory:options.projectsDirectory?resolve(options.projectsDirectory):join(resolve(options.dataDirectory),'projects')});
   }
   call<T=StudioSnapshot>(endpoint:string,payload:unknown={}):Promise<T>{return this.hub.call<T>(endpoint,payload);}

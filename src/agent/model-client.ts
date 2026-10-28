@@ -61,18 +61,20 @@ export async function chatTurn(config: ChatConfig, system: string, messages: Age
     throw new ModelHttpError(`模型请求失败（HTTP ${response.status}）：${text}`, response.status, response.status === 429 || response.status >= 500);
   }
   const data = obj(await response.json()), choice = obj(Array.isArray(data.choices) ? data.choices[0] : undefined), message = obj(choice.message), usage = obj(data.usage);
-  const tokens = { inputTokens: Number(usage.prompt_tokens) || 0, outputTokens: Number(usage.completion_tokens) || 0 };
+  const validTokens=(value:unknown):value is number=>typeof value==='number'&&Number.isSafeInteger(value)&&value>=0;
+  const usageKnown=validTokens(usage.prompt_tokens)&&validTokens(usage.completion_tokens);
+  const tokens = { inputTokens: validTokens(usage.prompt_tokens)?usage.prompt_tokens:0, outputTokens: validTokens(usage.completion_tokens)?usage.completion_tokens:0 };
   const content = redactKey(typeof message.content === 'string' ? message.content : '', config.key);
   const reason = String(choice.finish_reason ?? '');
   if (mode === 'plan-json') {
     const parsed = parsePlanJson(content);
-    return { content: parsed.content, toolCalls: parsed.toolCalls, finish: reason === 'length' ? 'length' : parsed.toolCalls.length ? 'tool_calls' : 'stop', usage: tokens, mode };
+    return { content: parsed.content, toolCalls: parsed.toolCalls, finish: reason === 'length' ? 'length' : parsed.toolCalls.length ? 'tool_calls' : 'stop', usage: tokens, usageKnown, mode };
   }
   const toolCalls: ToolCall[] = (Array.isArray(message.tool_calls) ? message.tool_calls : []).map(raw => {
     const call = obj(raw), fn = obj(call.function);
     return { id: typeof call.id === 'string' && call.id ? call.id : 'call-' + randomUUID(), name: String(fn.name ?? ''), arguments: typeof fn.arguments === 'string' ? fn.arguments : JSON.stringify(fn.arguments ?? {}) };
   }).filter(call => call.name);
-  return { content, toolCalls, finish: toolCalls.length ? 'tool_calls' : reason === 'length' ? 'length' : reason === 'stop' || !reason ? 'stop' : 'other', usage: tokens, mode };
+  return { content, toolCalls, finish: toolCalls.length ? 'tool_calls' : reason === 'length' ? 'length' : reason === 'stop' || !reason ? 'stop' : 'other', usage: tokens, usageKnown, mode };
 }
 
 /** Providers that reject the `tools` field answer 400/422 mentioning tools/function. */
