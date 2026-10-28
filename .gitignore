@@ -10,3 +10,6 @@ artifacts/
 .DS_Store
 coverage/
 credentials*
+dist-p0/
+src-tauri/target/
+src-tauri/gen/

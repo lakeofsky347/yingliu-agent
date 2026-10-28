@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "shell-local",
+  "description": "Bundled loading page only. The editor origin (dynamic 127.0.0.1 port) gets its own exact-origin capability at runtime; no wildcard remote URLs anywhere.",
+  "windows": ["main"],
+  "permissions": []
+}

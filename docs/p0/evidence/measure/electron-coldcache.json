@@ -1,0 +1,296 @@
+{
+  "summary": {
+    "mode": "electron",
+    "runs": 5,
+    "idleMs": 3000,
+    "dropCaches": true,
+    "readyMedianMs": 924,
+    "readyP95Ms": 1022,
+    "readyFailures": 0,
+    "s0PssMedianMiB": 356.2,
+    "s0PssP95MiB": 356.7,
+    "s0RssMedianMiB": 705.4
+  },
+  "host": {
+    "kernel": "Linux 6.12.94+",
+    "cpus": "8"
+  },
+  "measuredAt": "2026-10-24T08:00:37.337Z",
+  "samples": [
+    {
+      "run": 0,
+      "readyMs": 1022,
+      "s0": {
+        "pssBytes": 373404672,
+        "rssBytes": 738807808,
+        "processes": [
+          {
+            "pid": 1990707,
+            "comm": "yingliu-agent",
+            "pss": 153865216,
+            "rss": 239214592
+          },
+          {
+            "pid": 1990709,
+            "comm": "yingliu-agent",
+            "pss": 13881344,
+            "rss": 55439360
+          },
+          {
+            "pid": 1990740,
+            "comm": "yingliu-agent",
+            "pss": 73011200,
+            "rss": 159817728
+          },
+          {
+            "pid": 1990710,
+            "comm": "yingliu-agent",
+            "pss": 13721600,
+            "rss": 55525376
+          },
+          {
+            "pid": 1990783,
+            "comm": "yingliu-agent",
+            "pss": 88712192,
+            "rss": 145838080
+          },
+          {
+            "pid": 1990744,
+            "comm": "yingliu-agent",
+            "pss": 30213120,
+            "rss": 82972672
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        "[1990707:1024/160015.920619:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: ",
+        "[1990707:1024/160015.920698:ERROR:dbus/bus.cc:406] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")",
+        "[1990707:1024/160015.924411:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: ",
+        "[1990707:1024/160015.974891:ERROR:dbus/bus.cc:406] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")",
+        ""
+      ]
+    },
+    {
+      "run": 1,
+      "readyMs": 924,
+      "s0": {
+        "pssBytes": 373727232,
+        "rssBytes": 738369536,
+        "processes": [
+          {
+            "pid": 1990874,
+            "comm": "yingliu-agent",
+            "pss": 154223616,
+            "rss": 238899200
+          },
+          {
+            "pid": 1990876,
+            "comm": "yingliu-agent",
+            "pss": 13583360,
+            "rss": 55246848
+          },
+          {
+            "pid": 1990900,
+            "comm": "yingliu-agent",
+            "pss": 72840192,
+            "rss": 159731712
+          },
+          {
+            "pid": 1990877,
+            "comm": "yingliu-agent",
+            "pss": 13583360,
+            "rss": 55406592
+          },
+          {
+            "pid": 1990945,
+            "comm": "yingliu-agent",
+            "pss": 88685568,
+            "rss": 145350656
+          },
+          {
+            "pid": 1990904,
+            "comm": "yingliu-agent",
+            "pss": 30811136,
+            "rss": 83734528
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        "[1990874:1024/160020.374751:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: ",
+        "[1990874:1024/160020.374830:ERROR:dbus/bus.cc:406] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")",
+        "[1990874:1024/160020.379557:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: ",
+        "[1990874:1024/160020.424947:ERROR:dbus/bus.cc:406] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")",
+        ""
+      ]
+    },
+    {
+      "run": 2,
+      "readyMs": 926,
+      "s0": {
+        "pssBytes": 373405696,
+        "rssBytes": 739663872,
+        "processes": [
+          {
+            "pid": 1991162,
+            "comm": "yingliu-agent",
+            "pss": 153542656,
+            "rss": 238596096
+          },
+          {
+            "pid": 1991164,
+            "comm": "yingliu-agent",
+            "pss": 13950976,
+            "rss": 55951360
+          },
+          {
+            "pid": 1991189,
+            "comm": "yingliu-agent",
+            "pss": 73124864,
+            "rss": 159444992
+          },
+          {
+            "pid": 1991165,
+            "comm": "yingliu-agent",
+            "pss": 13718528,
+            "rss": 56139776
+          },
+          {
+            "pid": 1991232,
+            "comm": "yingliu-agent",
+            "pss": 88925184,
+            "rss": 146161664
+          },
+          {
+            "pid": 1991191,
+            "comm": "yingliu-agent",
+            "pss": 30143488,
+            "rss": 83369984
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        "[1991162:1024/160024.785717:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: ",
+        "[1991162:1024/160024.785800:ERROR:dbus/bus.cc:406] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")",
+        "[1991162:1024/160024.789149:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: ",
+        "[1991162:1024/160024.833734:ERROR:dbus/bus.cc:406] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")",
+        ""
+      ]
+    },
+    {
+      "run": 3,
+      "readyMs": 873,
+      "s0": {
+        "pssBytes": 374004736,
+        "rssBytes": 739680256,
+        "processes": [
+          {
+            "pid": 1991304,
+            "comm": "yingliu-agent",
+            "pss": 154209280,
+            "rss": 239443968
+          },
+          {
+            "pid": 1991311,
+            "comm": "yingliu-agent",
+            "pss": 13954048,
+            "rss": 56057856
+          },
+          {
+            "pid": 1991349,
+            "comm": "yingliu-agent",
+            "pss": 72856576,
+            "rss": 158949376
+          },
+          {
+            "pid": 1991313,
+            "comm": "yingliu-agent",
+            "pss": 13720576,
+            "rss": 56107008
+          },
+          {
+            "pid": 1991397,
+            "comm": "yingliu-agent",
+            "pss": 89172992,
+            "rss": 145920000
+          },
+          {
+            "pid": 1991353,
+            "comm": "yingliu-agent",
+            "pss": 30091264,
+            "rss": 83202048
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        "[1991304:1024/160029.166477:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: ",
+        "[1991304:1024/160029.166636:ERROR:dbus/bus.cc:406] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")",
+        "[1991304:1024/160029.170013:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: ",
+        "[1991304:1024/160029.213559:ERROR:dbus/bus.cc:406] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")",
+        ""
+      ]
+    },
+    {
+      "run": 4,
+      "readyMs": 883,
+      "s0": {
+        "pssBytes": 373525504,
+        "rssBytes": 741027840,
+        "processes": [
+          {
+            "pid": 1991446,
+            "comm": "yingliu-agent",
+            "pss": 153691136,
+            "rss": 238567424
+          },
+          {
+            "pid": 1991448,
+            "comm": "yingliu-agent",
+            "pss": 13934592,
+            "rss": 56451072
+          },
+          {
+            "pid": 1991472,
+            "comm": "yingliu-agent",
+            "pss": 72949760,
+            "rss": 160026624
+          },
+          {
+            "pid": 1991449,
+            "comm": "yingliu-agent",
+            "pss": 13679616,
+            "rss": 56360960
+          },
+          {
+            "pid": 1991525,
+            "comm": "yingliu-agent",
+            "pss": 89017344,
+            "rss": 145879040
+          },
+          {
+            "pid": 1991476,
+            "comm": "yingliu-agent",
+            "pss": 30253056,
+            "rss": 83742720
+          }
+        ]
+      },
+      "exitedWithin15s": true,
+      "leftovers": [],
+      "stderrTail": [
+        "[1991446:1024/160033.540231:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: ",
+        "[1991446:1024/160033.540428:ERROR:dbus/bus.cc:406] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")",
+        "[1991446:1024/160033.544100:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: ",
+        "[1991446:1024/160033.594410:ERROR:dbus/bus.cc:406] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")",
+        ""
+      ]
+    }
+  ]
+}

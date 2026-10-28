@@ -5,14 +5,16 @@ import { join } from 'node:path';
 import type { Application } from './application.ts';
 
 /** The editor and untrusted scenes use different loopback origins. */
-export async function startUiServer(application:Application,uiDirectory:string,port=0){
+/** options.sceneFrames=false (P0 Tauri sidecar): the trusted editor may not frame generated scenes at all (frame-src 'none'). */
+export async function startUiServer(application:Application,uiDirectory:string,port=0,options:{sceneFrames?:boolean}={}){
+  const frameSrc=options.sceneFrames===false?"'none'":'http://localhost:*';
   const token=randomBytes(32).toString('hex');let origin='';
   const server=createServer(async(req,res)=>{
     try{
       if(req.headers.host!==new URL(origin).host){res.writeHead(403);res.end();return;}
       const url=new URL(req.url??'/',origin);
       res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
-      res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http://localhost:*; media-src 'self' http://localhost:*; frame-src http://localhost:*; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'");
+      res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http://localhost:*; media-src 'self' http://localhost:*; frame-src "+frameSrc+"; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'");
       if(url.pathname==='/events/agent'){
         // Server-sent events for agent runs. POST + token header (EventSource cannot send headers); same origin checks as /api.
         if(req.method!=='POST'||req.headers['x-yingliu-token']!==token||req.headers.origin&&req.headers.origin!==origin){res.writeHead(403);res.end();return;}
@@ -39,5 +41,5 @@ export async function startUiServer(application:Application,uiDirectory:string,p
   });
   await new Promise<void>((accept,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',()=>accept());});
   const address=server.address();if(!address||typeof address==='string')throw new Error('无法启动编辑器');origin='http://127.0.0.1:'+address.port;
-  return {origin,async close(){server.closeAllConnections();await new Promise<void>(accept=>server.close(()=>accept()));}};
+  return {origin,token,async close(){server.closeAllConnections();await new Promise<void>(accept=>server.close(()=>accept()));}};
 }
