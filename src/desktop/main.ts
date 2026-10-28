@@ -7,6 +7,7 @@ import { NativeSecrets } from './native-secrets.ts';
 import { editorWebPreferences } from './web-preferences.ts';
 import { ownedSceneProcesses, sameSceneProcess } from './scene-recovery.ts';
 import { acquireApplicationOwner, applicationDirectories, drainOwned, type OwnerLease } from '../app/ownership.ts';
+import { acquireDesktopOwner, busyDialogOptions, choiceFor } from './startup-owner.ts';
 
 app.setName('映流智能体');
 app.commandLine.appendSwitch('site-per-process');
@@ -31,7 +32,11 @@ if(ownsApplication){process.on('SIGINT',()=>void stopImmediately());process.on('
 if(ownsApplication)void (startup=app.whenReady().then(async()=>{
   const dataDirectory=app.getPath('userData');
   const directories=applicationDirectories({dataDirectory});
-  ownership=await acquireApplicationOwner(directories,'desktop',0,startupAbort.signal);startupAbort.signal.throwIfAborted();
+  // Another CLI/web/desktop owner holds this profile: ask (retry / wait / quit) instead of exiting silently.
+  ownership=await acquireDesktopOwner(timeoutMs=>acquireApplicationOwner(directories,'desktop',timeoutMs,startupAbort.signal),
+    async error=>choiceFor((await dialog.showMessageBox({...busyDialogOptions(error),signal:startupAbort.signal})).response));
+  if(!ownership){closing=true;try{await dispose?.();}finally{app.quit();}return;}
+  startupAbort.signal.throwIfAborted();
   const ownedApplication=await createApplication({...directories,credentials:new NativeSecrets(dataDirectory,safeStorage),reveal:async path=>shell.showItemInFolder(path),ownership});applicationInstance=ownedApplication;startupAbort.signal.throwIfAborted();
   const ownedServer=await startUiServer(ownedApplication,join(__dirname,'../ui'));uiServer=ownedServer;startupAbort.signal.throwIfAborted();
   const application=ownedApplication,server=ownedServer;
