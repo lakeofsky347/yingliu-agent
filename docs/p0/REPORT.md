@@ -1,6 +1,22 @@
 # P0 报告：Tauri 2 + sidecar 可行性
 
-基线 `main@c03828f`。所有数字来自 Linux x64 容器（Xvfb），原始数据在 `docs/p0/evidence/`。
+测量基线 `main@c03828f`（试验分支起点）；随 v1.1.0 并入 `main`（合并基线 `main@6c41a2e`，v1.0.0 主施工），代码在此基础上复核，测量数字未重测。所有数字来自 Linux x64 容器（Xvfb），原始数据在 `docs/p0/evidence/`。
+
+> 状态：**实验性**。Tauri 壳与 sidecar 不参与默认构建与打包，Electron 仍为默认桌面壳。
+
+## 0. 门槛状态（如实）
+
+| 门槛 | 状态 |
+|---|---|
+| 安装体积 ≤ Electron −40% | 仅 Linux 实测通过（Node SEA −56%）；macOS/Windows 未测（CI 只给出未签名产物大小） |
+| 空闲内存 ≤ Electron −20% | **Linux 未通过（+46%）**；macOS/Windows 未测 |
+| 冷启动 ready P95 | 仅 Linux 测量；两种壳的 ready 定义不同，不可直接比较，不作为通过依据 |
+| Tauri 原生 GUI（三平台）、preview session、W3 RPC/requestId | 未测 |
+| 真实系统钥匙环迁移（本轮仅合成凭据） | 未测 |
+| 更新/回滚、代码签名与公证、干净机器安装 | 未测 |
+| Windows JobObject 子进程回收 | 未测 |
+| Tauri 内完整媒体闭环（渲染导出 MP4） | 未测（仅 sidecar 独立运行时实测） |
+
 
 ## 1. 结果
 
@@ -57,4 +73,4 @@ Tauri 进程拆分：壳约 84 MiB，sidecar 约 128 MiB，WebKitNetworkProcess 
 - 迁移的主要理由“更省内存”在 Linux 上不成立（+46%）。必须先在 macOS 和 Windows 上实测 S0/S1。只有这两个平台达到 -20% 才继续；否则，仅凭体积不足以抵消迁移成本，应留在 Electron，并只做体积优化（例如更小的 Electron 打包）。
 - sidecar 架构本身（锁、握手、关闭、崩溃恢复、场景隔离）已验证可用，无论是否换壳都可以保留。
 
-重新估算（达到可发布质量的 Tauri 版本）：W3 RPC 加 preview 约 2–3 周，三平台原生 UI 适配、内存实测与签名流水线约 2 周，WebKitGTK 兼容性矩阵约 1 周，合计约 5–6 人周（不含 Electron 的并行维护）。
+重新估算（达到可发布质量的 Tauri 版本，按施工计划修订）：**约 8–12 人周**（不含 Electron 的并行维护）。包括 W3 RPC/requestId 与 preview session、三平台原生 UI 适配与内存实测、真实钥匙环迁移、签名/公证与更新回滚流水线、WebKitGTK 兼容矩阵、Windows JobObject、干净机器安装与 Tauri 内完整媒体闭环验收。此前“约 5–6 人周”的估计未计入后几项，已作废。
