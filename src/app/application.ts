@@ -89,6 +89,16 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
       catch(error){if(attempt>=2||!/版本|revision/i.test(error instanceof Error?error.message:'')){const failure=error instanceof Error?error:new Error(String(error));failure.message='配音已生成（可能已计费）但登记进工程失败：'+failure.message;throw withSubmission(failure,'unknown');}}
     }
   }
+  // A user edit can land between reading the revision and importing. A stale-revision import is rejected before anything
+  // is written, so re-reading the latest revision and retrying (bounded, like agentVoice) cannot import twice.
+  const importAsset=async(id:string,name:string,description:string,bytes:Uint8Array,mime:string,failure:string)=>{
+    const dataBase64=`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`;
+    for(let attempt=0;;attempt++){
+      const current=await backend.call('current',{projectId:id});
+      try{const snapshot=await backend.call('import',{projectId:id,expectedRevision:current.project?.revision,name,description,mime,dataBase64});const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error(failure);return {id:asset.id,name:asset.name};}
+      catch(error){if(attempt>=2||!/版本冲突|REVISION_CONFLICT/.test(error instanceof Error?error.message:''))throw error;}
+    }
+  };
   const agentPort:AgentPort={
     snapshot:id=>backend.call('current',{projectId:id}),
     readSource:(id,shotId)=>backend.call('source',{projectId:id,shotId}),
@@ -106,8 +116,8 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
       let director:string|undefined;try{director=(await providers.registry.resolve('director')).model.name;}catch{}
       return {roles,models,...(director?{director}:{})};
     },
-    importImage:async(id,name,bytes,mime)=>{if(!/^image\/(png|jpeg|webp)$/.test(mime))throw new Error('不支持的图片格式');const current=await backend.call('current',{projectId:id});const snapshot=await backend.call('import',{projectId:id,expectedRevision:current.project?.revision,name,description:'智能体截取的尾帧',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error('图片导入失败');return {id:asset.id,name:asset.name};},
-    importAudio:async(id,name,bytes,mime)=>{const current=await backend.call('current',{projectId:id});const snapshot=await backend.call('import',{projectId:id,expectedRevision:current.project?.revision,name,description:'智能体本地合成',mime,dataBase64:`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`});const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error('音频导入失败');return {id:asset.id,name:asset.name};},
+    importImage:async(id,name,bytes,mime)=>{if(!/^image\/(png|jpeg|webp)$/.test(mime))throw new Error('不支持的图片格式');return importAsset(id,name,'智能体截取的尾帧',bytes,mime,'图片导入失败');},
+    importAudio:async(id,name,bytes,mime)=>importAsset(id,name,'智能体本地合成',bytes,mime,'音频导入失败'),
     generateAudio:async(id,role,prompt,{durationSeconds,signal,shotId})=>{
       const resolved=await providers.registry.resolve(role);
       if(role==='speech'&&resolved.connection.protocol==='speech'){const project=(await backend.call('current',{projectId:id})).project;const shot=shotId??project?.shotOrder[0];if(!shot||!project?.shots.some(item=>item.id===shot))throw new Error('配音目标镜头不存在');const asset=await agentVoice(id,shot,prompt,signal,{});return {id:asset.id,name:asset.name,cost:null};}
