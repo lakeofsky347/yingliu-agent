@@ -6,6 +6,8 @@
 
 随后仅同步测试断言修正 `e7cbf37b532e44e7b4937126051806f68fd04a32`，隔离分支对应合并提交为 `97612038a2cb10d4ececeb88e60ecf10a9fc42a4`。已核对相对 `4de336a` 的 `src / scripts / bin / .github / package.json / package-lock.json / assets` 差异为空，仅 `tests/task-failure-diagnostics.test.ts` 更新：Windows 文件尝试次数允许在 1..8 内随期限提前结束，其他平台仍须一次失败；失败状态、固定 IO 诊断和不上传 raw 字段的断言保留。该同步后另跑 23/23 专项及类型检查通过，产品与 SEA 字节等价，因此没有伪称重跑全量或重新生成 SEA。
 
+最后同步测试 fixture 修正 `988a064a4df9c92822e7c6d7a048462758ee6340`，对应隔离分支合并提交为 `c859e21e6574e7c2cfa257da682d774d409d22a2`。此次相对前一同步只改变 `tests/application-owner.test.ts`，产品目录相对 `4de336a` 仍为空差异；最终重新执行 548/548 全量、零失败零跳过及类型检查通过。新增计数来自 fixture 碰撞回归，完整结果已覆盖 owner 17 项及 runtime 相关 23 项，不重复额外运行。547 项产品基线结果与原 SEA 十项演练继续作为各自真实执行证据；本次没有重建 SEA 或重跑演练。
+
 之前 `9137eb7..eb514f4` 仅为验收脚本、测试和文档同步，当时产品源码等价；该结论不延伸到之后的实际渲染字体屏障、文本渲染与合成参数、工程目录锁等待、不可变运行时发布、可选错误诊断、安全复用及 runtime 文件级重试修改。本次已重新执行下面的 547 项全量、UI/应用构建、Node SEA 打包及 source/SEA 共 10 项故障演练，没有沿用旧 Node/渲染运行时结果替代。Rust 源码树与 `dd711fe` 验收合并基线相同，沿用该轮 4 项测试与编译检查证据。旧基线证据仍保存在各自忽略目录，未被本轮覆盖。
 
 ## 凭据迁移事务
@@ -55,7 +57,8 @@ Rust `SidecarProcess` 从 spawn 开始持有子进程；缺管道、首行错误
 
 | 检查 | 结果 | 范围 |
 | --- | --- | --- |
-| 全量 Node/tsx 回归 | **547/547，零失败、零跳过** | 在 `6ae4103` 产品验收合并基线 `4de336a` 重新完整执行；包含主线 511 项和 P0 五组 36 项，后续 test-only 同步未改总数 |
+| 最后 test-only 同步后的全量 | **548/548，零失败、零跳过；typecheck PASS** | 在 `988a064` 同步合并提交 `c859e21` 完整执行；包含主线 512 项和 P0 五组 36 项，产品目录相对 `4de336a` 差异为空 |
+| 产品源码基线的全量 | **547/547，零失败、零跳过** | 在 `6ae4103` 产品验收合并基线 `4de336a` 重新完整执行；包含当时主线 511 项和 P0 五组 36 项；对应本轮构建、SEA 和演练的真实源版本 |
 | test-only 同步后的补验 | **23/23，零失败、零跳过；typecheck PASS** | `9761203` 上重新执行 runtime rename 7、publication 11、failure diagnostics 5 项；产品差异为空，沿用 `4de336a` 全量/构建/SEA 与故障演练证据 |
 | P0 五组 Node/tsx 回归 | 36 个独立用例包含在上述全量结果内 | 合成迁移 13、自有进程生命周期与 Windows 前置拒绝 4、真实 Chromium 隔离 4、脚本门槛 9、sidecar 共同 lease 6 |
 | 先前验收脚本同步专项 | **15/15，零失败、零跳过** | 同步 `eb514f4` 后曾执行 `acceptance-task.test.ts` 与 `platform-acceptance.test.ts`；这是前一轮脚本补验记录 |
@@ -79,6 +82,8 @@ Rust `SidecarProcess` 从 spawn 开始持有子进程；缺管道、首行错误
 
 本轮原始本机证据另存于忽略目录 `.local/p0-final-6ae4103-20261028/`：`node-tests.log`、`typecheck.log`、`build.log`、`sea-build.log`、`rust-source-equivalence.log`、`fault-drills-source.json`、`fault-drills-sea.json` 和 `sidecar-build/node-darwin-arm64/manifest.json`；test-only 同步补验另存为 `test-only-target.log`、`test-only-typecheck.log` 与 `test-only-sync-diff.log`。Rust 同源码树哈希为 `0483a15df701f7d994887b643d99deca05928406`，对应测试与检查日志保留在 `.local/p0-final-dd711fe-20261028/`。本轮在启动全量测试前已恢复自有临时依赖链接，取得 547/547、零跳过。前一轮 `2f39b31` 曾因链接未恢复跳过真实 Electron 用例，其初始日志与重新取得 507/507 的日志仍各自保留在原目录，不计为本轮结果。这些原始数据不随源码发布；本记录只保留脱敏计数、范围和产物哈希，未覆盖 `docs/p0/evidence/` 的历史性能或演练记录。
 
+最终 fixture 测试同步的 548 项全量与类型检查另存于 `.local/p0-test-sync-988a064-20261028/`：`node-tests.log`、`typecheck.log`、`test-sync-diff.log`。它没有覆盖前述产品基线、SEA 或历史演练日志；测试前恢复的自有临时依赖链接在全部检查结束后清理。
+
 ## CI 触发与适用范围
 
 专用 `Tauri P0 spike` workflow 的 push 条件包含 `spike/tauri-p0` 与本次独立加固分支。PR 路径过滤除 Rust、sidecar 和 P0 脚本外，也覆盖迁移、场景 worker、P0 测试及其 fixture。它运行三平台 Node SEA 构建、stdio 冒烟和 Rust release 编译，产物仍为未发行签名的实验构建；**不代表 Tauri 原生窗口或性能验收**。
@@ -92,6 +97,8 @@ Rust `SidecarProcess` 从 spawn 开始持有子进程；缺管道、首行错误
 独立分支此前提交 `2cb084b` 的专用 SEA/stdio/Rust 三平台与通用快速三平台已通过，但继承的 Windows Electron 原生验收失败：package 的 revision 4 预览任务为 `TASK_FAILED`，native 在聊天重试等待处超时；models、film、editor 已通过。当时脱敏摘要没有具体 IO code 或 syscall，不能判定其 Windows 根因，也不将其记为通过。随后 `a7c31c7` 的专用与快速三平台也通过，但 Windows Electron 原生失败并取得上述固定 IO/rename 证据。此前主线 `ef3104c` 及独立分支 `7c21a490e81149d31b0b0f7cb4fb89bf463a12c1` 曾取得各自三平台通过，但其源码等价文档提交 `95bbf31` 的 Windows 原生复验再次失败，不能用旧通过覆盖该失败。当前 `6ae4103` 修改了 runtime 文件发布行为，不再与上述旧源码等价；本次主线和独立分支均须核对自己的新 CI。本轮没有执行 Tauri 原生窗口验收，P0 中断恢复演练也不替代该验收。
 
 主线 runtime 修复源码 `6ae4103` 的三平台 Electron 原生流程已全部成功（workflow 40693416863）。其 Windows 快速矩阵唯一失败是旧诊断测试仍假定文件只尝试一次，这一测试-only 断言已在 `e7cbf37` 修正；不能把这项旧断言失败写成通过。`e7cbf37` 和本独立分支最新提交仍分别等待自己的完整 CI 结果；旧源码或本机平台 fixture 的通过均不替代它们。
+
+`e7cbf37` 的 Linux 快速矩阵随后在不同 profile/projects 的测试 fixture 中遇到目录身份派生锁端口碰撞，保守返回 BUSY；该次失败继续保留，不推断具体锁持有者。`988a064` 仅为 fixture 选择不冲突的临时目录身份，保留原成功、互斥和数据保护断言，并新增碰撞回归；产品锁协议及保守 BUSY 约定未改变。主线 `988a064` 本机全量 512/512 与本分支 548/548 已通过，但 `988a064` 及本独立分支最终提交仍须核对各自 CI，不能用 `6ae4103` 原生通过替代新提交的快速矩阵结果。
 
 本轮没有执行 sudo/drop_caches、真实计费 API、真实旧凭据迁移、Tauri 原生 GUI 验收、Windows JobObject 验收、干净目标机安装、发行签名/公证或新的 Linux 冷启动/PSS 同口径性能比较。历史 P0 报告和 evidence 保留为历史记录，不用本轮加固追认旧性能数字。
 
