@@ -29,8 +29,10 @@ export const TEMPLATE_PRESETS: Record<string, { label: string; output: 'image' |
     submitPath: '/v1/image_to_video', submitBody: '{"model":"{{model}}","promptText":"{{prompt}}","promptImage":"{{image}}","duration":{{duration|5}}}',
     extraHttpName: 'X-Runway-Version', extraHttpValue: '2024-11-06', idPath: 'id', pollPath: '/v1/tasks/{{id}}', statusPath: 'status', resultPath: 'output[]', errorPath: 'failure',
     statusMap: 'PENDING:queued,THROTTLED:queued,RUNNING:running,SUCCEEDED:succeeded,FAILED:failed,CANCELLED:cancelled' } },
-  'replicate': { label: 'Replicate（任意图片/视频/音频模型）', output: 'image', template: {
-    submitPath: '/models/{{model}}/predictions', submitBody: '{"input":{"prompt":"{{prompt}}"}}', idPath: 'id', pollPath: '/predictions/{{id}}', statusPath: 'status', resultPath: 'output', errorPath: 'error', cancelPath: '/predictions/{{id}}/cancel' } },
+  'replicate': { label: 'Replicate 官方模型（owner/name）', output: 'image', template: {
+    submitPath: '/models/{{modelOwner}}/{{modelName}}/predictions', submitBody: '{"input":{"prompt":"{{prompt}}"}}', idPath: 'id', pollPath: '/predictions/{{id}}', statusPath: 'status', resultPath: 'output', errorPath: 'error', cancelPath: '/predictions/{{id}}/cancel' } },
+  'replicate-version': { label: 'Replicate 指定版本（社区模型）', output: 'image', template: {
+    submitPath: '/predictions', submitBody: '{"version":"{{model}}","input":{"prompt":"{{prompt}}"}}', idPath: 'id', pollPath: '/predictions/{{id}}', statusPath: 'status', resultPath: 'output', errorPath: 'error', cancelPath: '/predictions/{{id}}/cancel' } },
   'elevenlabs-sfx': { label: 'ElevenLabs 音效（同步二进制）', output: 'audio', template: {
     submitPath: '/v1/sound-generation', submitBody: '{"text":"{{prompt}}","duration_seconds":{{duration|3}}}', responseType: 'binary', resultMime: 'audio/mpeg', idPath: '', authHttpName: 'xi-api-key', authPrefix: '' } },
   'openai-speech': { label: 'OpenAI 兼容 TTS（/audio/speech，同步二进制）', output: 'audio', template: {

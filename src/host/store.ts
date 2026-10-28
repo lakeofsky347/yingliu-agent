@@ -14,6 +14,8 @@ import {inspectProjectPaths,portableProjectPathReason,safeRelativeProjectPath} f
 
 export interface StoreOptions {
   baseDirectory?:string;
+  /** Trusted application lease, acquired before opening/recovering or writing a project directory. */
+  claimRoot?:(root:string)=>Promise<void>;
   /** Local fault injection for storage recovery tests; never exposed as an RPC option. */
   onCommitPhase?:(phase:'staged'|'committed'|'projected')=>Promise<void>|void;
 }
@@ -116,6 +118,7 @@ export class ProjectStore {
     const root=path.join(this.baseDirectory,slug+'-'+project.id);
     await fs.mkdir(root,{recursive:false});
     try{
+      await this.options.claimRoot?.(root);
       await fs.mkdir(path.join(root,'assets'),{recursive:true});
       for(const [relative,bytes] of files){const destination=await projectPath(root,relative);await fs.mkdir(path.dirname(destination),{recursive:true});if(typeof bytes==='string'){let size=0;await pipeline(createReadStream(bytes),new Transform({transform(chunk,_encoding,callback){size+=chunk.length;callback(size>MAX_VIDEO_BYTES?new Error('工程媒体单文件超过 512 MiB'):null,chunk);}}),createWriteStream(destination,{flags:'wx'}));}else await atomicWrite(destination,bytes);}
       const saved=await this.commit(root,project,sources,{label:'创建工程'});
@@ -232,6 +235,7 @@ export class ProjectStore {
     await atomicWrite(await projectPath(root,'.studio/projected.json'),json({version:1,current:record.id}));
   }
   async open(root:string):Promise<VideoProject>{
+    await this.options.claimRoot?.(root);
     const state=await this.ensureState(root);if(!state)throw new Error('未找到工程');
     const record=await this.version(root,state.current);await this.projectVersion(root,record);
     const staging=await projectPath(root,'.studio/staging');await fs.rm(staging,{recursive:true,force:true});
@@ -268,6 +272,7 @@ export class ProjectStore {
     const slug=project.title.replace(/[^\p{L}\p{N}_-]+/gu,'-').replace(/^-|-$/g,'').slice(0,50)||'video';
     const destination=path.join(this.baseDirectory,slug+'-'+project.id);await fs.mkdir(destination,{recursive:false});
     try{
+      await this.options.claimRoot?.(destination);
       await fs.mkdir(path.join(destination,'assets'),{recursive:true});
       for(const relative of new Set(project.assets.flatMap(asset=>[asset.path,asset.originalPath].filter((file):file is string=>typeof file==='string')))){
         const source=await projectPath(root,relative),file=await projectPath(destination,relative);await fs.mkdir(path.dirname(file),{recursive:true});await fs.copyFile(source,file);

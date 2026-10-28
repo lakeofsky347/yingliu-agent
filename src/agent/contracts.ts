@@ -55,7 +55,7 @@ export type AgentContent = { type: 'text'; text: string } | { type: 'image_url';
 
 export interface ModelTurn {
   content: string; toolCalls: ToolCall[]; finish: 'stop' | 'tool_calls' | 'length' | 'other';
-  usage: { inputTokens: number; outputTokens: number }; mode: 'tools' | 'plan-json';
+  usage: { inputTokens: number; outputTokens: number }; usageKnown:boolean; mode: 'tools' | 'plan-json';
 }
 
 export interface Budget {

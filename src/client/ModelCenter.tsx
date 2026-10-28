@@ -3,6 +3,7 @@ import type { StudioApi } from '../shared/types.ts';
 import type { ConnectionInput, Modality, ModelDefinition, ModelProtocol, ModelRole, RegistrySnapshot } from '../models/contracts.ts';
 import { ROLE_OUTPUT, ROLE_PROTOCOLS } from '../models/contracts.ts';
 import { TEMPLATE_PRESETS } from '../models/template-presets.ts';
+import { ModelCostEstimate } from './ModelCostEstimate.tsx';
 
 const protocolNames:Record<ModelProtocol,string>={'chat-completions':'文本／视觉理解（Chat Completions）',images:'生图（Images Generations）','video-gateway':'生视频（映流网关 v1）',speech:'配音（Speech）','async-task':'异步任务模板（通义万相／可灵／即梦／Runway／Replicate／音频）'};
 const roleNames:Record<ModelRole,string>={director:'导演与讨论',scene:'场景代码',vision:'关键帧视觉检查',image:'图片生成',video:'视频生成',speech:'配音',music:'音乐',sfx:'音效'};
@@ -56,6 +57,7 @@ export function ModelCenter({api,blocked=false,onChanged,mediaOnly=false}:ModelC
         {connection.protocol==='chat-completions'&&<label className="vs-media-check"><input type="checkbox" checked={imageSending&&vision} disabled={disabled||!vision} onChange={event=>setImageSending(event.target.checked)}/>允许向此模型发送本轮明确选择的图片</label>}
         <label className="vs-media-check"><input type="checkbox" checked={modelEnabled} disabled={disabled} onChange={event=>setModelEnabled(event.target.checked)}/>启用此模型</label>
         <details className="vs-media-advanced"><summary>模型参数</summary><label className="vs-field"><span>默认参数（JSON 对象）</span><textarea aria-label="模型默认参数" rows={5} spellCheck={false} value={parameters} disabled={disabled} onChange={event=>setParameters(event.target.value)}/><small>填写服务接受的参数，不填写密钥或请求头。视频网关可声明 supportsCancel、maxDurationSeconds 等能力。</small></label></details>
+        {connection.protocol==='chat-completions'&&<ModelCostEstimate parameters={parameters} onChange={setParameters} disabled={disabled}/>}
         <div className="vs-media-actions"><button disabled={disabled||!modelName.trim()} onClick={()=>void saveModel()}>保存模型</button>{modelId&&<button className="vs-danger" disabled={disabled} onClick={()=>void perform(async()=>{await api.call('models.model.remove',{id:modelId});resetModel();},'模型已删除。')}>删除模型</button>}</div>
       </>}
       <h4>创作角色</h4><div className="vs-model-roles">{roles.map(role=>{const choices=catalog.models.filter(model=>model.enabled&&catalog.connections.some(value=>value.id===model.connectionId&&value.enabled&&roleProtocols[role].includes(value.protocol))&&model.outputModalities.includes(ROLE_OUTPUT[role])&&(role!=='vision'||model.inputModalities.includes('image')));return <label className="vs-field" key={role}><span>{roleNames[role]}</span><select aria-label={`${roleNames[role]}模型`} value={catalog.roles.find(binding=>binding.role===role)?.modelId||''} disabled={disabled} onChange={event=>void perform(async()=>{await api.call('models.role.bind',{role,modelId:event.target.value||null});},'角色模型已保存。')}><option value="">未指定</option>{choices.map(model=><option key={model.id} value={model.id}>{catalog.connections.find(value=>value.id===model.connectionId)?.name} · {model.name}</option>)}</select></label>;})}</div>

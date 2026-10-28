@@ -1,5 +1,4 @@
 import { fetch } from '../host/http.ts';
-import { resolve } from 'node:path';
 import { AppBackend } from './backend.ts';
 import { ProviderManager } from './model.ts';
 import { ConversationService } from './conversation.ts';
@@ -25,6 +24,7 @@ import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import { writeDurableFile } from '../agent/durable-file.ts';
+import { acquireApplicationOwner, applicationDirectories, drainOwned, type OwnerLease } from './ownership.ts';
 
 export const ENDPOINTS=new Set(['catalog','current','create','open','save','import','source','saveSource','restoreSource','preview','generate','export','cancel','environment','reveal','apply','inspect','list','focus','audio','tts','history','undo','redo','rename','duplicate','archive','tasks','retry','packs.list','app.health','app.exportProject','app.importProject','providers.get','providers.save','providers.check','chat.history','chat.send','chat.cancel']);
 for(const endpoint of ['models.list','models.connection.save','models.connection.remove','models.model.save','models.model.remove','models.role.bind','models.check','media.generate','media.list','media.get','media.retry','media.pause','media.cancel','media.apply','video.clip.save','video.clip.remove','video.clip.extract'])ENDPOINTS.add(endpoint);
@@ -36,13 +36,21 @@ export class MemorySecrets implements SecretStore {
   async set(ref:string,value:string){this.values.set(ref,value);}
   async delete(ref:string){this.values.delete(ref);}
 }
-export async function createApplication(options:{dataDirectory:string;projectsDirectory?:string;credentials:SecretStore;reveal?:(path:string)=>Promise<void>;fetch?:typeof fetch;recover?:boolean;resumeRemoteTasks?:boolean}){
-  const dataDirectory=resolve(options.dataDirectory);
+export async function createApplication(options:{dataDirectory:string;projectsDirectory?:string;credentials:SecretStore;reveal?:(path:string)=>Promise<void>;fetch?:typeof fetch;recover?:boolean;resumeRemoteTasks?:boolean;ownership?:OwnerLease}){
+  const {dataDirectory,projectsDirectory}=applicationDirectories(options);
+  const ownership=options.ownership??await acquireApplicationOwner({dataDirectory,projectsDirectory},'application');
+  const cleanups:(()=>Promise<unknown>)[]=[];
+  try{
+  // Borrowed leases also verify the resolved roots, without taking a second listener on their own ports.
+  await ownership.claim([dataDirectory,projectsDirectory]);
   const providers=new ProviderManager(dataDirectory,options.credentials,options.fetch?{fetch:options.fetch}:{});await providers.initialize();
-  const backend=new AppBackend({...options,dataDirectory,providers:providers.host()});
+  const backend=new AppBackend({...options,dataDirectory,projectsDirectory,providers:providers.host(),claimProjectRoot:root=>ownership.claim([root],0,{existingOnly:true})});
+  cleanups.push(()=>backend.dispose());
   const conversation=new ConversationService(backend,providers,dataDirectory);
+  cleanups.push(()=>conversation.shutdown());
   await backend.call('catalog');
   const media=new MediaTaskService(dataDirectory,providers.registry,backend.mediaPort(),{fetch:options.fetch,resumeExistingTasks:options.recover!==false&&options.resumeRemoteTasks!==false});
+  cleanups.push(()=>media.dispose());
   if(options.recover!==false&&options.resumeRemoteTasks!==false)await media.recover();
   const workflowPort:WorkflowPort={
     snapshot:id=>backend.call('current',{projectId:id}),source:(id,shotId)=>backend.call('source',{projectId:id,shotId}),
@@ -60,6 +68,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
     },
   };
   const workflows=new WorkflowService(dataDirectory,media,workflowPort);
+  cleanups.push(()=>workflows.dispose());
   async function knownKeys():Promise<string[]>{const keys:string[]=[];for(const connection of providers.registry.snapshot().connections){try{const key=await providers.registry.credential(connection);if(key)keys.push(key);}catch{}}return keys;}
   /** F05: synthesize, then register the asset in the project (CAS commit) so the returned assetId is usable. Idempotent per requestId. */
   async function agentVoice(id:string,shotId:string,text:string,signal:AbortSignal,options:{expectedRevision?:number;requestId?:string}={}):Promise<{id:string;name:string;revision?:number}>{
@@ -167,6 +176,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         timeoutMs:Number(resolved.connection.requestTimeoutMs)||120000,maxTokens:Number(parameters.maxTokens)||4096,...(typeof parameters.temperature==='number'?{temperature:parameters.temperature}:{}),supportsTools:parameters.supportsTools!==false}};
     },
   });
+  cleanups.push(()=>agent.dispose());
   await agent.initialize();
   const requests=new Set<Promise<RpcResult>>();let stopping=false,disposal:Promise<void>|undefined;
   async function dispatch(endpoint:string,payload:unknown={}):Promise<RpcResult>{
@@ -235,6 +245,14 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
     if(stopping)return Promise.resolve({ok:false,error:{code:'APP_SHUTTING_DOWN',message:'应用正在关闭，请重新打开后继续'}});
     const request=dispatch(endpoint,payload);requests.add(request);void request.finally(()=>requests.delete(request));return request;
   }
-  return {backend,providers,conversation,media,workflows,agent,route,dispose(){return disposal??=(async()=>{stopping=true;await agent.dispose();await conversation.shutdown();await workflows.dispose();await media.dispose();await Promise.allSettled([...requests]);await backend.dispose();})();}};
+  return {backend,providers,conversation,media,workflows,agent,route,dispose(){return disposal??=(async()=>{
+    stopping=true;
+    try{await drainOwned([()=>agent.dispose(),()=>conversation.shutdown(),()=>workflows.dispose(),()=>media.dispose(),()=>Promise.allSettled([...requests]),()=>backend.dispose()]);}
+    finally{if(!options.ownership)await ownership.release();}
+  })();}};
+  }catch(error){
+    try{await drainOwned([...cleanups].reverse());}finally{if(!options.ownership)await ownership.release();}
+    throw error;
+  }
 }
 export type Application=Awaited<ReturnType<typeof createApplication>>;

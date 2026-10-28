@@ -19,6 +19,8 @@
 
 2026-10-27 的本地与远端核对、缺陷清单、逐项施工和本轮验收见 [工作区施工计划](docs/DEVELOPMENT-PLAN-2026-10-27.md)。本轮以 `main@5ff743e` 为基线，完善同工程智能体互斥、项目预算执行边界、角色与预算草稿保护、素材/音轨版本检查，以及同步媒体产物恢复。
 
+剩余可靠性工作与三平台原生验收入口见 [2026-10-28 剩余施工计划](docs/REMAINING-PLAN-2026-10-28.md)，本轮提交说明为 [v1.0.0](docs/DELIVERY-v1.0.0.md)。应用版本仍为 `0.5.0`。
+
 
 映流是一个本地视频创作应用。先填写影片简报，再与自己的模型讨论、构建初稿；也可以从空白节点图开始，亲手安排镜头、画面和声音。现在还可分别连接文本、生图、生视频和配音模型，在同一工程中混合代码场景与视频片段，随后预览、导出 MP4、备份和继续编辑。
 
@@ -105,6 +107,8 @@ node scripts/verify-package.mjs --layout-only
 `verify` 使用隔离数据目录和实际 localhost 模型测试网关，操作真实 Electron 界面、检查工程流转，实际捕帧、编码、完整解码并播放六秒带合成验收音的 MP4。它不请求付费供应商，不代表真实 DeepSeek 创作质量或 TTS 质量。 设置 `YINGLIU_VERIFY_EXECUTABLE` 为搬迁后的应用可执行文件绝对路径时，会直接启动该打包应用并执行同一套成片验收。结果在 `artifacts/acceptance-v03/`；源码、测试和脱敏验收摘要提交远端，凭据、项目、日志和大型媒体不提交。
 
 `verify:editor` 使用真实 Chromium、临时工程和智能体回执 fixture，检查角色/预算草稿、跨工程隔离、关闭保护、保存失败及智能体执行入口。报告和截图保存在 `artifacts/acceptance-editor-safety/`；它不调用模型，也不替代原生 Electron 或真实供应商验收。
+
+`node scripts/run-platform-acceptance.mjs` 对本机包执行完整平台验收：真实 Chrome、FFmpeg/ffprobe、Electron 桌面与系统钥匙环均为必需。脚本搬迁应用包后验证 GUI 和成片，随后验证本机源服务的模型界面、多模态制作及编辑器；只在 `artifacts/platform-acceptance/` 写出可上传的允许字段摘要。新 CI `Native and media acceptance` 为各系统安装这些环境后运行同一入口，失败或缺检查不算通过；干净机器安装和人工观片仍另行验收。
 
 `verify-package` 将本机包复制到源码目录之外，检查平台入口、相对软链接、许可证和完整依赖，再用包内 Electron 的 Node 模式启动独立服务，验证界面文件、工程创建及 ZIP 备份恢复。有图形环境时继续验证真实桌面界面与渲染；`--layout-only` 或 Linux 缺少显示服务时明确记为 `SKIP`，报告为 `PARTIAL`，不会视作桌面验收。结果保存在 `artifacts/acceptance-v03/package-verification-<platform>-<arch>.json`；临时目录和测试数据验证后清理。
 

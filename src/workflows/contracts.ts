@@ -8,6 +8,7 @@ export interface WorkflowRequest {
   textRoute?:{provider:string;model:string};ownerSessionId?:string;
 }
 export interface WorkflowModelCall {
+  id?:string;
   role:'director'|'scene'|'vision';status:'running'|'complete'|'failed';startedAt:string;finishedAt?:string;durationMs?:number;
 }
 export interface WorkflowStep {

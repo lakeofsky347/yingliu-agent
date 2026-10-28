@@ -33,7 +33,7 @@ export class StudioService {
   constructor(private ctx:HostContext,config:{baseDirectory?:string;restoreRecent?:boolean}={}){
     this.baseDirectory=resolve(config.baseDirectory??process.env.YINGLIU_PROJECTS??join(homedir(),'Documents','YingliuAgentProjects'));
     this.restoreRecent=config.restoreRecent!==false;
-    this.store=new ProjectStore({baseDirectory:this.baseDirectory});
+    this.store=new ProjectStore({baseDirectory:this.baseDirectory,claimRoot:ctx.claimProjectRoot});
     const env=detectEnvironment();this.settings={browserPath:env.browserPath,ffmpegPath:env.ffmpegPath,ffprobePath:env.ffprobePath};this.tts=defaultTtsSettings(env);
     this.initialized=this.initialize();
   }
@@ -369,5 +369,8 @@ export class StudioService {
       return {ok:true,value:await this.snapshot()};
     }catch(error){return {ok:false,error:{code:error instanceof Error&&'code' in error?String(error.code):'STUDIO_ERROR',message:error instanceof Error?error.message:String(error)}};}
   }
-  async dispose(){this.disposed=true;this.controller?.abort(new Error('应用已停止'));await this.commands;await this.job;await this.commands;await this.speech.close();await this.renderer.close();}
+  async dispose(){
+    this.disposed=true;this.controller?.abort(new Error('应用已停止'));await Promise.allSettled([this.initialized,this.commands,this.job]);await this.commands.catch(()=>{});
+    const results=await Promise.allSettled([this.speech.close(),this.renderer.close()]);const failed=results.find(result=>result.status==='rejected');if(failed?.status==='rejected')throw failed.reason;
+  }
 }
