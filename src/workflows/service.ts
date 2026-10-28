@@ -50,7 +50,7 @@ export class WorkflowService {
   private running=new Map<string,{controller:AbortController;promise:Promise<void>}>();
   private projectQueues=new Map<string,Promise<unknown>>();
   private stepStarts=new Map<string,number>();
-  private writes=Promise.resolve();private initialized?:Promise<void>;private stopped=false;
+  private writes=Promise.resolve();private initialized?:Promise<void>;private stopped=false;private disposal?:Promise<void>;
   private readonly directory:string;
   constructor(directory:string,private media:MediaTaskService,private port:WorkflowPort,private options:WorkflowServiceOptions={}){this.directory=join(directory,'workflows');}
   private initialize(){return this.initialized??=(async()=>{
@@ -115,10 +115,20 @@ export class WorkflowService {
   private async required(id:string){await this.initialize();const value=this.records.get(id);if(!value)throw new Error('协作任务不存在');return value;}
   async list(projectId?:string){await this.initialize();return [...this.records.values()].filter(item=>!projectId||item.projectId===projectId).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).map(item=>this.public(item));}
   async get(id:string){return this.public(await this.required(id));}
+  private assertOpen(){if(this.stopped)throw new Error('协作服务正在关闭');}
   private projectLock<T>(projectId:string,work:()=>Promise<T>):Promise<T>{
+    if(this.stopped)return Promise.reject(new Error('协作服务正在关闭'));
     const previous=this.projectQueues.get(projectId)??Promise.resolve();
     const next=previous.catch(()=>{}).then(work);this.projectQueues.set(projectId,next);
     void next.finally(()=>{if(this.projectQueues.get(projectId)===next)this.projectQueues.delete(projectId);}).catch(()=>{});return next;
+  }
+  private async drainProjectTerminals(projectId:string){
+    // execute() never takes this admission lock, so its terminal persistence can
+    // finish while a later run/retry/apply holds the same project's queue.
+    for(;;){
+      const finishing=[...this.running].filter(([id])=>{const record=this.records.get(id);return record?.projectId===projectId&&record.status!=='running';}).map(([,active])=>active.promise);
+      if(!finishing.length)return;await Promise.all(finishing);
+    }
   }
   private assertProjectIdle(projectId:string,except?:string){if([...this.records.values()].some(record=>record.projectId===projectId&&record.id!==except&&(record.status==='running'||this.running.has(record.id))))throw new Error('此工程已有协作制作任务');}
   private checkTaskBudget(record:StoredWorkflow,count=record.plan?.length??record.initialization?.plan.length??1){
@@ -134,33 +144,41 @@ export class WorkflowService {
     }
   }
   async run(input:WorkflowRequest):Promise<WorkflowRecord>{
-    await this.initialize();if(this.stopped)throw new Error('协作服务正在关闭');
+    await this.initialize();this.assertOpen();
     if(!input||typeof input.projectId!=='string'||typeof input.prompt!=='string'||!input.prompt.trim()||input.prompt.length>20000||!['code','image','video'].includes(input.visual))throw new Error('请填写工程、制作要求和画面类型');
     if(input.review&&!input.allowImageUpload)throw new Error('视觉检查需要明确允许本次工作流上传关键帧');
     if(input.maxTasks!==undefined&&(!Number.isSafeInteger(input.maxTasks)||input.maxTasks<1||input.maxTasks>100))throw new Error('任务上限须为 1–100');
     if(input.maxCost!==undefined&&(!Number.isFinite(input.maxCost)||input.maxCost<=0))throw new Error('费用上限须为正数');
     if((input.imageAssetIds?.length??0)>3||new Set(input.imageAssetIds).size!==(input.imageAssetIds?.length??0))throw new Error('最多选择 3 张不同参考图片');
     return this.projectLock(input.projectId,async()=>{
+    await this.drainProjectTerminals(input.projectId);this.assertOpen();
     this.assertProjectIdle(input.projectId);
-    const snapshot=await this.port.snapshot(input.projectId);if(!snapshot.project||snapshot.project.revision!==input.expectedRevision)throw Object.assign(new Error('工程版本已变化，请刷新后制作'),{code:'REVISION_CONFLICT'});
+    const snapshot=await this.port.snapshot(input.projectId);this.assertOpen();if(!snapshot.project||snapshot.project.revision!==input.expectedRevision)throw Object.assign(new Error('工程版本已变化，请刷新后制作'),{code:'REVISION_CONFLICT'});
     if(input.shotIds?.some(id=>!snapshot.project!.shots.some(shot=>shot.id===id)))throw new Error('所选镜头不存在');
     const now=new Date().toISOString(),record:StoredWorkflow={version:1,id:randomUUID(),projectId:input.projectId,request:structuredClone(input),status:'running',message:'导演正在规划',createdAt:now,updatedAt:now,startRevision:input.expectedRevision,steps:[],usage:{cost:null,generatedTasks:0},baseline:structuredClone(snapshot.project),assets:{}};
     this.records.set(record.id,record);
-    try{await this.persist(record,'created');}catch(error){record.status='failed';record.error=message(error);record.message='制作记录保存失败，尚未调用模型';await this.persist(record).catch(()=>{});throw error;}
-    this.start(record);return this.public(record);
+    return this.persistAndStart(record,'created');
     });
   }
-  private start(record:StoredWorkflow){if(this.running.has(record.id)||this.stopped)return;const controller=new AbortController();const promise=this.execute(record,controller.signal).finally(()=>this.running.delete(record.id));this.running.set(record.id,{controller,promise});void promise.catch(()=>{});}
+  private async persistAndStart(record:StoredWorkflow,checkpoint:Checkpoint='record'){
+    try{await this.persist(record,checkpoint);}catch(error){record.status='failed';record.error=message(error);record.message='制作记录保存失败，尚未启动本次执行';await this.persist(record).catch(()=>{});throw error;}
+    if(this.stopped){record.status='paused';record.message='应用正在关闭，尚未启动本次执行；已完成产物保留';await this.persist(record);throw new Error('协作服务正在关闭');}
+    // There is no await between this last shutdown check and registering the
+    // execution. dispose() therefore owns either this admission or its runner.
+    this.start(record);return this.public(record);
+  }
+  private start(record:StoredWorkflow){this.assertOpen();if(this.running.has(record.id))return;const controller=new AbortController();const promise=this.execute(record,controller.signal).finally(()=>this.running.delete(record.id));this.running.set(record.id,{controller,promise});void promise.catch(()=>{});}
   async pause(id:string){const record=await this.required(id);const active=this.running.get(id);active?.controller.abort(new Error('已停止等待'));await active?.promise;
     for(const step of record.steps)if(step.taskId){const task=await this.media.get(step.taskId);if(task.observation==='active'&&!['ready','complete','failed','cancelled'].includes(task.phase))await this.media.pause(step.taskId);}
     if(record.status!=='complete'&&record.status!=='awaiting-apply'){record.status='paused';record.message='已暂停本地制作；云端生成可能仍在执行';await this.persist(record);}return this.public(record);}
   async retry(id:string){const record=await this.required(id);return this.projectLock(record.projectId,async()=>{
-    if(record.status==='complete')return this.public(record);const finishing=this.running.get(id);if(finishing){if(record.status==='running')return this.public(record);await finishing.promise;}if(this.stopped)throw new Error('协作服务正在关闭');this.assertProjectIdle(record.projectId,id);
+    await this.drainProjectTerminals(record.projectId);this.assertOpen();
+    if(record.status==='complete'||record.status==='running'&&this.running.has(id))return this.public(record);this.assertProjectIdle(record.projectId,id);
     for(const step of record.steps)if(step.status==='failed'||step.status==='running'){
-      if(step.taskId){const task=await this.media.get(step.taskId);if(['failed','cancelled'].includes(task.phase)){step.previousTaskIds=[...(step.previousTaskIds??[]),step.taskId];delete step.taskId;step.mediaAttempt=(step.mediaAttempt??0)+1;}}
+      if(step.taskId){const task=await this.media.get(step.taskId);this.assertOpen();if(['failed','cancelled'].includes(task.phase)){step.previousTaskIds=[...(step.previousTaskIds??[]),step.taskId];delete step.taskId;step.mediaAttempt=(step.mediaAttempt??0)+1;}}
       step.status='pending';
     }
-    record.status='running';delete record.error;record.message='继续制作，复用已完成产物';await this.persist(record);this.start(record);return this.public(record);
+    record.status='running';delete record.error;record.message='继续制作，复用已完成产物';return this.persistAndStart(record);
   });}
   private step(record:StoredWorkflow,kind:WorkflowStep['kind'],shotId?:string){let step=record.steps.find(item=>item.kind===kind&&item.shotId===shotId);if(!step){step={id:randomUUID(),kind,shotId,status:'pending',message:'等待处理'};record.steps.push(step);}return step;}
   private async finishInitialization(record:StoredWorkflow){
@@ -317,10 +335,16 @@ export class WorkflowService {
       await ensureRevision();step.review=await this.text(record,step,'vision',JSON.stringify({request:record.request.prompt,revision:project.revision,candidate:!!candidate,frames:selected,instruction:'检查实际候选关键帧的文字可读性、构图和一致性，指出可执行改进。只检查这些帧，不宣称看过完整视频。'}),signal,images);signal.throwIfAborted();await ensureRevision();step.reviewCandidateHash=candidateHash;step.status='complete';step.message='已检查 '+images.length+' 张实际'+(candidate?'候选':'')+'关键帧';await this.persist(record);
     }catch(error){step.status=signal.aborted?'pending':'failed';step.message=message(error);await this.persist(record);throw error;}}
   async apply(id:string,expectedRevision:number){const record=await this.required(id);return this.projectLock(record.projectId,async()=>{
-    if(this.stopped)throw new Error('协作服务正在关闭');const finishing=this.running.get(id);if(finishing){if(record.status==='running')throw new Error('制作仍在运行');await finishing.promise;}this.assertProjectIdle(record.projectId,id);
+    await this.drainProjectTerminals(record.projectId);this.assertOpen();
+    if(record.status==='running'&&this.running.has(id))throw new Error('制作仍在运行');this.assertProjectIdle(record.projectId,id);
     if(record.status!=='awaiting-apply')throw new Error('此制作没有待采用结果');
-    if(!Number.isSafeInteger(expectedRevision)||(await this.port.snapshot(record.projectId)).project?.revision!==expectedRevision)throw Object.assign(new Error('工程版本冲突；请刷新后采用候选结果'),{code:'REVISION_CONFLICT'});
-    record.adoptionRevision=expectedRevision;record.status='running';delete record.error;record.message=record.request.review?'按最新版本重新检查候选关键帧':'正在采用候选结果';await this.persist(record);this.start(record);return this.public(record);
+    if(!Number.isSafeInteger(expectedRevision))throw Object.assign(new Error('工程版本冲突；请刷新后采用候选结果'),{code:'REVISION_CONFLICT'});
+    const snapshot=await this.port.snapshot(record.projectId);this.assertOpen();if(snapshot.project?.revision!==expectedRevision)throw Object.assign(new Error('工程版本冲突；请刷新后采用候选结果'),{code:'REVISION_CONFLICT'});
+    record.adoptionRevision=expectedRevision;record.status='running';delete record.error;record.message=record.request.review?'按最新版本重新检查候选关键帧':'正在采用候选结果';return this.persistAndStart(record);
   });}
-  async dispose(){this.stopped=true;for(const active of this.running.values())active.controller.abort(new Error('应用正在关闭'));await Promise.allSettled([...this.running.values()].map(item=>item.promise));await this.writes;}
+  dispose(){
+    if(this.disposal)return this.disposal;this.stopped=true;for(const active of this.running.values())active.controller.abort(new Error('应用正在关闭'));
+    const admissions=[...this.projectQueues.values()];
+    return this.disposal=(async()=>{await Promise.allSettled(admissions);await Promise.allSettled([...this.running.values()].map(item=>item.promise));await this.writes;})();
+  }
 }

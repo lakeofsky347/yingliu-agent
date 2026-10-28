@@ -6,6 +6,7 @@ import {dirname,join,resolve} from 'node:path';
 import {spawn,spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {packageLayout} from './package-layout.mjs';
+import {probeBrowserVersion} from './acceptance-browser.mjs';
 import {stageEnvironment} from './acceptance-environment.mjs';
 import {failureCategory,platformSummary,safeLabel,summarizePhase} from './acceptance-summary.mjs';
 
@@ -18,6 +19,7 @@ const phases=[],manifest=JSON.parse(await readFile(join(root,'package.json'),'ut
 const metadata={applicationVersion:manifest.version,commit:spawnSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).stdout?.trim(),platform:process.platform,architecture:process.arch,node:process.versions.node,workingTreeDirty:!!spawnSync('git',['status','--porcelain=v1','--untracked-files=normal'],{cwd:root,encoding:'utf8'}).stdout?.trim()};
 async function run(phase,script,args=[],extraEnv={},timeoutMs=12*60*1000){
   const started=Date.now(),phaseEnv=stageEnvironment(temporary,phase,{...env,...extraEnv}),phaseOutput=phaseEnv.YINGLIU_ACCEPTANCE_OUTPUT;await mkdir(phaseOutput,{recursive:true});
+  console.log('RUN '+phase);
   const child=spawn(process.execPath,[...(script.endsWith('.ts')?['--import','tsx']:[]),join(root,'scripts',script),...args],{cwd:root,env:phaseEnv,stdio:['ignore','pipe','pipe'],windowsHide:true,detached:process.platform!=='win32'});
   const log=join(phaseOutput,'command.log');let captured='',timedOut=false;
   const capture=chunk=>{captured=(captured+chunk).slice(-2_000_000);};child.stdout.on('data',capture);child.stderr.on('data',capture);
@@ -26,6 +28,7 @@ async function run(phase,script,args=[],extraEnv={},timeoutMs=12*60*1000){
   await writeFile(log,captured);const execution={exitCode,timedOut,elapsedMs:Date.now()-started,diagnosticCategory:failureCategory(captured)};
   const reportFile=phase==='package'?'package-verification.json':phase==='native'?'verification.json':phase==='models'?'ui-verification.json':'report.json';
   let report;try{report=JSON.parse(await readFile(join(phaseOutput,reportFile),'utf8'));}catch{/* Missing/invalid reports are explicit failures. */}
+  try{const progress=JSON.parse(await readFile(join(phaseOutput,'progress.json'),'utf8'));if(typeof progress.location==='string')execution.location=progress.location;}catch{/* A missing diagnostic never upgrades a failed phase. */}
   const summary=summarizePhase(phase,execution,report);phases.push(summary);console.log(`${summary.status} ${phase}${summary.failureCode?' '+summary.failureCode:''}`);
   return summary;
 }
@@ -35,8 +38,13 @@ try{
   const tools={browser,ffmpeg:findToolExecutable?.('ffmpeg')||'ffmpeg',ffprobe:findToolExecutable?.('ffprobe')||'ffprobe'};
   const checks=[];let ready=true;
   for(const [name,executable]of Object.entries(tools)){
-    const probe=executable?spawnSync(executable,[name==='browser'?'--version':'-version'],{env,encoding:'utf8',timeout:15000,windowsHide:true}):{status:null};
-    const passed=probe.status===0;checks.push({name:`${name} executable`,status:passed?'PASS':'FAIL'});if(passed)metadata[name]=(probe.stdout||probe.stderr).split(/\r?\n/)[0];else ready=false;
+    if(name==='browser'){
+      const probe=await probeBrowserVersion(executable,{env});checks.push({name:'browser executable',status:probe.status,...(probe.diagnosticCategory?{diagnosticCategory:probe.diagnosticCategory}:{})});
+      if(probe.status==='PASS')metadata.browser=probe.version;else ready=false;
+    }else{
+      const probe=spawnSync(executable,['-version'],{env,encoding:'utf8',timeout:15000,windowsHide:true});
+      const passed=probe.status===0;checks.push({name:`${name} executable`,status:passed?'PASS':'FAIL',...(!passed?{diagnosticCategory:'EXECUTABLE_MISSING'}:{})});if(passed)metadata[name]=(probe.stdout||probe.stderr).split(/\r?\n/)[0];else ready=false;
+    }
   }
   const display=process.platform!=='linux'||!!env.DISPLAY||!!env.WAYLAND_DISPLAY;checks.push({name:'native display session',status:display?'PASS':'FAIL'});ready&&=display;
   const bundleExists=existsSync(join(options.bundle,layout.executableRelative));checks.push({name:'host application bundle',status:bundleExists?'PASS':'FAIL'});ready&&=bundleExists;

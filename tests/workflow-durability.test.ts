@@ -15,27 +15,28 @@ import type {MediaRequest,MediaTask} from '../src/jobs/contracts.ts';
 
 const clone=<T>(value:T):T=>structuredClone(value);
 const ioError=()=>Object.assign(new Error('隔离持久化故障 EIO（非实机断电）'),{code:'EIO'});
+function latch(){let resolve!:()=>void;const promise=new Promise<void>(accept=>{resolve=accept;});return {promise,resolve};}
 async function until<T>(read:()=>Promise<T>,check:(value:T)=>boolean){for(let count=0;count<600;count++){const value=await read();if(check(value))return value;await new Promise(resolve=>setTimeout(resolve,5));}throw new Error('durability fixture did not settle');}
 
 async function fixture(t:TestContext){
   const directory=await fs.mkdtemp(join(tmpdir(),'yingliu-workflow-durability-'));let project=createProject('回执耐久性隔离工程');project.shots=project.shots.slice(0,1);project.shotOrder=project.shots.map(shot=>shot.id);
   let inject:WorkflowServiceOptions['onPersistPhase'];const events:WorkflowPersistenceEvent[]=[],calls={director:0,scene:0,vision:0,voice:0,commit:0,media:0,ack:0};
-  const hooks={voice:undefined as undefined|(()=>Promise<void>),scene:undefined as undefined|(()=>void),textOutput:undefined as undefined|((role:'director'|'scene'|'vision')=>string|undefined),loseCommitResponse:false,frame:'fixture frame'};
+  const hooks={voice:undefined as undefined|(()=>Promise<void>),scene:undefined as undefined|(()=>void),snapshot:undefined as undefined|(()=>Promise<void>),mediaGet:undefined as undefined|(()=>Promise<void>),stage:undefined as undefined|(()=>Promise<void>),textOutput:undefined as undefined|((role:'director'|'scene'|'vision')=>string|undefined),loseCommitResponse:false,frame:'fixture frame'};
   const tasks=new Map<string,MediaTask>(),stable=new Map<string,string>();
   const media={
     async generate(input:MediaRequest){const previous=stable.get(input.clientRequestId!);if(previous)return clone(tasks.get(previous)!);const id='media-'+(++calls.media),now=new Date().toISOString();
       const task={version:1,id,projectId:project.id,shotId:input.shotId,clientRequestId:input.clientRequestId,startRevision:input.expectedRevision,operation:input.operation,prompt:input.prompt,imageAssetIds:[],inputHashes:[],phase:'ready',observation:'paused',progress:1,message:'fixture',createdAt:now,updatedAt:now,files:[],connection:{id:'fixture',model:'fixture'},model:{model:'fixture'}} as unknown as MediaTask;
       tasks.set(id,task);stable.set(input.clientRequestId!,id);return clone(task);},
-    async get(id:string){return clone(tasks.get(id)!);},async retry(id:string){return clone(tasks.get(id)!);},async prepare(){return [];},
+    async get(id:string){await hooks.mediaGet?.();return clone(tasks.get(id)!);},async retry(id:string){return clone(tasks.get(id)!);},async prepare(){return [];},
     async apply(id:string){calls.ack++;const task=tasks.get(id)!;task.phase='complete';return clone(task);},
   } as unknown as MediaTaskService;
   const snapshot=()=>({project:clone(project),root:directory,task:null,previewUrl:null,previewRevision:null,providers:[],recent:[],environment:{browserPath:'',ffmpegPath:'',ffprobePath:'',browserAvailable:false,ffmpegAvailable:false,ffprobeAvailable:false}} satisfies StudioSnapshot);
   const audio:Asset={id:'voice-fixture',kind:'audio',name:'隔离配音素材',description:'not real provider acceptance',path:'assets/voice-fixture.wav',duration:1,mime:'audio/wav'};
   const port:WorkflowPort={
-    async snapshot(){return snapshot();},async source(){return defaultSceneSource();},
+    async snapshot(){await hooks.snapshot?.();return snapshot();},async source(){return defaultSceneSource();},
     async text(role){calls[role]++;const override=hooks.textOutput?.(role);if(override!==undefined)return override;if(role==='director')return JSON.stringify({shots:project.shots.map(shot=>({shotId:shot.id,prompt:'隔离画面',narration:'隔离旁白'}))});if(role==='vision')return '仅检查所提供的fixture帧';hooks.scene?.();return JSON.stringify({...defaultSceneSource(),html:'<main>隔离源码</main>'});},
     async voice(){calls.voice++;await hooks.voice?.();return clone(audio);},
-    async stageMedia(_id,task){return [{id:'asset-'+task.id,kind:'image',name:'fixture image',description:'fixture',path:'assets/'+task.id+'.png',mime:'image/png'}];},
+    async stageMedia(_id,task){await hooks.stage?.();return [{id:'asset-'+task.id,kind:'image',name:'fixture image',description:'fixture',path:'assets/'+task.id+'.png',mime:'image/png'}];},
     async capture(){const bytes=Buffer.from(hooks.frame);return {bytes,mime:'image/png',sha256:createHash('sha256').update(bytes).digest('hex')};},
     async commit(_id,expectedRevision,next){if(project.revision!==expectedRevision)throw Object.assign(new Error('fixture revision conflict'),{code:'REVISION_CONFLICT'});calls.commit++;project=clone(next);project.revision=expectedRevision+1;if(hooks.loseCommitResponse){hooks.loseCommitResponse=false;throw new Error('fixture response lost after project commit');}return snapshot();},
   };
@@ -48,6 +49,90 @@ async function fixture(t:TestContext){
     async restart(){await service.dispose();inject=undefined;service=new WorkflowService(directory,media,port,options);services.push(service);},
     file(id:string){return join(directory,'workflows',id+'.json');},
   };
+}
+
+for(const status of ['complete','failed','paused','awaiting-apply'] as const)for(const phase of ['before-write','after-write'] as const){
+  test(`${status} 终态 ${phase} 尚未排空时，新制作等待旧回执后立即启动`,async t=>{
+    const f=await fixture(t),entered=latch(),release=latch();let held=false,oldId='',nextState='pending';
+    if(status==='failed')f.hooks.textOutput=role=>role==='director'?'{"shots":[]}':undefined;
+    if(status==='awaiting-apply')f.hooks.scene=()=>{f.project={...f.project,revision:f.project.revision+1};};
+    f.inject=async event=>{if(!held&&event.record.status===status&&event.checkpoint==='record'&&event.phase===phase){held=true;oldId=event.workflowId;entered.resolve();await release.promise;}};
+    const old=await f.service.run(f.request(status==='paused'?{maxCost:1}:{}));await entered.promise;assert.equal(oldId,old.id);assert.equal((await f.service.get(old.id)).status,status);
+    f.hooks.textOutput=undefined;f.hooks.scene=undefined;
+    const next=f.service.run(f.request({visual:'image'}));const observed=next.then(record=>{nextState='accepted';return record;},error=>{nextState='rejected';throw error;});void observed.catch(()=>{});
+    try{
+      // A turn boundary lets the queued admission run; the actual synchronization
+      // is the persistence latch above, with no timing delay masking the race.
+      await new Promise<void>(resolve=>setImmediate(resolve));assert.equal(nextState,'pending','new work must wait for the previous execution to finish persisting');assert.equal(f.calls.media,0);
+    }finally{release.resolve();}
+    const started=await observed;assert.notEqual(started.id,old.id);assert.equal(JSON.parse(await fs.readFile(f.file(old.id),'utf8')).status,status);const done=await f.settled(started.id);assert.equal(done.status,'complete',done.error);assert.equal(f.calls.media,1);
+  });
+}
+
+test('旧失败终态的最终持久化仍报错时，新制作传播错误并且不调用模型',async t=>{
+  const f=await fixture(t),entered=latch(),release=latch();let held=false;
+  f.hooks.textOutput=role=>role==='director'?'{"shots":[]}':undefined;
+  f.inject=async event=>{if(!held&&event.record.status==='failed'&&event.checkpoint==='record'&&event.phase==='before-write'){held=true;entered.resolve();await release.promise;throw ioError();}};
+  await f.service.run(f.request());await entered.promise;const next=f.service.run(f.request({visual:'image'}));const rejected=assert.rejects(next,{code:'EIO'});release.resolve();await rejected;assert.equal((await f.service.list()).length,1);assert.equal(f.calls.director,1);assert.equal(f.calls.media,0);
+});
+
+for(const action of ['run','retry','apply'] as const){
+  test(`${action} 等待终态回执期间关闭服务，不再创建或重启制作`,async t=>{
+    const f=await fixture(t),entered=latch(),release=latch(),status=action==='run'?'complete':action==='retry'?'failed':'awaiting-apply';let held=false,state='pending';
+    if(action==='retry')f.hooks.textOutput=role=>role==='director'?'{"shots":[]}':undefined;
+    if(action==='apply')f.hooks.scene=()=>{f.project={...f.project,revision:f.project.revision+1};};
+    f.inject=async event=>{if(!held&&event.phase==='before-write'&&event.checkpoint==='record'&&event.record.status===status){held=true;entered.resolve();await release.promise;}};
+    const old=await f.service.run(f.request());await entered.promise;const calls=clone(f.calls);f.hooks.textOutput=undefined;f.hooks.scene=undefined;
+    const next=action==='run'?f.service.run(f.request({visual:'image'})):action==='retry'?f.service.retry(old.id):f.service.apply(old.id,f.project.revision);
+    const rejected=assert.rejects(next,/正在关闭/);void rejected.catch(()=>{});void next.then(()=>{state='accepted';},()=>{state='rejected';});
+    let closing:Promise<void>|undefined;
+    try{await new Promise<void>(resolve=>setImmediate(resolve));assert.equal(state,'pending');closing=f.service.dispose();}finally{release.resolve();}
+    await rejected;await closing;const records=await f.service.list();assert.equal(records.length,1);assert.equal(records[0].status,status);assert.deepEqual(f.calls,calls);
+  });
+}
+
+for(const action of ['run','retry','apply'] as const){
+  test(`${action} 异步准备期间关闭，dispose 等待 snapshot/media.get 排空且不投递制作`,async t=>{
+    const f=await fixture(t),entered=latch(),release=latch();let id='';
+    if(action==='retry'){f.hooks.stage=async()=>{throw new Error('fixture staging failed');};const old=await f.service.run(f.request({visual:'image'}));id=old.id;assert.equal((await f.settled(id)).status,'failed');f.hooks.stage=undefined;}
+    if(action==='apply'){f.hooks.scene=()=>{f.project={...f.project,revision:f.project.revision+1};};const old=await f.service.run(f.request());id=old.id;assert.equal((await f.settled(id)).status,'awaiting-apply');f.hooks.scene=undefined;}
+    const gate=async()=>{entered.resolve();await release.promise;};if(action==='retry')f.hooks.mediaGet=gate;else f.hooks.snapshot=gate;
+    const calls=clone(f.calls),pending=action==='run'?f.service.run(f.request()):action==='retry'?f.service.retry(id):f.service.apply(id,f.project.revision);void pending.catch(()=>{});await entered.promise;
+    let closed=false;const closing=f.service.dispose().then(()=>{closed=true;});
+    try{await new Promise<void>(resolve=>setImmediate(resolve));assert.equal(closed,false,'dispose must wait for the accepted admission');}finally{release.resolve();}
+    await assert.rejects(pending,/正在关闭/);await closing;assert.deepEqual(f.calls,calls);const records=await f.service.list();assert.ok(records.every(record=>record.status!=='running'));assert.equal(records.length,action==='run'?0:1);
+  });
+}
+
+for(const action of ['run','retry','apply'] as const)for(const phase of ['before-write','after-write'] as const){
+  test(`${action} 启动记录 ${phase} 期间关闭，已创建记录持久化为 paused`,async t=>{
+    const f=await fixture(t),entered=latch(),release=latch();let id='',armed=false,held=false;
+    if(action==='retry'){f.hooks.textOutput=role=>role==='director'?'{"shots":[]}':undefined;const old=await f.service.run(f.request());id=old.id;assert.equal((await f.settled(id)).status,'failed');f.hooks.textOutput=undefined;}
+    if(action==='apply'){f.hooks.scene=()=>{f.project={...f.project,revision:f.project.revision+1};};const old=await f.service.run(f.request());id=old.id;assert.equal((await f.settled(id)).status,'awaiting-apply');f.hooks.scene=undefined;}
+    f.inject=async event=>{if(armed&&!held&&event.record.status==='running'&&event.phase===phase&&(action!=='run'||event.checkpoint==='created')){held=true;id=event.workflowId;entered.resolve();await release.promise;}};armed=true;
+    const calls=clone(f.calls),pending=action==='run'?f.service.run(f.request()):action==='retry'?f.service.retry(id):f.service.apply(id,f.project.revision);void pending.catch(()=>{});await entered.promise;
+    let closed=false;const closing=f.service.dispose().then(()=>{closed=true;});
+    try{await new Promise<void>(resolve=>setImmediate(resolve));assert.equal(closed,false);}finally{release.resolve();}
+    await assert.rejects(pending,/正在关闭/);await closing;assert.equal((await f.service.get(id)).status,'paused');assert.equal(JSON.parse(await fs.readFile(f.file(id),'utf8')).status,'paused');assert.deepEqual(f.calls,calls);
+  });
+}
+
+test('关闭排空同工程已接受队列，尚未执行的请求不再读取工程或创建记录',async t=>{
+  const f=await fixture(t),entered=latch(),release=latch();let snapshots=0;
+  f.hooks.snapshot=async()=>{snapshots++;entered.resolve();await release.promise;};const first=f.service.run(f.request());void first.catch(()=>{});await entered.promise;
+  const second=f.service.run(f.request());void second.catch(()=>{});await new Promise<void>(resolve=>setImmediate(resolve));let closed=false;const closing=f.service.dispose().then(()=>{closed=true;});
+  try{await new Promise<void>(resolve=>setImmediate(resolve));assert.equal(closed,false);}finally{release.resolve();}
+  await assert.rejects(first,/正在关闭/);await assert.rejects(second,/正在关闭/);await closing;assert.equal(snapshots,1);assert.equal((await f.service.list()).length,0);assert.equal(f.calls.director,0);await assert.rejects(f.service.run(f.request()),/正在关闭/);
+});
+
+for(const action of ['retry','apply'] as const){
+  test(`${action} 启动检查点保存失败时记录明确 failed，不留下无执行器的 running`,async t=>{
+    const f=await fixture(t);let id='';
+    if(action==='retry'){f.hooks.textOutput=role=>role==='director'?'{"shots":[]}':undefined;const old=await f.service.run(f.request());id=old.id;assert.equal((await f.settled(id)).status,'failed');f.hooks.textOutput=undefined;}
+    else{f.hooks.scene=()=>{f.project={...f.project,revision:f.project.revision+1};};const old=await f.service.run(f.request());id=old.id;assert.equal((await f.settled(id)).status,'awaiting-apply');f.hooks.scene=undefined;}
+    let failed=false;f.inject=event=>{if(!failed&&event.record.status==='running'&&event.phase==='before-write'){failed=true;throw ioError();}};const calls=clone(f.calls);
+    await assert.rejects(action==='retry'?f.service.retry(id):f.service.apply(id,f.project.revision),{code:'EIO'});assert.equal((await f.service.get(id)).status,'failed');assert.equal(JSON.parse(await fs.readFile(f.file(id),'utf8')).status,'failed');assert.deepEqual(f.calls,calls);
+  });
 }
 
 for(const phase of ['before-write','after-write'] as const){

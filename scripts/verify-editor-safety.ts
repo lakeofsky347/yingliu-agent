@@ -48,7 +48,7 @@ try{
   };
   server=await startUiServer(application,ui);
   const executablePath=process.env.CHROME_PATH||findBrowserExecutable();assert.ok(executablePath,'缺少 Chrome/Chromium；可设置 CHROME_PATH');
-  browser=await chromium.launch({executablePath,headless:true,args:['--disable-dev-shm-usage']});
+  browser=await chromium.launch({chromiumSandbox:true,executablePath,headless:true,args:['--disable-dev-shm-usage']});
   const page=await browser.newPage({viewport:{width:1600,height:1200}});page.on('pageerror',error=>pageErrors.push(error.message));
   await page.goto(server.origin);await page.getByRole('button',{name:'草稿验收 A',exact:true}).click();await page.getByRole('tab',{name:'智能体',exact:true}).click();
   await page.getByLabel('角色名',{exact:true}).fill('A 未保存草稿');await page.getByLabel('项目费用上限',{exact:true}).fill('9');

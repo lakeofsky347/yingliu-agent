@@ -5,14 +5,22 @@
   "date": "2026-10-28",
   "timezone": "Asia/Singapore",
   "branch": "codex/workspace-improvements-20261027",
-  "validationSource": {"baseCommit": "000181eb285875b912017ca55233c19e63fa1e17", "workingTreeDirty": true},
+  "validationSource": {
+    "baseCommit": "41de6712570add499c14484739484d115fc29093",
+    "workingTreeDirty": true
+  },
   "local": {
     "platform": "darwin",
     "architecture": "arm64",
     "typecheck": "PASS",
     "build": "PASS",
     "package": "PASS",
-    "tests": {"total": 409, "passed": 409, "failed": 0, "skipped": 0},
+    "tests": {
+      "total": 447,
+      "passed": 447,
+      "failed": 0,
+      "skipped": 0
+    },
     "platformAcceptance": {
       "status": "PASS",
       "preflight": 5,
@@ -23,11 +31,30 @@
       "sourceEditorSafety": 8,
       "rendererOsSandbox": true,
       "credentialBackend": "macos_keychain",
-      "cliDesktopBusyExitCode": 9
+      "cliDesktopBusyExitCode": 9,
+      "checkedAt": "2026-10-28T09:05:44.984Z",
+      "totalChecks": 73,
+      "temporaryDataCleanup": "PASS"
     },
-    "providerEvidence": "仅本机网关、内存响应与合成凭据；未调用真实计费 API"
+    "providerEvidence": "仅本机网关、内存响应与合成凭据；未调用真实计费 API",
+    "workflowDurabilityCases": 74,
+    "linuxOwnedJobCases": 4,
+    "previewRecoveryCases": {
+      "passed": 3,
+      "failedBeforeFix": 3,
+      "browser": "real Chromium and React"
+    },
+    "recoveryEvidence": "最终真实无限循环恢复验收通过；原单次超时未保留完整末态，不声称精确根因已证明。另3项确定性Preview缺陷修前失败、修后通过。"
   },
   "remoteAcceptance": "按此分支推送后对应的快速矩阵与原生媒体 Actions 独立核对",
   "separateExperimentalBranch": "codex/tauri-p0-hardening-20261028",
-  "notVerified": ["真实供应商与计费", "真实报价", "物理断电", "干净机器安装", "签名公证", "人工完整观片听音", "正式 Tauri 迁移"]
+  "notVerified": [
+    "真实供应商与计费",
+    "真实报价",
+    "物理断电",
+    "干净机器安装",
+    "签名公证",
+    "人工完整观片听音",
+    "正式 Tauri 迁移"
+  ]
 }
