@@ -235,11 +235,14 @@ async function dispatch(ctx: Ctx, pos: string[]): Promise<{ data: unknown; exit?
         if (envName && !process.env[envName]) throw new CliError('USAGE', `环境变量 ${envName} 未设置`);
         await ctx.secrets.check();
         const name = str(f, 'name', true)!, baseUrl = str(f, 'base-url', true)!, modelName = str(f, 'model', true)!;
+        // Vision binding requires an image input. Image sending must also be on, or visual review throws「图片发送未启用」.
+        const input: Modality[] = role === 'vision' ? ['text', 'image'] : ['text'];
+        const parameters: Record<string, boolean> = role === 'vision' ? { enableVision: true } : {};
         let conn: any, model: any, bound = false;
         try {
           conn = await call(ctx, 'models.connection.save', { name, protocol, baseUrl, auth: envName ? 'bearer' : 'none' });
           if (envName) { await ctx.secrets.bind(conn.credentialRef, envName); bound = true; }
-          model = await call(ctx, 'models.model.save', { connectionId: conn.id, model: modelName, inputModalities: ['text'], outputModalities: [output], parameters: {} });
+          model = await call(ctx, 'models.model.save', { connectionId: conn.id, model: modelName, inputModalities: input, outputModalities: [output], parameters });
           if (role !== 'none') await call(ctx, 'models.role.bind', { role, modelId: model.id });
         } catch (error) {
           if (model) await call(ctx, 'models.model.remove', { id: model.id }).catch(() => {});
