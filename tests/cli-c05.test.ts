@@ -12,12 +12,26 @@ test('C05: models add derives modality and default role from the protocol (image
     assert.equal(r.code, 0, protocol + ' ' + r.out); assert.equal(r.json.data.role, role);
     const list = (await cli(['models', 'list'])).json.data;
     const model = list.models.find((m: { id: string }) => m.id === r.json.data.modelId); assert.deepEqual(model.outputModalities, [output], protocol);
+    assert.deepEqual(model.inputModalities, ['text'], protocol); assert.equal(model.parameters.enableVision, undefined, protocol);
     assert.equal(list.roles.find((b: { role: string }) => b.role === role)?.modelId, r.json.data.modelId);
   }
   // async-task requires an explicit role or output modality
   const music = await cli(['models', 'add', '--name', 'mu', '--protocol', 'async-task', '--base-url', 'http://example.invalid/v1', '--model', 'meta/musicgen', '--role', 'music']);
   assert.equal(music.code, 0, music.out);
   assert.deepEqual((await cli(['models', 'list'])).json.data.models.find((m: { id: string }) => m.id === music.json.data.modelId).outputModalities, ['audio']);
+}));
+
+test('C05: vision role is saved with image input and image sending, then bound', () => withCliEnv(async () => {
+  const r = await cli(['models', 'add', '--name', 'vis', '--protocol', 'chat-completions', '--role', 'vision', '--base-url', 'http://example.invalid/v1', '--model', 'vision-test']);
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.equal(r.json.data.role, 'vision');
+  assert.equal(r.json.data.outputModality, 'text');
+  const list = (await cli(['models', 'list'])).json.data;
+  const model = list.models.find((m: { id: string }) => m.id === r.json.data.modelId);
+  assert.deepEqual(model.inputModalities, ['text', 'image']);
+  assert.deepEqual(model.outputModalities, ['text']);
+  assert.equal(model.parameters.enableVision, true);
+  assert.equal(list.roles.find((b: { role: string }) => b.role === 'vision')?.modelId, r.json.data.modelId);
 }));
 
 test('C05: an incompatible or invalid request is rejected by precheck and leaves no residue', () => withCliEnv(async () => {
