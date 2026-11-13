@@ -30,6 +30,7 @@ export class StudioService {
   private readonly restoreRecent:boolean;
   private readonly speech=new SpeechSynthesizer();
   private audioUrl:string|null=null;
+  private currentExports?:{project:VideoProject;ids:Promise<string[]>};
   private tts:TtsSettings;
   constructor(private ctx:HostContext,config:{baseDirectory?:string;restoreRecent?:boolean}={}){
     this.baseDirectory=resolve(config.baseDirectory??process.env.YINGLIU_PROJECTS??join(homedir(),'Documents','YingliuAgentProjects'));
@@ -44,7 +45,22 @@ export class StudioService {
     const recent=this.restoreRecent?await this.store.recent():[];
     if(recent[0])try{this.project=await this.store.open(recent[0].path);this.root=recent[0].path;await this.recoverTask();await this.refreshPreview();}catch{/* Recent path may have been moved; keep the picker usable. */}
   }
-  async snapshot():Promise<StudioSnapshot>{await this.initialized;const credentials=await inspectCredential(this.ctx.credentials,'YINGLIU_TTS_API_KEY');return structuredClone({project:this.project,root:this.root,task:this.task,previewUrl:this.previewUrl,previewRevision:this.previewRevision,assetBaseUrl:this.assetBaseUrl,audioUrl:this.audioUrl,tts:{...this.tts,apiKey:undefined},ttsConfigured:credentials.hasKey,credentialStatus:credentials.credentialStatus,providers:this.providers,environment:detectEnvironment(this.settings),recent:await this.store.recent()});}
+  async snapshot():Promise<StudioSnapshot>{
+    await this.initialized;const credentials=await inspectCredential(this.ctx.credentials,'YINGLIU_TTS_API_KEY');
+    const {project,root,task,previewUrl,previewRevision,assetBaseUrl,audioUrl,tts,providers}=this;
+    let currentExportIds:Promise<string[]>|undefined;
+    if(project&&root){
+      // Reuse the comparison while polling this immutable committed project version.
+      if(this.currentExports?.project!==project){
+        const ids=this.store.currentExportIds(root,project).catch(()=>project.outputs.filter(output=>output.revision===project.revision).map(output=>output.id));
+        this.currentExports={project,ids};
+      }
+      currentExportIds=this.currentExports.ids;
+    }
+    const environment=detectEnvironment(this.settings);
+    const [ids,recent]=await Promise.all([currentExportIds,this.store.recent()]);
+    return structuredClone({project,root,task,previewUrl,previewRevision,assetBaseUrl,currentExportIds:ids,audioUrl,tts:{...tts,apiKey:undefined},ttsConfigured:credentials.hasKey,credentialStatus:credentials.credentialStatus,providers,environment,recent});
+  }
   /** Trusted host port: generated paths never cross the public RPC or model tool surface. */
   async inspectMediaProject(){await this.initialized;const {project}=this.required();return {revision:project.revision,shotIds:project.shots.map(shot=>shot.id)};}
   async readMediaImage(assetId:string,shotId?:string){await this.initialized;const {root,project}=this.required();return readProjectImage(root,project,assetId,shotId);}

@@ -64,6 +64,7 @@ export interface SecretStoreStatus {
 export interface StudioSnapshot {
   project:VideoProject|null; root:string|null; task:TaskState|null;
   previewUrl:string|null; previewRevision:number|null; assetBaseUrl?:string|null; providers:ProviderGroup[];
+  currentExportIds?:string[];
   environment:EnvironmentInfo; recent:{path:string;title:string;id:string}[];
   sessionId?:string;focus?:{shotId?:string;frame?:number};audioUrl?:string|null;tts?:TtsSettings;ttsConfigured?:boolean;credentialStatus?:SecretStoreStatus;
 }

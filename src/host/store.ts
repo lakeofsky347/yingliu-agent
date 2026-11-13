@@ -5,6 +5,7 @@ import {pipeline} from 'node:stream/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
+import {isDeepStrictEqual} from 'node:util';
 import type { Asset, EnvironmentSettings, SceneSource, Shot, VideoProject } from '../shared/types.js';
 import { createProject, defaultSceneSource, validateProject, migrateProject } from '../core/index.js';
 import {probeAudio} from './audio.js';
@@ -98,6 +99,7 @@ export function validateSources(project:VideoProject,inputs:SourceInput[]=[]):Re
   return sources;
 }
 function scenePath(shot:Shot|string):string { return typeof shot==='string'?shot:shot.sourcePath; }
+function editableContent({revision,updatedAt,outputs,...content}:VideoProject){return content;}
 
 export class ProjectStore {
   readonly baseDirectory:string;
@@ -363,6 +365,23 @@ export class ProjectStore {
     // Compatibility with earlier local snapshots that did not have revision pointers.
     for(const name of await fs.readdir(await projectPath(root,'.studio/versions'))){if(!name.endsWith('.json'))continue;const record=await this.version(root,name.slice(0,-5));if(record.project.revision===revision){await this.indexRevision(root,record);return record;}}
     throw new Error('未找到请求的工程版本');
+  }
+  /** Export records advance the transaction revision without changing the saved film. */
+  async currentExportIds(root:string,project:VideoProject):Promise<string[]>{
+    if(!project.outputs.length)return [];
+    const state=await this.state(root);
+    const matchedRevisions=new Set([project.revision]);
+    if(state){
+      const current=await this.snapshotVersion(root,state,project.revision);
+      const currentContent=editableContent(current.project);
+      for(const revision of new Set(project.outputs.map(output=>output.revision))){
+        if(revision===project.revision)continue;
+        // Older projects may no longer have every revision. Only mark known matches as current.
+        const input=await this.snapshotVersion(root,state,revision).catch(()=>undefined);
+        if(input&&isDeepStrictEqual(currentContent,editableContent(input.project))&&isDeepStrictEqual(current.sources,input.sources))matchedRevisions.add(revision);
+      }
+    }
+    return project.outputs.filter(output=>matchedRevisions.has(output.revision)).map(output=>output.id);
   }
   async readSource(root:string,shot:Shot|string,revision?:number):Promise<SceneSource> {
     const state=await this.state(root);

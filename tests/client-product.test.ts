@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createProject } from '../src/core/index.ts';
+import { compileSpec, createProject, reorderFromGraph, validateGraph } from '../src/core/index.ts';
 import { addPlacedShot, briefPayload, outputPositionWithoutOverlap } from '../src/client/project-ui.ts';
 import { RenderWatchdog } from '../src/client/preview-watchdog.ts';
 
@@ -11,6 +11,37 @@ test('adding nodes to an empty graph keeps shots and the output node apart',()=>
   let project=createProject('空图');project={...project,shots:[],shotOrder:[],graph:{positions:{'film-output':[100,140]},groups:[]}};const first=addPlacedShot(project),firstShot=first.shots[0]!,shotPosition=first.graph.positions[firstShot.id]!,outputPosition=first.graph.positions['film-output']!;assert.ok(Math.abs(outputPosition[0]-shotPosition[0])>=300);assert.equal(project.shots.length,0);
   const second=addPlacedShot(first,firstShot.id),added=second.shots.find(shot=>shot.id!==firstShot.id)!;assert.notDeepEqual(second.graph.positions[added.id],shotPosition);assert.ok(Math.abs(second.graph.positions['film-output']![0]-second.graph.positions[added.id]![0])>=300);
 });
+
+test('the first manual shot uses the brief duration and completes the output chain',()=>{
+  const project=createProject('空图');
+  project.shots=[];
+  project.shotOrder=[];
+  project.extensions.graphEdges=[];
+  project.targetDuration=3.25;
+  project.target.fps={num:24000,den:1001};
+
+  const first=addPlacedShot(project);
+  const [firstShot]=first.shots;
+  assert.deepEqual(first.extensions.graphEdges,[{from:firstShot.id,to:'film-output'}]);
+  assert.equal(compileSpec(first).durationFrames,78);
+  assert.deepEqual(project.extensions.graphEdges,[]);
+
+  const second=addPlacedShot(first,firstShot.id);
+  const newShot=second.shots[1];
+  assert.equal(second.shots[0].durationFrames,78);
+  assert.equal(newShot.durationFrames,240);
+  assert.deepEqual(second.extensions.graphEdges,[
+    {from:firstShot.id,to:newShot.id},
+    {from:newShot.id,to:'film-output'},
+  ]);
+  assert.equal(compileSpec(second).durationFrames,318);
+
+  const disconnected=reorderFromGraph(first,[]);
+  const extended=addPlacedShot(disconnected);
+  assert.equal(validateGraph(extended).ok,false);
+  assert.deepEqual(extended.extensions.graphEdges,[{from:firstShot.id,to:extended.shots[1].id}]);
+});
+
 test('render timeout cannot be postponed indefinitely by subsequent render requests',async()=>{
   let timedOut=0;const guard=new RenderWatchdog(()=>timedOut++,35);guard.arm();await new Promise(resolve=>setTimeout(resolve,20));guard.arm();await new Promise(resolve=>setTimeout(resolve,25));assert.equal(timedOut,1);guard.dispose();
 });

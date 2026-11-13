@@ -1,4 +1,4 @@
-import { addShot } from '../core/index.ts';
+import { addShot, defaultShot } from '../core/index.ts';
 import type { VideoProject, VideoTarget } from '../shared/types.ts';
 export interface ProjectSummary {id:string;path:string;title:string;archived?:boolean;archivedAt?:string;updatedAt?:string;revision?:number}
 export interface PackCatalog {art:{id:string;name:string;summary:string;palette?:Record<string,string>;status?:string}[];profiles:{id:string;notes?:string;overrides:{target?:Partial<VideoTarget>}}[]}
@@ -10,9 +10,17 @@ export function briefPayload(brief:CreateBrief){
   const profile=OUTPUT_PROFILES.find(item=>item.id===brief.profile);if(!profile)throw new Error('请选择输出规格');
   return {title:brief.title.trim(),topic:brief.topic.trim(),targetDuration:brief.duration,profile:brief.profile,preset:brief.preset,blank:true,target:{width:profile.width,height:profile.height,fps:{num:30,den:1},audioMode:'none' as const,quality:'standard' as const}};
 }
-/** Newly added shots and the output node remain distinct even in an empty project. */
+/** Give an empty project a playable first shot, then keep added nodes visually distinct. */
 export function addPlacedShot(project:VideoProject,afterId?:string):VideoProject{
-  const next=addShot(project,undefined,afterId);const added=next.shots.find(shot=>!project.shots.some(old=>old.id===shot.id))!;
+  const {fps}=project.target;
+  const first=project.shots.length===0;
+  const added=defaultShot(project.shots.length,fps);
+  if(first){
+    const frames=Math.round(project.targetDuration*(fps.num/fps.den));
+    added.durationFrames=Math.max(1,Math.min(frames,1_000_000));
+  }
+  const next=addShot(project,added,afterId);
+  if(first)next.extensions.graphEdges=[{from:added.id,to:'film-output'}];
   const previous=afterId?project.graph.positions[afterId]:undefined;
   const shotPositions=project.shots.map(shot=>project.graph.positions[shot.id]).filter((value):value is [number,number]=>!!value);
   const x=previous?previous[0]+340:shotPositions.length?Math.max(...shotPositions.map(position=>position[0]))+340:100;

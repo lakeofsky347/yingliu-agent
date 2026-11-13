@@ -280,3 +280,46 @@ test('failed export retries only its recorded request and records current input 
     const tasks=await f.backend.call<{tasks:any[]}>('tasks',{projectId:id});assert.ok(tasks.tasks.every(task=>task.request.endpoint==='export'&&Object.keys(task.request.payload).length===0));const retryTask=tasks.tasks.find(task=>task.retryOf===failed.task!.id);assert.equal(retryTask.outputId,retried.project!.outputs[0]!.id);assert.equal(JSON.parse(await readFile(retried.task!.logPath!,'utf8')).outputId,retryTask.outputId);assert.ok(!(await readFile(failed.task!.logPath!,'utf8')).includes('must-not-be-journaled'));
   }finally{VideoRenderer.prototype.export=previousExport;await f.close();}
 });
+
+test('export registration keeps the input version current until editable content changes',async()=>{
+  const f=await fixture(),previousExport=VideoRenderer.prototype.export;
+  let calls=0,releaseExport:()=>void=()=>{};
+  const pauseExport=new Promise<void>(resolve=>{releaseExport=resolve;});
+  VideoRenderer.prototype.export=async(root,project)=>{
+    const id='fixture-export-'+(++calls);
+    if(calls===3)await pauseExport;
+    return {id,path:join(root,'exports',id,'video.mp4'),revision:project.revision,createdAt:new Date().toISOString(),width:1920,height:1080,frameCount:900,duration:30};
+  };
+  try{
+    const created=await f.backend.call<StudioSnapshot>('create',{title:'成片版本'}),id=created.project!.id;
+    await f.backend.call('export',{projectId:id,expectedRevision:0});
+    const first=await finished(f.backend,id);
+    assert.equal(first.project!.revision,1);
+    assert.deepEqual(first.currentExportIds,['fixture-export-1']);
+    await f.backend.call('export',{projectId:id,expectedRevision:1});
+    const second=await finished(f.backend,id);
+    assert.equal(second.project!.revision,2);
+    assert.deepEqual(second.project!.outputs.map(output=>output.revision),[0,1]);
+    assert.deepEqual(second.currentExportIds,['fixture-export-1','fixture-export-2']);
+
+    await f.backend.dispose();
+    const restarted=new AppBackend({dataDirectory:f.dataDirectory,providers,credentials:f.credentials});
+    try{
+      const reopened=await restarted.call<StudioSnapshot>('current',{projectId:id});
+      assert.deepEqual(reopened.currentExportIds,second.currentExportIds);
+      await restarted.call('export',{projectId:id,expectedRevision:2});
+      const edited=await restarted.call<StudioSnapshot>('save',{projectId:id,expectedRevision:2,project:{...reopened.project!,title:'渲染中编辑'}});
+      assert.deepEqual(edited.currentExportIds,[]);
+      releaseExport();
+      const third=await finished(restarted,id);
+      assert.equal(third.project!.outputs.at(-1)?.revision,2);
+      assert.deepEqual(third.currentExportIds,[]);
+
+      await restarted.call('export',{projectId:id,expectedRevision:4});
+      const fourth=await finished(restarted,id);
+      assert.deepEqual(fourth.currentExportIds,['fixture-export-4']);
+      const withSource=await restarted.call<StudioSnapshot>('saveSource',{projectId:id,expectedRevision:5,shotId:created.project!.shots[0]!.id,source:{...defaultSceneSource(),html:'<div>只修改源码</div>'}});
+      assert.deepEqual(withSource.currentExportIds,[]);
+    }finally{releaseExport();await restarted.dispose();}
+  }finally{VideoRenderer.prototype.export=previousExport;await f.close();}
+});
