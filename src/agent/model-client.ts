@@ -1,6 +1,7 @@
 import { fetch } from '../host/http.ts';
 import { randomUUID } from 'node:crypto';
 import type { AgentMessage, AgentTool, ModelTurn, ToolCall } from './contracts.ts';
+import { chatCompletionTokenLimit } from '../models/provider-defaults.ts';
 
 export interface ChatConfig {
   baseUrl: string; model: string; key?: string; timeoutMs: number; temperature?: number; maxTokens: number;
@@ -46,10 +47,14 @@ export function parsePlanJson(text: string): { content: string; toolCalls: ToolC
 
 export async function chatTurn(config: ChatConfig, system: string, messages: AgentMessage[], tools: AgentTool[], signal: AbortSignal, fetchImpl: typeof fetch = fetch): Promise<ModelTurn> {
   const mode = config.supportsTools ? 'tools' : 'plan-json';
+  // Old saved runs can still contain image blocks. Director requests only use their text.
+  const textMessages=messages.map(message=>Array.isArray(message.content)
+    ? {...message,content:message.content.flatMap(part=>part.type==='text'?[part.text]:[]).join('\n')}
+    : message);
   const body: Record<string, unknown> = {
-    model: config.model, max_tokens: config.maxTokens, stream: false,
+    model: config.model, ...chatCompletionTokenLimit(config.baseUrl,config.maxTokens), stream: false,
     ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
-    messages: [{ role: 'system', content: mode === 'tools' ? system : system + '\n\n' + planJsonSystem(tools) }, ...(mode === 'tools' ? messages : flattenForPlan(messages))],
+    messages: [{ role: 'system', content: mode === 'tools' ? system : system + '\n\n' + planJsonSystem(tools) }, ...(mode === 'tools' ? textMessages : flattenForPlan(textMessages))],
   };
   if (mode === 'tools' && tools.length) { body.tools = toolSchemas(tools); body.tool_choice = 'auto'; }
   const response = await fetchImpl(config.baseUrl.replace(/\/$/, '') + '/chat/completions', {

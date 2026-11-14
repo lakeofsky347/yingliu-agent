@@ -1,0 +1,104 @@
+.yl-modal.yl-onboarding-modal {
+  width: min(590px, calc(100vw - 26px));
+  color: var(--yl-text);
+  overflow: hidden;
+}
+
+.yl-onboarding-modal[open] {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.yl-onboarding-modal::backdrop {
+  background: #050b14bb;
+  backdrop-filter: blur(5px);
+}
+
+.yl-onboarding-content {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.yl-onboarding-content > p {
+  margin: 0 0 16px;
+  color: #a6bac9;
+  line-height: 1.6;
+}
+
+.yl-onboarding-steps {
+  list-style: none;
+  counter-reset: onboarding-step;
+  margin: 0;
+  padding: 0;
+}
+
+.yl-onboarding-steps li {
+  counter-increment: onboarding-step;
+  position: relative;
+  padding: 16px 0 16px 40px;
+  border-top: 1px solid var(--yl-border);
+}
+
+.yl-onboarding-steps li:last-child {
+  padding-bottom: 0;
+}
+
+.yl-onboarding-steps li::before {
+  content: counter(onboarding-step);
+  position: absolute;
+  left: 0;
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  color: var(--yl-accent);
+  border: 1px solid #365b57;
+  border-radius: 50%;
+  background: #223b39;
+}
+
+.yl-onboarding-step-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding-top: 3px;
+}
+
+.yl-onboarding-step-heading h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.yl-onboarding-step-heading span,
+.yl-onboarding-steps p {
+  color: #a6bac9;
+}
+
+.yl-onboarding-steps p {
+  margin: 6px 0 0;
+  line-height: 1.6;
+}
+
+.yl-onboarding-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 11px;
+}
+
+@media (max-width: 650px) {
+  .yl-header-actions .yl-onboarding-trigger span {
+    display: none;
+  }
+
+  .yl-onboarding-modal .yl-modal-actions {
+    margin-top: 12px;
+    padding-top: 12px;
+  }
+
+  .yl-onboarding-modal .yl-modal-actions button {
+    min-width: 0;
+  }
+}

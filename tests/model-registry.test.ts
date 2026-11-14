@@ -51,6 +51,17 @@ test('registry rejects embedded URL credentials, sensitive model parameters and 
   const model=await registry.saveModel({connectionId:'a',model:'model'});await assert.rejects(registry.resolve({modelId:model.id,connectionId:'different'}),/不匹配/);
 }));
 
+test('credential replacement cannot send a stale route key across origins',()=>fixture(async registry=>{
+  const original=await registry.saveConnection({id:'a',baseUrl:'https://old.invalid/v1',apiKey:'original-fixture'});
+  await assert.rejects(registry.saveConnection({id:'a',baseUrl:'https://new.invalid/v1'}),/更换接口域名/);
+  const sameOrigin=await registry.saveConnection({id:'a',baseUrl:'https://old.invalid/another-route'});
+  assert.equal(await registry.credential(sameOrigin),'original-fixture');
+  const replacement=await registry.saveConnection({id:'a',baseUrl:'https://new.invalid/v1',apiKey:'replacement-fixture'});
+  await assert.rejects(registry.credential(original),/连接已变更/);
+  await assert.rejects(registry.replaceCredential(original.id,original.baseUrl,'stale-fixture',async()=>assert.fail('stale updates cannot commit')),/连接已变更/);
+  assert.equal(await registry.credential(replacement),'replacement-fixture');
+}));
+
 
 test('keyless connections remain removable without a credential service',()=>fixture(async(_registry,_secrets,directory)=>{
   const unavailable=new ModelRegistry(join(directory,'offline'),{get:async()=>{throw new Error('no credential service');},set:async()=>{throw new Error('no credential service');},delete:async()=>{throw new Error('no credential service');},status:async()=>({available:false,backend:'unavailable'})});

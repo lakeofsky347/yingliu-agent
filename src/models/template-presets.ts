@@ -40,3 +40,9 @@ export const TEMPLATE_PRESETS: Record<string, { label: string; output: 'image' |
   'generic-async': { label: '通用异步任务（自定义字段）', output: 'image', template: {} },
 };
 
+export function templateAcceptsImage(parameters: Record<string, unknown>): boolean {
+  const preset = typeof parameters.preset === 'string' ? TEMPLATE_PRESETS[parameters.preset] : undefined;
+  const body = parameters.submitBody ?? preset?.template.submitBody;
+  return typeof body === 'string' && /\{\{\s*image\s*(?:\|[^}]*)?\}\}/.test(body);
+}
+

@@ -146,15 +146,23 @@ export class WorkflowService {
   async run(input:WorkflowRequest):Promise<WorkflowRecord>{
     await this.initialize();this.assertOpen();
     if(!input||typeof input.projectId!=='string'||typeof input.prompt!=='string'||!input.prompt.trim()||input.prompt.length>20000||!['code','image','video'].includes(input.visual))throw new Error('请填写工程、制作要求和画面类型');
-    if(input.review&&!input.allowImageUpload)throw new Error('视觉检查需要明确允许本次工作流上传关键帧');
+    if(input.review&&input.allowImageUpload!==true)throw new Error('视觉检查需要明确允许本次工作流上传关键帧');
     if(input.maxTasks!==undefined&&(!Number.isSafeInteger(input.maxTasks)||input.maxTasks<1||input.maxTasks>100))throw new Error('任务上限须为 1–100');
     if(input.maxCost!==undefined&&(!Number.isFinite(input.maxCost)||input.maxCost<=0))throw new Error('费用上限须为正数');
-    if((input.imageAssetIds?.length??0)>3||new Set(input.imageAssetIds).size!==(input.imageAssetIds?.length??0))throw new Error('最多选择 3 张不同参考图片');
+    const imageIds=input.imageAssetIds??[];
+    if(!Array.isArray(imageIds)||imageIds.length>3||imageIds.some(id=>typeof id!=='string')||new Set(imageIds).size!==imageIds.length)throw new Error('最多选择 3 张不同参考图片');
+    if(imageIds.length&&input.visual!=='video')throw new Error('协作制作的参考图片仅用于图生视频');
+    if(imageIds.length&&input.allowImageUpload!==true)throw new Error('图生视频需要明确允许本次上传参考图片');
     return this.projectLock(input.projectId,async()=>{
     await this.drainProjectTerminals(input.projectId);this.assertOpen();
     this.assertProjectIdle(input.projectId);
     const snapshot=await this.port.snapshot(input.projectId);this.assertOpen();if(!snapshot.project||snapshot.project.revision!==input.expectedRevision)throw Object.assign(new Error('工程版本已变化，请刷新后制作'),{code:'REVISION_CONFLICT'});
     if(input.shotIds?.some(id=>!snapshot.project!.shots.some(shot=>shot.id===id)))throw new Error('所选镜头不存在');
+    if(imageIds.length){
+      const shots=snapshot.project.shots.filter(shot=>!input.shotIds?.length||input.shotIds.includes(shot.id));
+      const allowed=new Set(shots.flatMap(shot=>[...shot.assetIds,...shot.referenceIds]));
+      if(imageIds.some(id=>!allowed.has(id)||!snapshot.project!.assets.some(asset=>asset.id===id&&asset.kind==='image')))throw new Error('参考图片必须是绑定到本次所选镜头的图片素材');
+    }
     const now=new Date().toISOString(),record:StoredWorkflow={version:1,id:randomUUID(),projectId:input.projectId,request:structuredClone(input),status:'running',message:'导演正在规划',createdAt:now,updatedAt:now,startRevision:input.expectedRevision,steps:[],usage:{cost:null,generatedTasks:0},baseline:structuredClone(snapshot.project),assets:{}};
     this.records.set(record.id,record);
     return this.persistAndStart(record,'created');

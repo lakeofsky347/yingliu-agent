@@ -5,6 +5,7 @@ import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { pipeline } from 'node:stream/promises';
 import { chromium, type Browser, type Page } from 'playwright-core';
 import type { Asset, EnvironmentInfo, EnvironmentSettings, ExportResult, SceneSource, VideoProject, VideoSpec } from '../shared/types.js';
 import { compileSpec } from '../core/index.js';
@@ -107,8 +108,10 @@ async function projectServer(root:string):Promise<ProjectServer> {
         status=206;headers['Content-Range']='bytes '+start+'-'+end+'/'+stat.size;
       }
       headers['Content-Length']=Math.max(0,end-start+1);res.writeHead(status,headers);
-      if(req.method==='HEAD'){res.end();return;}
-      const stream=file.createReadStream({start,end,autoClose:true});file=undefined;stream.on('error',()=>res.destroy());res.on('close',()=>stream.destroy());stream.pipe(res);
+      if(req.method==='HEAD'||stat.size===0){res.end();return;}
+      if(res.destroyed)return;
+      // Keep the handle until the transfer settles, including browser aborts during preview reloads.
+      await pipeline(file.createReadStream({start,end}),res);
     }catch { if(!res.headersSent)res.writeHead(404);res.end('Not found'); }
     finally{if(file)try{await file.close();}catch{res.destroy();}}
   });

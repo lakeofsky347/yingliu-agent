@@ -90,6 +90,28 @@ test('review requires upload consent and forwards captured bytes with verifiable
   assert.equal(f.calls.candidates.length,2);assert.deepEqual(f.calls.candidates[0]!.project,f.calls.commit[0]!.project);assert.deepEqual(f.calls.candidates[0]!.sources,f.calls.commit[0]!.sources);assert.ok(review.reviewCandidateHash);
 });
 
+test('reference images are validated before planning and sent only to the target video model',async t=>{
+  const f=await fixture(t),project=f.project;
+  const [first,second]=project.shots;
+  project.assets.push({id:'reference',kind:'image',name:'参考图',description:'',path:'assets/reference.png'});
+  second.referenceIds.push('reference');
+  f.project=project;
+  const reference={imageAssetIds:['reference'],allowImageUpload:true};
+  await assert.rejects(f.service.run(f.request(reference)),/图生视频/);
+  await assert.rejects(f.service.run(f.request({...reference,visual:'video',allowImageUpload:false})),/明确允许/);
+  await assert.rejects(f.service.run(f.request({...reference,visual:'video',shotIds:[first.id]})),/所选镜头/);
+  assert.equal(f.calls.director,0);
+
+  const started=await f.service.run(f.request({...reference,visual:'video'}));
+  const done=await settled(f.service,started.id);
+  assert.equal(done.status,'complete',done.error);
+  assert.deepEqual(f.calls.generate.map(({shotId,operation,imageAssetIds})=>({shotId,operation,imageAssetIds})),[
+    {shotId:first.id,operation:'text-to-video',imageAssetIds:[]},
+    {shotId:second.id,operation:'image-to-video',imageAssetIds:['reference']},
+  ]);
+  assert.equal(f.calls.vision.length,0);
+});
+
 test('review refuses mixed revisions when a user edits between frame captures',async t=>{
   const f=await fixture(t);f.hooks.capture=()=>{if(f.calls.capture.length===1)f.project={...f.project,revision:f.project.revision+1};};
   const started=await f.service.run(f.request({review:true,allowImageUpload:true})),done=await settled(f.service,started.id);assert.equal(done.status,'awaiting-apply');assert.equal(f.calls.vision.length,0,'mixed-version screenshots must never be described as one reviewed revision');assert.equal(f.calls.commit.length,0);
