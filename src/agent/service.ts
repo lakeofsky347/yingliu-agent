@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { AgentContent, AgentEvent, AgentMessage, AgentPort, AgentRun, AgentStartInput, AgentTool, PublicRun, RunStep, ToolCall, ToolResult, ToolRisk, ToolSuccessReceipt } from './contracts.ts';
+import type { AgentEvent, AgentMessage, AgentPort, AgentRun, AgentStartInput, AgentTool, PublicRun, RunStep, ToolCall, ToolResult, ToolRisk, ToolSuccessReceipt } from './contracts.ts';
 import { chatTurn, looksLikeNoToolSupport, type ChatConfig } from './model-client.ts';
 import { backoff, budgetFrom, chargeModel, chargeTool, classify, emptyUsage, needsApproval, overBudget, tokenCost } from './budget.ts';
 import { bound, capabilityPrompt, compressMessages, summarizeProject, systemPrompt } from './context.ts';
@@ -11,7 +11,7 @@ import { submissionOf } from './submission.ts';
 import { emptyLedger, emptyStory, normalizeCharacter, normalizeStyle, ProjectDocs, storyBrief, anchorPrompt, type Ledger, type QcReport, type Story } from './story.ts';
 import { qualityCheck } from './tools.ts';
 
-export interface ResolvedAgentModel { config: ChatConfig; parameters: Record<string, unknown>; connectionId?: string; vision: boolean }
+export interface ResolvedAgentModel { config: ChatConfig; parameters: Record<string, unknown>; connectionId?: string }
 export interface AgentServiceOptions {
   resolveModel(): Promise<ResolvedAgentModel>;
   fetch?: typeof fetch; tools?: AgentTool[]; redact?: (text: string) => Promise<string>;
@@ -78,7 +78,6 @@ export class AgentService {
   private projectCommands = new Map<string, Promise<void>>();
   private listeners = new Set<(event: AgentEvent) => void>();
   private store: RunStore; private tools: AgentTool[]; private initialized?: Promise<void>; private stopped = false;
-  private imageBuffer = new Map<string, AgentContent[]>();
   private stories: ProjectDocs<Story>; private ledgers: ProjectDocs<Ledger>; private qcs: ProjectDocs<{ version: number; report?: QcReport }>;
   constructor(directory: string, private readonly port: AgentPort, private readonly options: AgentServiceOptions) {
     this.store = new RunStore(directory, options.redact); this.tools = options.tools ?? createTools();
@@ -390,11 +389,10 @@ export class AgentService {
         const limit = await this.budgetLimit(run, 'tool');
         if (limit) { run.status = 'budget_exceeded'; run.message = '已停止：' + limit; await this.store.trace(run.id, { event: 'budget', reason: limit, usage: run.usage, pendingCalls: run.queue.map(c => c.name) }); await this.save(run); return; }
         const call = run.queue[0];
-        const outcome = await this.runCall(run, call, model, signal);
+        const outcome = await this.runCall(run, call, signal);
         if (outcome === 'suspend') return;
         continue;
       }
-      const images = this.imageBuffer.get(run.id); if (images?.length) { run.messages.push({ role: 'user', content: [{ type: 'text', text: '上面工具截取的画面：' }, ...images] }); this.imageBuffer.delete(run.id); }
       const limit = await this.budgetLimit(run, 'model');
       if (limit) { run.status = 'budget_exceeded'; run.message = '已停止：' + limit; await this.store.trace(run.id, { event: 'budget', reason: limit, usage: run.usage }); await this.save(run); return; }
       const compressed = compressMessages(run.messages, this.options.contextChars ?? 120_000);
@@ -456,7 +454,7 @@ export class AgentService {
     } catch (error) { if (signal.aborted) throw error; await this.finishStep(run, step, { status: 'failed', error: errorText(error) }); return { pass: false, text: '自检失败：' + errorText(error) }; }
   }
 
-  private async runCall(run: AgentRun, call: ToolCall, model: ResolvedAgentModel, signal: AbortSignal): Promise<'next' | 'suspend'> {
+  private async runCall(run: AgentRun, call: ToolCall, signal: AbortSignal): Promise<'next' | 'suspend'> {
     const meta = run as AgentRun & { dirty?: boolean; allowImages?: boolean };
     const active = this.runTools(run, (await this.capabilities()).capabilities);
     const tool = active.find(item => item.name === call.name);
@@ -526,11 +524,11 @@ export class AgentService {
     const receipt: ToolSuccessReceipt = { execId: call.execId!, tool: tool.name, argsHash: hash, risk: tool.risk, stepIndex: step.index, at: now(), result };
     // Keep inFlight until the known outcome has its own durable journal. Any later failure only retries settlement.
     if (sideEffect) await this.store.saveToolSuccess(run.id, receipt);
-    await this.settleToolSuccess(run, receipt, model);
+    await this.settleToolSuccess(run, receipt);
     signal.throwIfAborted(); return 'next';
   }
 
-  private async settleToolSuccess(run: AgentRun, receipt: ToolSuccessReceipt, model?: ResolvedAgentModel): Promise<void> {
+  private async settleToolSuccess(run: AgentRun, receipt: ToolSuccessReceipt): Promise<void> {
     const key = run.id + '.' + receipt.execId;
     const call = run.queue.find(item => item.execId === receipt.execId);
     if (!call) {
@@ -548,17 +546,14 @@ export class AgentService {
       await this.store.removeToolSuccess(run.id, receipt.execId); return;
     }
     if (call.name !== receipt.tool || argsHash(run.id, call.name, JSON.parse(call.arguments || '{}')) !== receipt.argsHash) throw new Error('工具成功回执与执行参数不符；未重新提交');
-    const meta = run as AgentRun & { dirty?: boolean; allowImages?: boolean };
+    const meta = run as AgentRun & { dirty?: boolean };
     let result = receipt.result;
     if (!(run.settledToolExecIds ?? []).includes(key)) {
       chargeTool(run.usage, result.cost, receipt.risk); (run.settledToolExecIds ??= []).push(key);
     }
     if (receipt.risk === 'cost') await this.spend(run.projectId, receipt.tool, result.waitFor ? null : result.cost, false, key);
     if (receipt.risk === 'write') meta.dirty = true;
-    if (result.images?.length) {
-      if ((model?.vision ?? true) && meta.allowImages) this.imageBuffer.set(run.id, [...(this.imageBuffer.get(run.id) ?? []), ...result.images.map(image => ({ type: 'image_url' as const, image_url: { url: `data:${image.mime};base64,${Buffer.from(image.bytes).toString('base64')}` } }))]);
-      else result = { ...result, content: result.content + '（画面已截取；当前模型或设置不允许发送图片，请用 visual_review 或 render_check 检查）' };
-    }
+    if (result.images?.length) result = { ...result, content: result.content + '（旧回执含截取画面，请重新使用 capture_frame 获取视觉描述）' };
     const step = run.steps[receipt.stepIndex]; if (step) await this.finishStep(run, step, { status: 'complete', summary: bound(result.content, 300) });
     if (result.projectTask && !run.taskRefs?.some(task => task.id === result.projectTask!.id)) (run.taskRefs ??= []).push({ ...result.projectTask, callId: call.id, execId: call.execId });
     if (result.waitFor) { run.waiting = { ...result.waitFor, callId: call.id, execId: call.execId }; run.status = 'waiting_task'; run.message = '等待生成任务完成'; }

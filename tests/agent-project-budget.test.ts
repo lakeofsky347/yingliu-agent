@@ -9,7 +9,7 @@ import type { AgentPort, AgentTool, ToolRisk } from '../src/agent/contracts.ts';
 import { createProject } from '../src/core/index.ts';
 import { toolGateway } from './model-gateway.ts';
 
-const model = async () => ({ parameters: { pricePerMInput: 0, pricePerMOutput: 0 }, vision: false, config: { baseUrl: 'http://gateway.test/v1', model: 'mock', timeoutMs: 5000, maxTokens: 1000, supportsTools: true } });
+const model = async () => ({ parameters: { pricePerMInput: 0, pricePerMOutput: 0 }, config: { baseUrl: 'http://gateway.test/v1', model: 'mock', timeoutMs: 5000, maxTokens: 1000, supportsTools: true } });
 async function settled(service: AgentService, id: string) {
   for (let i = 0; i < 500; i++) { const run = await service.get(id); if (['complete', 'failed', 'awaiting_approval', 'budget_exceeded'].includes(run.status)) return run; await new Promise(resolve => setTimeout(resolve, 10)); }
   throw new Error('运行未停止：' + (await service.get(id)).status);

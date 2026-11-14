@@ -49,6 +49,12 @@ function keyframes(project: VideoProject): { frame: number; shotId: string }[] {
   for (const id of project.shotOrder.length ? project.shotOrder : project.shots.map(s => s.id)) { const shot = project.shots.find(s => s.id === id); if (!shot) continue; frames.push({ frame: start + Math.floor(shot.durationFrames / 2), shotId: id }); start += shot.durationFrames; }
   return frames;
 }
+function visualFrames(project: VideoProject, shotIds: unknown) {
+  const wanted=Array.isArray(shotIds)?new Set(shotIds):null;
+  const matches=keyframes(project).filter(frame=>!wanted||wanted.has(frame.shotId));
+  const selected=matches.length>3?[matches[0]!,matches[Math.floor(matches.length/2)]!,matches.at(-1)!]:matches;
+  return {selected,uncheckedShotIds:matches.filter(frame=>!selected.includes(frame)).map(frame=>frame.shotId)};
+}
 /** Mutates project in place; returns a description of each change. */
 export function alignToVoice(project: VideoProject, pad: number, wanted: Set<string> | null): { shotId: string; fromSeconds: number; toSeconds: number }[] {
   const fps = project.target.fps.num / project.target.fps.den; const changes: { shotId: string; fromSeconds: number; toSeconds: number }[] = [];
@@ -109,19 +115,30 @@ export function createTools(): AgentTool[] {
         for (let i = 0; i < 240; i++) { ctx.signal.throwIfAborted(); const s = await ctx.port.snapshot(ctx.projectId); if (s.task?.id === task.id && s.task.status !== 'running') return { content: json({ taskId: task.id, status: s.task.status, message: s.task.message, error: s.task.error }), projectTask: task }; await new Promise(r => setTimeout(r, 250)); }
         return { content: json({ taskId: task.id, status: 'timeout', message: '预览检查超过 60 秒' }), projectTask: task };
       } },
-    { name: 'capture_frame', risk: 'read', description: '截取指定帧的画面，用于你自己查看（需要视觉模型）。', parameters: object({ frame: int('帧序号，从 0 开始') }, ['frame']),
-      async run(args, ctx) { const frame = Number(args.frame); if (!Number.isSafeInteger(frame) || frame < 0) throw new Error('frame 无效'); const shot = await ctx.port.capture(ctx.projectId, frame, ctx.signal); return { content: json({ frame: shot.frame, shotId: shot.shotId }), images: [{ mime: shot.mime, bytes: shot.bytes }] }; } },
-    { name: 'visual_review', risk: 'read', requires: ['vision'], description: '截取每个镜头的关键帧，交给视觉检查模型，返回结构化问题列表（镜头、帧、问题、严重度、建议）。修改后用它自检。', parameters: object({ shotIds: { type: 'array', items: { type: 'string' } } }),
+    { name: 'capture_frame', risk: 'read', requires: ['vision'], description: '截取指定帧，返回视觉模型对画面的文字描述。', parameters: object({ frame: int('帧序号，从 0 开始') }, ['frame']),
+      async run(args, ctx) {
+        const frame = Number(args.frame); if (!Number.isSafeInteger(frame) || frame < 0) throw new Error('frame 无效');
+        if (!ctx.port.vision) return { content: json({ skipped: true, reason: '当前运行未启用视觉模型' }) };
+        const shot = await ctx.port.capture(ctx.projectId, frame, ctx.signal);
+        const observation = await ctx.port.vision('描述这张关键帧的构图、可见文字与画面问题。', [{ mime: shot.mime, bytes: shot.bytes }], ctx.signal);
+        return { content: json({ frame: shot.frame, shotId: shot.shotId, observation: bound(observation, 3000) }) };
+      } },
+    { name: 'visual_review', risk: 'read', requires: ['vision'], description: '截取最多三个镜头的关键帧并请视觉模型检查文字、构图和画面问题，返回实际检查的镜头和结构化问题。', parameters: object({ shotIds: { type: 'array', items: { type: 'string' } } }),
       async run(args, ctx) {
         const snapshot = await ctx.port.snapshot(ctx.projectId), project = snapshot.project; if (!project) throw new Error('没有打开的工程');
         if (!ctx.port.vision) return { content: json({ skipped: true, reason: '未配置视觉检查模型（vision 角色）；请改用 render_check' }) };
-        const wanted = Array.isArray(args.shotIds) ? new Set(args.shotIds.map(String)) : null;
-        let start = 0; const frames: { frame: number; shotId: string }[] = [];
-        for (const id of project.shotOrder.length ? project.shotOrder : project.shots.map(s => s.id)) { const shot = project.shots.find(s => s.id === id)!; if (!wanted || wanted.has(id)) frames.push({ frame: start + Math.floor(shot.durationFrames / 2), shotId: id }); start += shot.durationFrames; }
+        const {selected:frames,uncheckedShotIds}=visualFrames(project,args.shotIds);
+        if(!frames.length)return {content:json({skipped:true,reason:'没有可检查的镜头'})};
         const images = [] as { mime: string; bytes: Uint8Array }[];
-        for (const item of frames.slice(0, 6)) { const shot = await ctx.port.capture(ctx.projectId, item.frame, ctx.signal); images.push({ mime: shot.mime, bytes: shot.bytes }); }
-        const answer = await ctx.port.vision('逐张检查视频关键帧（顺序对应镜头 ' + frames.slice(0, 6).map(f => f.shotId).join(', ') + '）。只输出 JSON：{"pass":true|false,"issues":[{"shotId":"","problem":"","severity":"low|medium|high","suggestion":""}]}。检查文字溢出/遮挡、空白画面、对比度、元素越界、与镜头意图不符。', images, ctx.signal);
-        return { content: bound(answer, 4000) };
+        for (const item of frames) { const shot = await ctx.port.capture(ctx.projectId, item.frame, ctx.signal); images.push({ mime: shot.mime, bytes: shot.bytes }); }
+        const checkedShotIds=frames.map(frame=>frame.shotId);
+        const answer = await ctx.port.vision('逐张检查视频关键帧（顺序对应镜头 ' + checkedShotIds.join(', ') + '）。只输出 JSON：{"pass":true|false,"issues":[{"shotId":"","problem":"","severity":"low|medium|high","suggestion":""}]}。检查文字溢出/遮挡、空白画面、对比度、元素越界、与镜头意图不符。', images, ctx.signal);
+        try{
+          const result=JSON.parse(answer.slice(answer.indexOf('{'),answer.lastIndexOf('}')+1));
+          return {content:json({...result,checkedShotIds,uncheckedShotIds})};
+        }catch{
+          return {content:json({pass:false,error:'视觉模型没有返回可解析的检查结果',checkedShotIds,uncheckedShotIds,raw:bound(answer,800)})};
+        }
       } },
     { name: 'generate_image', risk: 'cost', requires: ['image'], description: '用图片模型生成素材（产生费用，需要用户批准）。传 characterIds 时自动拼接计划中的风格与角色特征锚点。完成后用 media_apply 采用。', parameters: object({ expectedRevision: int('当前工程版本'), prompt: str('画面描述'), shotId: str('关联镜头'), characterIds: { type: 'array', items: { type: 'string' }, description: '出场角色 ID（来自创作计划）' } }, ['expectedRevision', 'prompt']),
       estimate: () => null,
@@ -228,13 +245,13 @@ export function createTools(): AgentTool[] {
         const story = await ctx.docs.updateStory(current => ({ ...current, characters: [...current.characters.filter(c => c.id !== character.id), character], updatedAt: new Date().toISOString() }));
         return { content: json({ ok: true, version: story.version, character }) };
       } },
-    { name: 'consistency_review', risk: 'read', requires: ['vision'], description: '按分镜截取关键帧，让视觉模型对照计划中的风格与角色特征打 0–100 分，结果写入计划。低于阈值的镜头会给出重生建议（重生仍需用户批准）。', parameters: object({ shotIds: { type: 'array', items: { type: 'string' } }, threshold: { type: 'number' } }),
+    { name: 'consistency_review', risk: 'read', requires: ['vision'], description: '截取最多三个镜头的关键帧，让视觉模型对照计划中的风格与角色特征打 0–100 分，结果写入计划。低于阈值的镜头会给出重生建议（重生仍需用户批准）。', parameters: object({ shotIds: { type: 'array', items: { type: 'string' } }, threshold: { type: 'number' } }),
       async run(args, ctx) {
         if (!ctx.port.vision) return { content: json({ skipped: true, reason: '未接入视觉检查模型' }) };
         const story = await ctx.docs.story(); if (story.status !== 'approved') return { content: json({ skipped: true, reason: '还没有已批准的创作计划；先 plan_story / plan_shots' }) };
         const project = (await ctx.port.snapshot(ctx.projectId)).project; if (!project) throw new Error('没有打开的工程');
         const threshold = Number.isFinite(Number(args.threshold)) ? Math.max(1, Math.min(100, Number(args.threshold))) : 75;
-        const wanted = Array.isArray(args.shotIds) ? new Set(args.shotIds.map(String)) : null; const frames = keyframes(project).filter(f => !wanted || wanted.has(f.shotId)).slice(0, 6);
+        const {selected:frames,uncheckedShotIds}=visualFrames(project,args.shotIds);
         if (!frames.length) return { content: json({ skipped: true, reason: '没有可检查的镜头' }) };
         const images = []; for (const f of frames) { const shot = await ctx.port.capture(ctx.projectId, f.frame, ctx.signal); images.push({ mime: shot.mime, bytes: shot.bytes }); }
         const expect = frames.map(f => { const planned = story.shots.find(s => s.shotId === f.shotId); return `${f.shotId}：${planned ? planned.summary + '；角色 ' + (planned.characters.map(id => story.characters.find(c => c.id === id)?.name ?? id).join('、') || '无') : '（计划外镜头）'}`; }).join('\n');
@@ -245,7 +262,7 @@ export function createTools(): AgentTool[] {
         const at = new Date().toISOString();
         await ctx.docs.updateStory(current => ({ ...current, consistency: { ...current.consistency, ...Object.fromEntries(scores.map(s => [s.shotId, { ...s, at }])) } }));
         const low = scores.filter(s => s.score < threshold);
-        return { content: json({ threshold, scores, proposals: low.map(s => ({ shotId: s.shotId, action: '建议重生', how: '用 generate_image/generate_video 并传 characterIds（需用户批准）；或手动修改镜头源码', notes: s.notes })) }) };
+        return { content: json({ threshold, scores, uncheckedShotIds, proposals: low.map(s => ({ shotId: s.shotId, action: '建议重生', how: '用 generate_image/generate_video 并传 characterIds（需用户批准）；或手动修改镜头源码', notes: s.notes })) }) };
       } },
     { name: 'frame_handoff', risk: 'write', requires: ['video'], description: '尾帧承接：截取上一个镜头的最后一帧，导入为图片素材，返回 assetId，用作下一镜 generate_video 的 imageAssetId（首帧）。', parameters: object({ shotId: str('要承接的（后一个）镜头 ID') }, ['shotId']),
       async run(args, ctx) {

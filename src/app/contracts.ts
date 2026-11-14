@@ -20,7 +20,9 @@ export interface ProviderConfig {
 }
 export interface ProviderSettings {
   config:ProviderConfig; hasKey:boolean; mode:'demo'|'custom'; credentialStatus?:SecretStoreStatus;
-  ready?:boolean; route?:{provider:string;model:string}; sceneRoute?:{provider:string;model:string}; legacyConfig?:ProviderConfig; legacyHasKey?:boolean; legacyCredentialStatus?:SecretStoreStatus;
+  ready?:boolean; route?:{provider:string;model:string}; sceneRoute?:{provider:string;model:string}; sceneReady?:boolean; legacyConfig?:ProviderConfig; legacyHasKey?:boolean; legacyCredentialStatus?:SecretStoreStatus;
+  visionRoute?:{provider:string;model:string}; visionReady?:boolean;
+  visionConfig?:ProviderConfig; visionHasKey?:boolean; visionCredentialStatus?:SecretStoreStatus;
 }
 export interface ChatMessage {
   id:string; role:'user'|'assistant'; content:string; createdAt:string;

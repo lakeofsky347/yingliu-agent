@@ -1,6 +1,6 @@
 import { fetch } from '../host/http.ts';
 import { AppBackend } from './backend.ts';
-import { ProviderManager } from './model.ts';
+import { ProviderManager, type ModelContent } from './model.ts';
 import { ConversationService } from './conversation.ts';
 import type { RpcResult } from '../shared/types.ts';
 import type { ChatInput, SecretStore } from './contracts.ts';
@@ -30,6 +30,8 @@ export const ENDPOINTS=new Set(['catalog','current','create','open','save','impo
 for(const endpoint of ['models.list','models.connection.save','models.connection.remove','models.model.save','models.model.remove','models.role.bind','models.check','media.generate','media.list','media.get','media.retry','media.pause','media.cancel','media.apply','video.clip.save','video.clip.remove','video.clip.extract'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['workflows.run','workflows.list','workflows.get','workflows.retry','workflows.pause','workflows.apply'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['agent.start','agent.list','agent.get','agent.trace','agent.approve','agent.reject','agent.resume','agent.pause','agent.cancel','agent.tools','agent.capabilities','story.get','story.save','agent.qc','agent.qc.last','agent.ledger','agent.budget.set'])ENDPOINTS.add(endpoint);
+for(const endpoint of ['app.onboarding.get','app.onboarding.complete'])ENDPOINTS.add(endpoint);
+ENDPOINTS.add('providers.vision.save');
 export class MemorySecrets implements SecretStore {
   private values=new Map<string,string>();
   async get(ref:string){return this.values.get(ref);}
@@ -40,6 +42,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
   const projectRootWaitMs=options.projectRootWaitMs===undefined?0:options.projectRootWaitMs;
   if(!Number.isFinite(projectRootWaitMs)||projectRootWaitMs<0)throw new RangeError('工程目录锁等待时间必须是非负有限数字');
   const {dataDirectory,projectsDirectory}=applicationDirectories(options);
+  const onboardingFile=join(dataDirectory,'onboarding-v1');
   const ownership=options.ownership??await acquireApplicationOwner({dataDirectory,projectsDirectory},'application');
   const cleanups:(()=>Promise<unknown>)[]=[];
   try{
@@ -59,7 +62,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
     commit:(id,expectedRevision,project,sources,label)=>backend.call('apply',{projectId:id,expectedRevision,project,sources:Object.entries(sources).map(([shotId,source])=>({shotId,source})),label}),
     stageMedia:(id,task,files,signal)=>backend.stageWorkflowMedia(id,task,files,signal),
     capture:(id,frame,signal,candidate)=>backend.workflowCapture(id,frame,signal,candidate),
-    text:async(role,prompt,signal,_request,images)=>providers.complete([{role:'user',content:images?.length?[{type:'text',text:prompt},...images.map(image=>({type:'image_url' as const,image_url:{url:`data:${image.mime};base64,${Buffer.from(image.bytes).toString('base64')}`}}))]:prompt}],'你是视频制作团队的'+role+'。只依据提供的工程和实际图像执行任务。',signal,undefined,role),
+    text:async(role,prompt,signal,_request,images)=>role==='vision'?analyzeFrames(prompt,images??[],signal):providers.complete([{role:'user',content:prompt}],'你是视频制作团队的'+role+'。依据提供的工程文本执行任务。',signal,undefined,role),
     voice:async(id,shotId,text,signal)=>{
       const state=providers.registry.snapshot();if(!state.roles.some(binding=>binding.role==='speech'))return backend.workflowVoice(id,shotId,text,signal);
       let release:(()=>void)|undefined;
@@ -111,6 +114,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
       const state=providers.registry.snapshot(),roles:GenRole[]=[],models:Partial<Record<GenRole,string>>={};
       for(const binding of state.roles){const model=state.models.find(m=>m.id===binding.modelId),connection=state.connections.find(c=>c.id===model?.connectionId);
         if(!model?.enabled||!connection?.enabled||!ROLE_PROTOCOLS[binding.role].includes(connection.protocol)||!model.outputModalities.includes(ROLE_OUTPUT[binding.role]))continue;
+        if(binding.role==='vision'&&!(await providers.requireVision().then(()=>true,()=>false)))continue;
         if(['image','video','speech','music','sfx','vision'].includes(binding.role)){roles.push(binding.role as GenRole);models[binding.role as GenRole]=model.name;}}
       if(!roles.includes('speech')){try{const snapshot=await backend.call('current');if(snapshot.ttsConfigured&&snapshot.tts?.enabled){roles.push('speech');models.speech='应用内配音设置';}}catch{}}
       let director:string|undefined;try{director=(await providers.registry.resolve('director')).model.name;}catch{}
@@ -175,16 +179,19 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         throw withSubmission(failure,'unknown',jobId);
       }finally{release();}
     },
-    vision:async(prompt,images,signal)=>{await providers.registry.resolve('vision');return workflowPort.text('vision',prompt,signal,{} as WorkflowRequest,images);},
+    vision:analyzeFrames,
   };
+  function analyzeFrames(prompt:string,images:{mime:string;bytes:Uint8Array}[],signal:AbortSignal):Promise<string>{
+    const content:ModelContent[]=images.map(image=>({type:'image_url',image_url:{url:`data:${image.mime};base64,${Buffer.from(image.bytes).toString('base64')}`}}));
+    return providers.analyzeImages(content,prompt,signal);
+  }
   const agentArchive={export:(projectId:string)=>agent.exportDocs(projectId),import:(projectId:string,docs:Partial<Record<'story'|'ledger'|'qc',unknown>>)=>agent.importDocs(projectId,docs),validate:(docs:Partial<Record<'story'|'ledger'|'qc',unknown>>)=>agent.validateDocs(docs)};
   const agent=new AgentService(join(dataDirectory,'agent-runs'),agentPort,{
     fetch:options.fetch,dataDirectory:join(dataDirectory,'agent-data'),...(options.recover===false?{recover:false}:{}),
     redact:async text=>{let value=text;for(const key of await knownKeys())value=redactKey(value,key);return value;},
     resolveModel:async()=>{
-      const resolved=await providers.registry.resolve('director'),parameters=resolved.model.parameters as Record<string,unknown>;
-      let vision=false;try{await providers.registry.resolve('vision');vision=true;}catch{}
-      return {connectionId:resolved.connection.id,parameters,vision:vision||resolved.model.inputModalities.includes('image'),config:{baseUrl:resolved.connection.baseUrl,model:resolved.model.model,key:await providers.registry.credential(resolved.connection),
+      const resolved=await providers.resolveText('director'),parameters=resolved.model.parameters as Record<string,unknown>;
+      return {connectionId:resolved.connection.id,parameters,config:{baseUrl:resolved.connection.baseUrl,model:resolved.model.model,key:await providers.registry.credential(resolved.connection),
         timeoutMs:Number(resolved.connection.requestTimeoutMs)||120000,maxTokens:Number(parameters.maxTokens)||4096,...(typeof parameters.temperature==='number'?{temperature:parameters.temperature}:{}),supportsTools:parameters.supportsTools!==false}};
     },
   });
@@ -218,7 +225,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         case 'agent.qc.last':value={report:await agent.lastQc(String(data.projectId))};break;
         case 'agent.ledger':value=await agent.ledger(String(data.projectId));break;
         case 'agent.budget.set':value=await agent.setProjectBudget(String(data.projectId),data.maxCost===null||data.maxCost===undefined||data.maxCost===''?null:Number(data.maxCost),typeof data.currency==='string'?data.currency:undefined);break;
-        case 'workflows.run':value=await workflows.run(data as unknown as WorkflowRequest);break;
+        case 'workflows.run':if(data.review===true&&data.allowImageUpload===true)await providers.requireVision();value=await workflows.run(data as unknown as WorkflowRequest);break;
         case 'workflows.list':value={workflows:await workflows.list(typeof data.projectId==='string'?data.projectId:undefined)};break;
         case 'workflows.get':value=await workflows.get(String(data.workflowId));break;
         case 'workflows.retry':value=await workflows.retry(String(data.workflowId));break;
@@ -229,7 +236,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         case 'models.connection.remove':await providers.registry.removeConnection(String(data.id));value=await providers.registry.list();break;
         case 'models.model.save':value=await providers.registry.saveModel(data as unknown as ModelInput);await backend.call('catalog');break;
         case 'models.model.remove':await providers.registry.removeModel(String(data.id));value=await providers.registry.list();break;
-        case 'models.role.bind':await providers.registry.bindRole(data.role as ModelRole,typeof data.modelId==='string'?data.modelId:null);value=await providers.registry.list();break;
+        case 'models.role.bind':await providers.registry.bindRole(data.role as ModelRole,typeof data.modelId==='string'?data.modelId:null);await backend.call('catalog');value=await providers.registry.list();break;
         case 'models.check':value=await providers.check(typeof data.connectionId==='string'?data.connectionId:undefined);break;
         case 'media.generate':value=await media.generate(data as unknown as MediaRequest);break;
         case 'media.list':value={tasks:await media.list(typeof data.projectId==='string'?data.projectId:undefined)};break;
@@ -239,12 +246,23 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         case 'media.cancel':value=await media.cancel(String(data.taskId));break;
         case 'media.apply':value=await media.apply(String(data.taskId),Number(data.expectedRevision));break;
         case 'app.health':{const snapshot=await backend.call('current');value=await applicationHealth(snapshot.environment,await providers.settings(),dataDirectory);break;}
+        case 'app.onboarding.get':{
+          try{value={completed:await readFile(onboardingFile,'utf8')==='1\n'};}
+          catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;value={completed:false};}
+          break;
+        }
+        case 'app.onboarding.complete':{
+          await writeDurableFile(onboardingFile,'1\n');
+          value={completed:true};
+          break;
+        }
         case 'app.exportProject':value=await exportProjectArchive(backend,data,agentArchive);break;
         case 'app.importProject':value=await importProjectArchive(backend,data,agentArchive);break;
         case 'packs.list':value=foundationPacks;break;
         case 'providers.get':value=await providers.settings();break;
         case 'providers.save':value=await providers.save(data);await backend.call('catalog');break;
-        case 'providers.check':value=await providers.check();break;
+        case 'providers.vision.save':value=await providers.saveVision(data);await backend.call('catalog');break;
+        case 'providers.check':value=await providers.check(typeof data.connectionId==='string'?data.connectionId:undefined,data.purpose==='vision'?'vision':'director');break;
         case 'chat.history':value=await conversation.history(typeof data.projectId==='string'?data.projectId:undefined);break;
         case 'chat.send':value=await conversation.send(data as unknown as ChatInput);break;
         case 'chat.cancel':value=await conversation.cancel();break;

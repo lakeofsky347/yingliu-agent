@@ -111,5 +111,7 @@ test('F09: template submit forwards durationSeconds and rejects multiple referen
   const submit = f.gateway.requests.find(r => r.method === 'POST')!;
   assert.equal((submit.body as any).parameters.duration, 8);
   await assert.rejects(f.service.generate({ projectId: 'film', expectedRevision: 3, operation: 'image-to-video', prompt: '两张图', imageAssetIds: ['a', 'b'], allowImageUpload: true }), /1 张/);
+  await f.registry.saveModel({ id: 'no-image-slot', connectionId: 'ds9', model: 'no-image-slot', inputModalities: ['text', 'image'], parameters: { preset: 'kling-video' } });
+  await assert.rejects(f.service.generate({ projectId: 'film', expectedRevision: 3, operation: 'image-to-video', modelId: 'no-image-slot', prompt: '仅一张图', imageAssetIds: ['a'], allowImageUpload: true }), /没有 \{\{image\}\}/);
   assert.equal(f.gateway.requests.filter(r => r.method === 'POST').length, 1, 'no second billable submit');
 });

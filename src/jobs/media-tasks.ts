@@ -4,6 +4,7 @@ import {createReadStream} from 'node:fs';
 import {join,resolve,sep} from 'node:path';
 import {cancelVideo as gatewayCancel,generateImage as openaiImage,getVideo as gatewayGet,lookupVideo as gatewayLookup,submitVideo as gatewaySubmit,type AdapterContext,type AdapterInput} from '../models/adapters/media.ts';
 import {cancelTemplate,pollTemplate,resolveTemplate,submitTemplate} from '../models/adapters/template.ts';
+import {templateAcceptsImage} from '../models/template-presets.ts';
 import type {RemoteJob as Job} from './contracts.ts';
 // Protocol dispatch: images / video-gateway keep their native adapters; async-task uses the configurable template adapter.
 const outputOf=(operation:string):'image'|'video'=>operation==='text-to-image'?'image':'video';
@@ -82,6 +83,7 @@ export class MediaTaskService {
     if(input.operation!=='image-to-video'&&ids.length)throw new Error('此操作不支持参考图片');
     // F09: the template adapter forwards exactly one image ({{image}}); never upload/bill for references that would be silently dropped.
     if(resolved.connection.protocol==='async-task'&&ids.length>1)throw new Error('此服务模板一次只支持 1 张参考图片');
+    if(resolved.connection.protocol==='async-task'&&ids.length&&!templateAcceptsImage(resolved.model.parameters))throw new Error('此服务模板的请求体没有 {{image}}，无法传送参考图片');
     const allowed=output==='image'?['size','quality','style','response_format','background','output_format','n']:['durationSeconds','width','height','fps','aspectRatio','seed','negativePrompt'];
     if(input.parameters&&Object.keys(input.parameters).some(key=>!allowed.includes(key)))throw new Error('请求包含当前协议不支持的生成参数');
     const parameters:Record<string,string|number|boolean>={};for(const [key,value]of Object.entries({...resolved.model.parameters,...input.parameters})){if(!allowed.includes(key))continue;if(!['string','number','boolean'].includes(typeof value)||typeof value==='number'&&!Number.isFinite(value)||typeof value==='string'&&value.length>4000)throw new Error('生成参数无效：'+key);parameters[key]=value;}

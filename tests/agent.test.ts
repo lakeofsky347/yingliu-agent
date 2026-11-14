@@ -55,7 +55,7 @@ function fakePort(overrides: Partial<AgentPort> = {}) {
   return { port, state };
 }
 function model(fetchSupportsTools = true, parameters: Record<string, unknown> = {}): () => Promise<ResolvedAgentModel> {
-  return async () => ({ connectionId: 'gw', parameters, vision: false, config: { baseUrl: 'http://gateway.test/v1', model: 'deepseek-chat', key: 'sk-SECRET-KEY', timeoutMs: 5000, maxTokens: 2048, supportsTools: fetchSupportsTools } });
+  return async () => ({ connectionId: 'gw', parameters, config: { baseUrl: 'http://gateway.test/v1', model: 'deepseek-chat', key: 'sk-SECRET-KEY', timeoutMs: 5000, maxTokens: 2048, supportsTools: fetchSupportsTools } });
 }
 async function settle(service: AgentService, id: string, until: PublicRun['status'][], ms = 5000): Promise<PublicRun> {
   const end = Date.now() + ms;

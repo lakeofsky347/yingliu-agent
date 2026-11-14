@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { Asset, Shot, VideoClip, VideoProject } from '../shared/types.ts';
 import type { MediaOperation, MediaTask } from '../jobs/contracts.ts';
 import type { ModelDefinition, RegistrySnapshot } from '../models/contracts.ts';
+import { ROLE_PROTOCOLS } from '../models/contracts.ts';
+import { templateAcceptsImage } from '../models/template-presets.ts';
 import { StudioController } from './controller.ts';
 import { ModelCenter } from './ModelCenter.tsx';
 
@@ -9,8 +11,12 @@ const phaseNames:Record<MediaTask['phase'],string>={pending:'等待执行',submi
 const operationNames:Record<MediaOperation,string>={'text-to-image':'文字生成图片','text-to-video':'文字生成视频','image-to-video':'参考图片生成视频'};
 const errorMessage=(cause:unknown)=>cause instanceof Error?cause.message:'操作未完成';
 export function mediaModels(catalog:RegistrySnapshot,operation:MediaOperation):ModelDefinition[]{
-  const protocol=operation==='text-to-image'?'images':'video-gateway';
-  return catalog.models.filter(model=>model.enabled&&catalog.connections.some(connection=>connection.id===model.connectionId&&connection.enabled&&connection.protocol===protocol)&&model.outputModalities.includes(operation==='text-to-image'?'image':'video')&&(operation!=='image-to-video'||model.inputModalities.includes('image')));
+  const role=operation==='text-to-image'?'image':'video';
+  return catalog.models.filter(model=>{
+    const connection=catalog.connections.find(item=>item.id===model.connectionId);
+    if(!model.enabled||!connection?.enabled||!ROLE_PROTOCOLS[role].includes(connection.protocol)||!model.inputModalities.includes('text')||!model.outputModalities.includes(role))return false;
+    return operation!=='image-to-video'||model.inputModalities.includes('image')&&(connection.protocol!=='async-task'||templateAcceptsImage(model.parameters));
+  });
 }
 export function mediaUsageLabel(task:Pick<MediaTask,'usage'>):string{return typeof task.usage?.cost==='number'?`${task.usage.cost.toFixed(4)} ${task.usage.currency||'（币种未提供）'}`:'费用未知';}
 export function MediaPanel({controller,project,selectedShot,mediaOnly=false}:{controller:StudioController;project:VideoProject;selectedShot?:Shot;mediaOnly?:boolean}){
@@ -21,12 +27,21 @@ export function MediaPanel({controller,project,selectedShot,mediaOnly=false}:{co
   const [localPath,setLocalPath]=useState(''),[size,setSize]=useState(''),[durationSeconds,setDurationSeconds]=useState(''),[width,setWidth]=useState(''),[height,setHeight]=useState('');
   const [configOpen,setConfigOpen]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
   const models=mediaModels(catalog,operation),selectedModel=models.find(model=>model.id===modelId);
+  const connection=catalog.connections.find(item=>item.id===selectedModel?.connectionId);
+  const imageLimit=connection?.protocol==='async-task'?1:3;
   const targetShot=project.shots.find(shot=>shot.id===shotId),images=project.assets.filter(asset=>asset.kind==='image'&&(!targetShot||targetShot.assetIds.includes(asset.id)||targetShot.referenceIds.includes(asset.id)));
   const disabled=busy||state.pending,seen=useRef(new Map<string,number>());
   useEffect(()=>{setShotId(selectedShot?.id||'');setImageIds([]);setAllowUpload(false);},[project.id,selectedShot?.id]);
-  async function refreshCatalog(){setCatalog(await controller.api.call<RegistrySnapshot>('models.list'));}
   async function refreshTasks(){const value=await controller.api.call<{tasks:MediaTask[]}>('media.list',{projectId:project.id});setTasks(value.tasks);}
-  useEffect(()=>{let active=true,polling=false;setTasks([]);seen.current.clear();setError('');const poll=async()=>{if(polling)return;polling=true;try{const value=await controller.api.call<{tasks:MediaTask[]}>('media.list',{projectId:project.id});if(active){setTasks(value.tasks);for(const task of value.tasks){if(task.applied&&seen.current.get(task.id)!==task.applied.revision&&await controller.refreshMediaProject())seen.current.set(task.id,task.applied.revision);}}}catch(cause){if(active)setError(errorMessage(cause));}finally{polling=false;}};void poll();void controller.api.call<RegistrySnapshot>('models.list').then(value=>{if(active)setCatalog(value);}).catch(cause=>{if(active)setError(errorMessage(cause));});const timer=setInterval(()=>void poll(),2000);return()=>{active=false;clearInterval(timer);};},[controller,project.id]);
+  useEffect(()=>{let active=true,polling=false;setTasks([]);seen.current.clear();setError('');const poll=async()=>{if(polling)return;polling=true;try{const value=await controller.api.call<{tasks:MediaTask[]}>('media.list',{projectId:project.id});if(active){setTasks(value.tasks);for(const task of value.tasks){if(task.applied&&seen.current.get(task.id)!==task.applied.revision&&await controller.refreshMediaProject())seen.current.set(task.id,task.applied.revision);}}}catch(cause){if(active)setError(errorMessage(cause));}finally{polling=false;}};void poll();const timer=setInterval(()=>void poll(),2000);return()=>{active=false;clearInterval(timer);};},[controller,project.id]);
+  useEffect(()=>{
+    let active=true,serial=0;
+    const refresh=()=>{const request=++serial;setImageIds([]);setAllowUpload(false);
+      void controller.api.call<RegistrySnapshot>('models.list').then(value=>{if(active&&request===serial)setCatalog(value);}).catch(cause=>{if(active&&request===serial)setError(errorMessage(cause));});
+    };
+    refresh();window.addEventListener('yingliu-models-changed',refresh);
+    return()=>{active=false;window.removeEventListener('yingliu-models-changed',refresh);};
+  },[controller]);
   useEffect(()=>{if(models.some(model=>model.id===modelId))return;const role=operation==='text-to-image'?'image':'video',preferred=catalog.roles.find(binding=>binding.role===role)?.modelId;setModelId(models.find(model=>model.id===preferred)?.id||models[0]?.id||'');},[catalog,operation,modelId]);
   useEffect(()=>{setImageIds([]);setAllowUpload(false);},[shotId,operation,modelId]);
   useEffect(()=>{setSize('');setDurationSeconds('');setWidth('');setHeight('');setParameters('{}');},[operation,modelId]);
@@ -34,7 +49,7 @@ export function MediaPanel({controller,project,selectedShot,mediaOnly=false}:{co
   async function generate(){await run(async()=>{const value=JSON.parse(parameters||'{}');if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('生成参数须为 JSON 对象');if(operation==='image-to-video'&&(!imageIds.length||!allowUpload))throw new Error('请明确选择参考图片并允许本次上传');await controller.mediaCommand('media.generate',{operation,prompt:prompt.trim(),modelId,shotId:shotId||undefined,parameters:{...value,...(operation==='text-to-image'?(size?{size}:{}):{...(durationSeconds?{durationSeconds:Number(durationSeconds)}:{}),...(width?{width:Number(width)}:{}),...(height?{height:Number(height)}:{})})},...(operation==='image-to-video'?{imageAssetIds:imageIds,allowImageUpload:allowUpload}:{})});},'生成任务已保存，可以继续编辑影片。完成后请采用结果。');}
   return <section className="vs-media-panel" aria-label="素材生成">
     <div className="vs-media-heading"><div><h3>模型与素材生成</h3><p>生成图片或视频，再将检查通过的结果加入当前工程。</p></div><button disabled={disabled} onClick={()=>setConfigOpen(value=>!value)}>{configOpen?'收起模型中心':'配置模型连接'}</button></div>
-    {configOpen&&<ModelCenter api={controller.api} mediaOnly={mediaOnly} blocked={disabled} onChanged={refreshCatalog}/>}
+    {configOpen&&<ModelCenter api={controller.api} mediaOnly={mediaOnly} blocked={disabled}/>}
     {error&&<p className="vs-inline-error" role="alert">{error}</p>}{notice&&<p className="vs-media-success" role="status">{notice}</p>}
     <details className="vs-media-advanced"><summary>从本地路径导入视频</summary><p className="vs-media-help">填写当前电脑上的视频文件绝对路径。文件将直接复制到工程，适合较大的本地素材。</p><label className="vs-field"><span>本地视频文件</span><input aria-label="本地视频文件路径" value={localPath} disabled={disabled} onChange={event=>setLocalPath(event.target.value)} placeholder="/绝对路径/视频.mp4"/></label><button disabled={disabled||!localPath.trim()} onClick={()=>void run(async()=>{await controller.mediaCommand('import',{path:localPath.trim()},true);setLocalPath('');},'本地视频已导入，请在镜头属性中安排视频片段。')}>导入本地视频</button></details>
     <div className="vs-media-create-grid"><div>
@@ -42,7 +57,7 @@ export function MediaPanel({controller,project,selectedShot,mediaOnly=false}:{co
       {!models.length&&<p className="vs-media-help">尚无支持此操作的模型，请在模型中心添加连接与模型。</p>}
       <label className="vs-field"><span>画面描述</span><textarea aria-label="素材画面描述" rows={4} value={prompt} disabled={disabled} onChange={event=>setPrompt(event.target.value)} placeholder="描述主体、环境、镜头运动、风格与需要保留的细节。"/></label>
       <label className="vs-field"><span>采用时用于</span><select aria-label="生成素材目标镜头" value={shotId} disabled={disabled} onChange={event=>setShotId(event.target.value)}><option value="">加入素材库，稍后安排</option>{project.shots.map(shot=><option key={shot.id} value={shot.id}>{shot.title}</option>)}</select></label>
-      {operation==='image-to-video'&&<fieldset className="vs-media-images" disabled={disabled}><legend>本次参考图片</legend>{images.map(asset=><label key={asset.id}><input type="checkbox" checked={imageIds.includes(asset.id)} onChange={event=>setImageIds(value=>event.target.checked?[...value,asset.id]:value.filter(id=>id!==asset.id))}/>{asset.name}</label>)}{!images.length&&<p>先导入图片，并绑定到所选镜头；选择“加入素材库”时可从工程图片中选择。</p>}<label className="vs-media-check"><input type="checkbox" checked={allowUpload} onChange={event=>setAllowUpload(event.target.checked)}/>允许将以上选中的图片上传到此模型，用于本次生成</label></fieldset>}
+      {operation==='image-to-video'&&<fieldset className="vs-media-images" disabled={disabled}><legend>本次参考图片</legend>{images.length>0&&<p className="vs-media-help">此接口每次最多接收 {imageLimit} 张参考图。</p>}{images.map(asset=><label key={asset.id}><input type="checkbox" checked={imageIds.includes(asset.id)} disabled={!imageIds.includes(asset.id)&&imageIds.length>=imageLimit} onChange={event=>setImageIds(value=>event.target.checked?[...value,asset.id]:value.filter(id=>id!==asset.id))}/>{asset.name}</label>)}{!images.length&&<p>先导入图片，并绑定到所选镜头；选择“加入素材库”时可从工程图片中选择。</p>}<label className="vs-media-check"><input type="checkbox" checked={allowUpload} onChange={event=>setAllowUpload(event.target.checked)}/>允许将以上选中的图片上传到此模型，用于本次生成</label></fieldset>}
       {operation==='text-to-image'?<label className="vs-field"><span>图片尺寸（可留空使用默认值）</span><input aria-label="生成图片尺寸" placeholder={String(selectedModel?.parameters.size||'例如 1024x1024')} value={size} disabled={disabled} onChange={event=>setSize(event.target.value)}/></label>:<><label className="vs-field"><span>生成时长（秒，可留空）</span><input aria-label="生成视频时长" type="number" min="0.1" max={Number(selectedModel?.parameters.maxDurationSeconds||120)} step="0.1" value={durationSeconds} disabled={disabled} onChange={event=>setDurationSeconds(event.target.value)} placeholder={String(selectedModel?.parameters.durationSeconds||'服务默认')}/></label><div className="vs-field-pair"><label className="vs-field"><span>视频宽度（可留空）</span><input aria-label="生成视频宽度" type="number" min="1" max={Number(selectedModel?.parameters.maxWidth||8192)} value={width} disabled={disabled} onChange={event=>setWidth(event.target.value)}/></label><label className="vs-field"><span>视频高度（可留空）</span><input aria-label="生成视频高度" type="number" min="1" max={Number(selectedModel?.parameters.maxHeight||8192)} value={height} disabled={disabled} onChange={event=>setHeight(event.target.value)}/></label></div></>}
       <details className="vs-media-advanced"><summary>本次生成参数</summary><label className="vs-field"><span>覆盖模型默认参数（JSON 对象）</span><textarea aria-label="本次素材生成参数" rows={4} spellCheck={false} value={parameters} disabled={disabled} onChange={event=>setParameters(event.target.value)}/><small>{selectedModel?`当前默认参数：${JSON.stringify(selectedModel.parameters)}`:'先选择模型。'} 参数由适配器校验。</small></label></details>
       <button className="vs-primary" disabled={disabled||!selectedModel||!prompt.trim()||(operation==='image-to-video'&&(!allowUpload||!imageIds.length))} onClick={()=>void generate()}>{busy?'正在提交…':'开始生成素材'}</button>
