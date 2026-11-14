@@ -70,7 +70,7 @@ function ProjectStoryPanel({ controller, project }: { controller: StudioControll
         {story.shots.length > 0 && <table className="vs-plan-shots"><thead><tr><th>#</th><th>镜头</th><th>时长</th><th>画面</th><th>角色</th><th>一致性</th></tr></thead>
           <tbody>{story.shots.map((s, i) => { const score = story.consistency[s.shotId ?? s.id]; return <tr key={s.id}><td>{i + 1}{s.continueFromPrevious ? ' ↩' : ''}</td><td>{s.shotId ?? '—'}</td><td>{s.durationSeconds}s</td><td>{s.summary}</td><td>{s.characters.join('、')}</td><td className={score ? (score.score < 75 ? 'is-low' : 'is-ok') : ''} title={score?.notes}>{score ? score.score : '—'}</td></tr>; })}</tbody></table>}
         <button disabled={disabled || dirty} onClick={() => void act(() => controller.panelCommand('story.save', { projectId: project.id, expectedVersion: story.version, story: { status: 'empty' } }))}>撤销批准（让智能体重新规划）</button>
-      </> : <p className="vs-muted">让智能体做多镜头或有角色的作品时，它会先提交计划给你审批。</p>}
+      </> : null}
     </section>
     <section aria-label="角色库">
       <h4>角色库{dirty ? ' · 尚未保存' : ''}</h4>

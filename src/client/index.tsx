@@ -1,9 +1,13 @@
 import { createRoot } from 'react-dom/client';
 import { App } from './App.tsx';
 import { StandaloneStudioApi, StudioController } from './controller.ts';
+import { initLook } from './theme.ts';
+import './theme.css';
 import './styles.css';
 import './app.css';
+import './refresh.css';
 
+initLook();
 const api=new StandaloneStudioApi();
 const controller=new StudioController(api);
 controller.setScheme('dark');

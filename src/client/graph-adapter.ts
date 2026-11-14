@@ -1,13 +1,34 @@
 import { LiteGraph, LGraph, LGraphNode, LGraphCanvas, LGraphGroup } from '@comfyorg/litegraph';
 import { deleteAsset, deleteShot, duplicateShot } from '../core/index.ts';
 import { outputPositionWithoutOverlap } from './project-ui.ts';
+import { token } from './theme.ts';
 import type { Asset, GraphEditorAdapter, Shot, VideoProject } from '../shared/types.ts';
+
+/** Canvas colors come from the --cv-* theme tokens; these literals are only fallbacks. */
+const P={bg:'#f2f3f5',node:'#ffffff',inset:'#f1f2f4',text:'#1d2126',text2:'#4b525b',text3:'#7b818a',titleText:'#ffffff',slotText:'#5b616a',
+  shotTitle:'#c9481b',shotBody:'#ffffff',shotLabel:'#c9481b',shotRule:'#ebdcd5',imageTitle:'#4a6b8f',mediaTitle:'#7a5f99',mediaLabel:'#6c4f8c',assetBody:'#ffffff',
+  filmTitle:'#9a7414',filmBody:'#fdf8ec',filmLabel:'#7d5d0c',linkAsset:'#4f86c6',linkRef:'#9b7bc4',linkShot:'#c9481b',selected:'#15181c',shadow:'rgba(20,24,30,.12)'};
+const TOKENS:Record<keyof typeof P,string>={bg:'bg',node:'node',inset:'inset',text:'text',text2:'text-2',text3:'text-3',titleText:'title-text',slotText:'slot-text',
+  shotTitle:'shot-title',shotBody:'shot-body',shotLabel:'shot-label',shotRule:'shot-rule',imageTitle:'image-title',mediaTitle:'media-title',mediaLabel:'media-label',assetBody:'asset-body',
+  filmTitle:'film-title',filmBody:'film-body',filmLabel:'film-label',linkAsset:'link-asset',linkRef:'link-ref',linkShot:'link-shot',selected:'selected',shadow:'shadow'};
+function loadPalette():void{
+  for(const key of Object.keys(P) as (keyof typeof P)[])P[key]=token('--cv-'+TOKENS[key],P[key]);
+  Object.assign(LiteGraph,{NODE_TEXT_COLOR:P.slotText,NODE_TITLE_COLOR:P.titleText,NODE_SELECTED_TITLE_COLOR:P.titleText,NODE_TEXT_HIGHLIGHT_COLOR:P.text,NODE_BOX_OUTLINE_COLOR:P.selected,NODE_DEFAULT_BGCOLOR:P.node,NODE_DEFAULT_BOXCOLOR:P.text3,DEFAULT_SHADOW_COLOR:P.shadow});
+  Object.assign(LGraphCanvas.link_type_colors,{asset:P.linkAsset,reference:P.linkRef,shot:P.linkShot});
+  StudioNode.title_text_color=P.titleText;
+}
+function paintNode(node:StudioNode):void{
+  const kind=node.data.kind;
+  if(kind==='shot'){node.color=P.shotTitle;node.bgcolor=P.shotBody;}
+  else if(kind==='film'){node.color=P.filmTitle;node.bgcolor=P.filmBody;}
+  else{node.color=kind==='image'?P.imageTitle:P.mediaTitle;node.bgcolor=P.assetBody;}
+}
 
 export interface GraphEdge { from:string; to:string }
 type NodeKind='image'|'text'|'audio'|'video'|'shot'|'film';
 interface NodeData { id:string; kind:NodeKind; asset?:Asset; shot?:Shot; image?:HTMLImageElement; order:number; fps?:number }
 class StudioNode extends LGraphNode {
-  static title='视频节点'; static title_text_color='#eef5f7'; data:NodeData={id:'',kind:'film',order:0};
+  static title='视频节点'; static title_text_color=P.titleText; data:NodeData={id:'',kind:'film',order:0};
   constructor(){super('视频节点');this.size=[252,184];this.resizable=false;}
   get shotBodyTop():number{return this.inputs.length*LiteGraph.NODE_SLOT_HEIGHT+14;}
   resizeForPorts():void{if(this.data.kind==='shot'){this.size=[252,this.shotBodyTop+142];this.setDirtyCanvas(true,true);}}
@@ -15,26 +36,26 @@ class StudioNode extends LGraphNode {
     const d=this.data;ctx.save();ctx.font='14px system-ui, sans-serif';ctx.textBaseline='top';
     if(d.kind==='image'){
       const image=d.image;
-      ctx.fillStyle='#192a37';ctx.fillRect(14,50,224,92);
+      ctx.fillStyle=P.inset;ctx.fillRect(14,50,224,92);
       if(image?.complete&&image.naturalWidth){const scale=Math.min(224/image.naturalWidth,92/image.naturalHeight);const w=image.naturalWidth*scale,h=image.naturalHeight*scale;ctx.drawImage(image,14+(224-w)/2,50+(92-h)/2,w,h);}
-      else {ctx.fillStyle='#8397a7';ctx.fillText('图片资产',26,86);}
-      ctx.fillStyle='#a8b7c4';ctx.fillText(ellipsize(ctx,d.asset?.description||d.asset?.name||'',224),14,153);
+      else {ctx.fillStyle=P.text3;ctx.fillText('图片资产',26,86);}
+      ctx.fillStyle=P.text2;ctx.fillText(ellipsize(ctx,d.asset?.description||d.asset?.name||'',224),14,153);
     }else if(d.kind==='text'){
-      ctx.fillStyle='#d2dce4';wrap(ctx,d.asset?.text||d.asset?.description||'文字内容',14,54,220,18,5);
+      ctx.fillStyle=P.text;wrap(ctx,d.asset?.text||d.asset?.description||'文字内容',14,54,220,18,5);
     }else if(d.kind==='video'){
-      ctx.fillStyle='#bcbbeb';ctx.fillText('▶  视频素材',14,57);ctx.fillStyle='#d2dce4';wrap(ctx,d.asset?.description||d.asset?.name||'',14,86,220,20,2);
-      ctx.fillStyle='#99a7ba';ctx.fillText(ellipsize(ctx,`${(d.asset?.duration||0).toFixed(1)} 秒 · 镜头属性绑定`,220),14,143);
+      ctx.fillStyle=P.mediaLabel;ctx.fillText('▶  视频素材',14,57);ctx.fillStyle=P.text;wrap(ctx,d.asset?.description||d.asset?.name||'',14,86,220,20,2);
+      ctx.fillStyle=P.text3;ctx.fillText(ellipsize(ctx,`${(d.asset?.duration||0).toFixed(1)} 秒 · 镜头属性绑定`,220),14,143);
     }else if(d.kind==='audio'){
-      ctx.fillStyle='#bcbbeb';ctx.fillText('♫  音频素材',14,57);ctx.fillStyle='#d2dce4';wrap(ctx,d.asset?.description||d.asset?.name||'',14,86,220,20,2);
-      ctx.fillStyle='#99a7ba';ctx.fillText(ellipsize(ctx,`${(d.asset?.duration||0).toFixed(1)} 秒 · 声音面板安排`,220),14,143);
+      ctx.fillStyle=P.mediaLabel;ctx.fillText('♫  音频素材',14,57);ctx.fillStyle=P.text;wrap(ctx,d.asset?.description||d.asset?.name||'',14,86,220,20,2);
+      ctx.fillStyle=P.text3;ctx.fillText(ellipsize(ctx,`${(d.asset?.duration||0).toFixed(1)} 秒 · 声音面板安排`,220),14,143);
     }else if(d.kind==='shot'){
       const top=this.shotBodyTop;
-      ctx.strokeStyle='#36504f';ctx.beginPath();ctx.moveTo(14,top-12);ctx.lineTo(238,top-12);ctx.stroke();
-      ctx.fillStyle='#79d8c0';ctx.fillText(`镜头 ${String(d.order+1).padStart(2,'0')}  ·  ${((d.shot?.durationFrames||0)/(d.fps||30)).toFixed(1)} 秒`,14,top);
-      ctx.fillStyle='#e0e8ed';wrap(ctx,d.shot?.intent||'描述这个镜头想表达什么',14,top+23,216,18,3);
-      ctx.fillStyle='#93a5b4';ctx.fillText(ellipsize(ctx,d.shot?.composition||'可在右侧编辑构图和动作',216),14,top+83);
-      const n=(d.shot?.assetIds.length||0)+(d.shot?.referenceIds.length||0);ctx.fillStyle='#7892a3';ctx.fillText(`${n} 项素材关联  ·  ${d.shot?.transition==='fade'?'淡入淡出':'直接切换'}`,14,top+109);
-    }else {ctx.fillStyle='#e2cf8e';ctx.fillText('主镜头链的终点',14,55);ctx.fillStyle='#aab7c2';wrap(ctx,'最后一个镜头连接到这里，然后生成画面、预览并导出。',14,83,220,19,3);}
+      ctx.strokeStyle=P.shotRule;ctx.beginPath();ctx.moveTo(14,top-12);ctx.lineTo(238,top-12);ctx.stroke();
+      ctx.fillStyle=P.shotLabel;ctx.fillText(`镜头 ${String(d.order+1).padStart(2,'0')}  ·  ${((d.shot?.durationFrames||0)/(d.fps||30)).toFixed(1)} 秒`,14,top);
+      ctx.fillStyle=P.text;wrap(ctx,d.shot?.intent||'描述这个镜头想表达什么',14,top+23,216,18,3);
+      ctx.fillStyle=P.text2;ctx.fillText(ellipsize(ctx,d.shot?.composition||'可在右侧编辑构图和动作',216),14,top+83);
+      const n=(d.shot?.assetIds.length||0)+(d.shot?.referenceIds.length||0);ctx.fillStyle=P.text3;ctx.fillText(`${n} 项素材关联  ·  ${d.shot?.transition==='fade'?'淡入淡出':'直接切换'}`,14,top+109);
+    }else {ctx.fillStyle=P.filmLabel;ctx.fillText('主镜头链的终点',14,55);ctx.fillStyle=P.text2;wrap(ctx,'最后一个镜头连接到这里，然后生成画面、预览并导出。',14,83,220,19,3);}
     ctx.restore();
   }
 }
@@ -51,9 +72,10 @@ export class LiteGraphEditor implements GraphEditorAdapter {
   private clipboardIds:string[]=[];
   private disposed=false; private cleanup:(()=>void)[]=[];
   constructor(private canvas:HTMLCanvasElement,private onChange:(project:VideoProject)=>void,private onSelect:(id:string|null)=>void,private onViewport:(scale:number)=>void=()=>{}){
-    register();this.graph=new LGraph();this.view=new LGraphCanvas(canvas,this.graph);
-    this.view.show_info=false;this.view.background_image='';this.view.clear_background_color='#111c27';this.view.render_canvas_border=false;
-    this.view.render_shadows=false;this.view.allow_searchbox=false;this.view.allow_dragcanvas=true;
+    register();loadPalette();this.graph=new LGraph();this.view=new LGraphCanvas(canvas,this.graph);
+    this.view.show_info=false;this.view.background_image='';this.view.clear_background_color=P.bg;this.view.render_canvas_border=false;
+    this.view.render_shadows=true;this.view.allow_searchbox=false;this.view.default_link_color=P.linkShot;
+    this.view.render_connections_border=false;this.view.connections_width=2.5;this.view.allow_dragcanvas=true;
     this.view.low_quality_zoom_threshold=.2;
     this.view.ds.min_scale=.08;this.view.ds.max_scale=3;
     // LiteGraph 0.17.2 scales its background for DPR, but leaves its foreground and
@@ -68,7 +90,9 @@ export class LiteGraphEditor implements GraphEditorAdapter {
     let resolution:MediaQueryList;
     const watchDpr=()=>{resolution?.removeEventListener('change',changedDpr);resolution=window.matchMedia(`(resolution: ${window.devicePixelRatio||1}dppx)`);resolution.addEventListener('change',changedDpr);};
     const changedDpr=()=>{this.resize();watchDpr();};watchDpr();this.cleanup.push(()=>resolution.removeEventListener('change',changedDpr));
-    this.view.default_connection_color_byType={...this.view.default_connection_color_byType,asset:'#74a4d8',reference:'#ac94cc',shot:'#7bd6bd'};
+    this.view.default_connection_color_byType={...this.view.default_connection_color_byType,asset:P.linkAsset,reference:P.linkRef,shot:P.linkShot};
+    const relook=()=>{loadPalette();this.view.clear_background_color=P.bg;this.view.default_link_color=P.linkShot;this.view.default_connection_color_byType={...this.view.default_connection_color_byType,asset:P.linkAsset,reference:P.linkRef,shot:P.linkShot};for(const node of this.nodes.values())paintNode(node);this.view.setDirty(true,true);};
+    window.addEventListener('yingliu-look-changed',relook);this.cleanup.push(()=>window.removeEventListener('yingliu-look-changed',relook));
     // Never expose LiteGraph's generic HTML property dialogs; React owns all text inputs.
     this.view.showEditPropertyValue=()=>undefined;
     this.view.showShowNodePanel=(node:LGraphNode)=>this.onSelect((node as StudioNode).data.id);
@@ -115,21 +139,21 @@ export class LiteGraphEditor implements GraphEditorAdapter {
       const assetX=Math.min(375,...project.shots.map(s=>project.graph.positions[s.id]?.[0]??375))-335;
       project.assets.forEach((asset,index)=>{
         const node=this.add(asset.id,asset.kind,asset.name,project.graph.positions[asset.id]||[assetX,55+index*235]);node.data.asset=asset;
-        node.color=asset.kind==='image'?'#315474':'#5f4e77';node.bgcolor='#1d2b3a';
+        paintNode(node);
         if(asset.kind!=='audio'&&asset.kind!=='video'){node.addOutput('使用素材','asset');node.addOutput('仅供参考','reference');}
         if(asset.kind==='image'){const url=assetUrl(asset);if(url){const image=new Image();image.onload=()=>node.setDirtyCanvas(true,true);image.src=url;node.data.image=image;}}
       });
       project.shots.forEach((shot,index)=>{
         const order=project.shotOrder.indexOf(shot.id);
         const node=this.add(shot.id,'shot',shot.title,project.graph.positions[shot.id]||[375+(index%3)*330,100+Math.floor(index/3)*300]);node.data.shot=shot;node.data.order=order<0?index:order;node.data.fps=project.target.fps.num/project.target.fps.den;
-        node.color='#2c7168';node.bgcolor='#1a3033';node.addInput('上一镜头','shot');node.addOutput('下一镜头','shot');
+        paintNode(node);node.addInput('上一镜头','shot');node.addOutput('下一镜头','shot');
         for(let i=0;i<Math.max(1,shot.assetIds.length+1);i++)node.addInput(`使用 ${i+1}`,'asset');
         for(let i=0;i<Math.max(1,shot.referenceIds.length+1);i++)node.addInput(`参考 ${i+1}`,'reference');
         node.resizeForPorts();
         node.onConnectionsChange=()=>{if(this.setting)return;for(const type of ['asset','reference'])if(!node.inputs.some(input=>input.type===type&&input.link==null))node.addInput(type==='asset'?'使用 +':'参考 +',type);node.resizeForPorts();this.queueChange();};
       });
       const outputPosition=outputPositionWithoutOverlap(project.graph.positions['film-output']||[375+Math.min(project.shots.length,3)*330,100],project.shots.map(shot=>{const node=this.nodes.get(shot.id)!;return {position:[node.pos[0],node.pos[1]],size:[node.size[0],node.size[1]]};}));
-      const film=this.add('film-output','film','影片输出',outputPosition);film.color='#897138';film.bgcolor='#332e21';film.addInput('最后镜头','shot');
+      const film=this.add('film-output','film','影片输出',outputPosition);paintNode(film);film.addInput('最后镜头','shot');
       for(const shot of project.shots){const target=this.nodes.get(shot.id)!;shot.assetIds.forEach((id,i)=>this.nodes.get(id)?.connect(0,target,1+i));const offset=1+Math.max(1,shot.assetIds.length+1);shot.referenceIds.forEach((id,i)=>this.nodes.get(id)?.connect(1,target,offset+i));}
       for(const edge of graphEdges(project)){const from=this.nodes.get(edge.from),to=this.nodes.get(edge.to);if(from&&to)from.connect(0,to,0);}
       for(const saved of project.graph.groups){const group=new LGraphGroup(saved.title);group.pos=[saved.bounds[0],saved.bounds[1]];group.size=[saved.bounds[2],saved.bounds[3]];this.graph.add(group);}
