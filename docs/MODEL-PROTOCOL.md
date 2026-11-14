@@ -2,7 +2,11 @@
 
 正常应用通过模型中心保存多个连接，每个连接可注册多个模型，再将导演、场景代码、视觉检查、生图、生视频和配音角色分配给模型。文本与媒体分别使用各自协议；任意 Base URL 不代表兼容，应用不要求常驻公共网关，也不读取 DSH、Codex 或其他应用凭据。
 
-`custom` 是保留的旧文本配置兼容入口。首次迁移时，旧 `provider.json` 及 `yingliu.custom-model.api-key` 引用成为默认连接和模型；没有旧数据时保留 DeepSeek 兼容地址与模型作为未配置起点。缺少所需凭据时，在创建工程或持久化 pending 回合之前拒绝 AI 请求；显式配置 `auth:none` 的本地/无密钥服务不需要 Key。旧数据不会因迁移被删除，已有模型注册表优先。
+`custom` 是文本接口。默认名称为 OpenAI，Base URL 为 `https://api.openai.com/v1`，模型 ID 为 `gpt-6-luna`（2026-11 官方模型目录里的高效率对话模型；当前型号普遍也能看图，本应用仍不向文本接口发送图片）。`custom-vision` 是单独的多模态接口，建议型号 `gpt-6.1-terra`，只有用户保存后才写入；未保存或没有密钥时，对话、智能体和协作制作继续只用文本，视觉检查需要改用本地运行检查或先配置多模态。DeepSeek 及其他 OpenAI 兼容服务可以改填名称、模型和 Base URL，不再作为默认标题。
+
+首次迁移时，旧的单一 `provider.json` 整份进入文本配置，密钥仍留在 `yingliu.custom-model.api-key`。旧的「支持图片」开关不会变成第二份接口，也不会继续让文本模型接收图片；若注册表里视觉角色正绑在这个文本模型上，迁移时解除该绑定。多模态密钥使用另一条引用 `yingliu.custom-vision.api-key`。缺少所需凭据时，在创建工程或持久化 pending 回合之前拒绝 AI 请求；显式配置 `auth:none` 的本地/无密钥服务不需要 Key。旧数据不会因迁移被删除，已有模型注册表优先，文本模型上的图片输入会改回纯文本。
+
+结构对照的是插件仓库 [yingliu-video-studio](https://github.com/lakeofsky347/yingliu-video-studio) 的模型注册表：每条连接有自己的地址、协议和凭据引用，密钥不进工程。该插件的文本走 DSH 路由，图片块是 DSH attachment，不是本应用的 `image_url`。本应用把 `image_url` 只发给已绑定且打开了 `enableVision` 的多模态连接。对话在多模态调用失败时改为文字说明，文本回合继续；这个降级接近 [dsh-vision](https://github.com/lakeofsky347/dsh-vision)，但配置和密钥不使用它的 DSH provider/model 字段。
 
 离线 `demo / offline-director` 只允许测试显式构造 `ProviderManager(...,{allowFixtures:true})`，不出现在正常供应商目录。本次验证使用离线单元测试和 localhost 测试网关，未执行真实付费请求。协议通过、生成成功与成片质量分别记录；目录可访问、源码保存及运行检查不能替代真实供应商创作或视觉验收。
 
@@ -39,7 +43,7 @@ baseUrl 一般填写到 `/v1`，适配器负责拼接具体接口。视频连接
 
 `/chat/completions` 使用同一个多轮 `messages`，支持 SSE 和普通 JSON 回复。Key 只交给注入的 `SecretStore`；注册表保存凭据引用，legacy provider.json 保留旧配置，不保存 Key。服务错误中的 Key 被脱敏。模型注册表及 `ProviderManager.save()` 串行合并更新并原子替换；配置保存失败时恢复此前凭据。
 
-下表为文本传输读取的模型 parameters 默认值与保护范围；supportsVision 由模型 inputModalities 推导，旧 custom 配置保留同名字段：
+下表为文本传输读取的模型 parameters 默认值与保护范围。文本连接忽略图片开关。多模态连接自己的模型把 `inputModalities` 设为 `text+image`，并写入 `enableVision:true`；`supportsVision` 只从该模型的输入模态推导，不再是文本配置上的复选框。
 
 | 参数 | 默认 | 范围 |
 |---|---:|---|
@@ -48,8 +52,8 @@ baseUrl 一般填写到 `/v1`，适配器负责拼接具体接口。视频连接
 | `requestTimeoutMs` | 90000 | 5000–300000 毫秒 |
 | `contextMessageLimit` | 24 | 4–100 条历史消息 |
 | `contextCharLimit` | 90000 | 8000–300000 字符的文本预算 |
-| `supportsVision` | false | 用户确认供应商/模型支持图片输入 |
-| `enableVision` | false | 用户明确开启图片发送 |
+| `supportsVision` | false | 仅多模态模型为 true，由 image 输入模态推导 |
+| `enableVision` | false | 仅已保存的多模态模型为 true，表示允许向该连接发送图片 |
 | `maxVisionImages` | 3 | 1–3 |
 | `maxVisionBytes` | 6291456 | 1024–6291456 字节，总和 |
 | `maxVisionDimension` | 4096 | 64–4096，最长边 |
@@ -112,7 +116,7 @@ JSON 格式或本地规划校验错误会返回未提交回执，供有限修复
 
 ## 明确授权的图片输入
 
-对话图片发送同时需要：模型 inputModalities 包含 image（兼容配置表现为 `supportsVision:true`）、模型参数 `enableVision:true`、当前请求 `allowImageUpload:true`，以及明确 `imageAssetIds`。不会自动发送所有工程资产。选中镜头存在时，图片必须属于该镜头的生产或参考素材；未选中时也仅发送明确列出的资产 ID。
+对话图片发给多模态角色，不发给文本导演。需要：已绑定的视觉模型 `inputModalities` 包含 image 且 `enableVision:true`、该连接有可用密钥、当前请求 `allowImageUpload:true`，以及明确 `imageAssetIds`。请求体是 OpenAI Chat Completions 的 `image_url` 内容块（data URL，仅 PNG/JPEG/WebP）。多模态模型先返回文字描述，文本导演只看到这段描述。未配置、没有密钥或看图失败时，本轮不发送像素，导演继续处理文字。不会自动发送所有工程资产。选中镜头存在时，图片必须属于该镜头的生产或参考素材；未选中时也仅发送明确列出的资产 ID。
 
 每轮最多 3 张、总计 6 MB、最长边 4096 像素、每张总像素不超过 16,777,216。工程路径通过 `projectPath` 校验，拒绝绝对路径、越界与符号链接；读取前后核对字节，读取文件签名和实际尺寸，支持 PNG/JPEG/WebP。超限时明确报错，用户先导入较小素材。图片以 data URL 发送到当前配置的模型服务，不写入聊天记录。有限修复的后续请求仍使用本轮明确选中的图片，移除较早请求中的重复图片块，以确保当前请求内的图片数量和字节上限。回合只记录实际发送的 asset ID。
 
@@ -145,7 +149,7 @@ Schema 和请求/响应样例位于 `docs/media-gateway-v1/`。媒体任务提�
 
 导演保留已有镜头 ID 并输出镜头规格；code 调用 scene 角色生成源码，image/video 创建持久媒体任务，配音通过 speech 角色或已有本地方式生成。image/video 流程保留已有代码图层；不是每个模式都会额外调用 scene 重新写源码。候选结果完整并完成已启用的视觉检查后，自动以起始 revision 提交。遇到版本冲突标记 awaiting-apply，用户显式采用时基于当前版本更新目标镜头并保留其他镜头；启用视觉检查时，重新构建候选快照并审片后再提交。目标镜头已删除时拒绝覆盖并保留产物。
 
-视觉检查需要本轮明确授权、vision 模型图片能力与 enableVision 开关。在主工程提交之前，服务冻结候选工程、源码和素材快照，选取目标镜头中点、最多三张实际渲染帧，将帧像素发给模型并保存帧号和 SHA256。捕帧与检查执行失败时不提交候选结果；成功完成检查后仍须通过 expectedRevision 校验，防止覆盖期间的用户修改。基于最新 revision 显式采用时重新审查新候选快照，不沿用旧帧证据。检查只针对这些帧提供意见，不代表完整影片美术验收；仅查看源码或运行诊断不会记作这一步完成。
+视觉检查需要本轮明确授权，以及已经绑定的多模态模型（图片输入与 enableVision）。未配置时，开始协作并打开视觉检查会直接拒绝，不会先去做可能计费的生成。在主工程提交之前，服务冻结候选工程、源码和素材快照，选取目标镜头中点、最多三张实际渲染帧，将帧像素以 `image_url` 发给多模态模型并保存帧号和 SHA256。捕帧与检查执行失败时不提交候选结果；成功完成检查后仍须通过 expectedRevision 校验，防止覆盖期间的用户修改。基于最新 revision 显式采用时重新审查新候选快照，不沿用旧帧证据。检查只针对这些帧提供意见，不代表完整影片美术验收；仅查看源码或运行诊断不会记作这一步完成。
 
 恢复复用已完成步骤；显式重试已经远端 failed/cancelled 的媒体步骤可创建新生成请求，并保留此前任务 ID。同步配音如果提交结果不确定，不自动重试收费。暂停/退出保存进度并停止本地观察，不等价于远端取消。工作流状态是 running/paused/failed/awaiting-apply/complete，与媒体任务远端状态分离。
 

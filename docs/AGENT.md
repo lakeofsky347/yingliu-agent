@@ -36,7 +36,7 @@
 - 网络错误、HTTP 429/5xx 按指数退避重试 3 次；版本冲突和参数错误作为工具结果交还模型处理。
 - 应用重启时，进行中的运行标记为「已暂停」，可从队列中的下一个工具调用继续；等待审批的运行保持等待。
 - 同工程的启动、审批、拒绝、恢复、暂停与取消通过生命周期队列串行化；旧循环排空后重新检查占用，避免同工程两个智能体同时执行。不同工程可独立运行。此边界位于单个应用服务内，不代表跨 CLI/桌面进程锁。
-- 模型使用 `director` 角色绑定的模型，默认可配置 `deepseek-chat`；在模型参数里设 `supportsTools:false` 可强制使用计划 JSON。
+- 模型使用 `director` 角色绑定的文本模型，默认是 OpenAI 的 `gpt-6-luna`；在模型参数里设 `supportsTools:false` 可强制使用计划 JSON。截图不会附在文本请求上。已绑定多模态角色时，用 `visual_review` 把 `image_url` 发给该角色；未配置时改为 `render_check`。
 
 ## 测试
 
@@ -53,7 +53,7 @@
 ### 协议
 | 协议 | 用途 | 说明 |
 | --- | --- | --- |
-| `chat-completions` | 导演 / 场景 / 视觉检查 | OpenAI 兼容，默认可用 deepseek-chat |
+| `chat-completions` | 导演 / 场景用文本连接；视觉检查用另一条多模态连接 | OpenAI Chat Completions。文本默认 `gpt-6-luna`，多模态建议 `gpt-6.1-terra`，均可通过兼容 Base URL 改填 |
 | `images` | 生图 | OpenAI `/images/generations` 兼容（含火山方舟 Seedream 等兼容接口） |
 | `video-gateway` | 生视频 | 映流媒体网关 v1 |
 | `speech` | 配音 | 应用原有 TTS 设置 |

@@ -25,12 +25,13 @@ test('a temporarily denied Windows index rename preserves the old HTTP graph and
   const directory=await fs.mkdtemp(join(tmpdir(),'yingliu-runtime-rename-release-')),store=new ProjectStore({baseDirectory:directory}),renderer=new VideoRenderer(store),rename=fs.rename.bind(fs),open=fs.open.bind(fs);
   const first=deferred(),releaseFailure=deferred(),second=deferred(),releaseSuccess=deferred(),platform=Object.getOwnPropertyDescriptor(process,'platform')!;let preparing:Promise<string>|undefined;
   try{
-    const created=await store.create(createProject('runtime index重试')),url=await renderer.preview(created.root,created.project),old=await graph(url),index=join(created.root,'index.html'),next=structuredClone(created.project);next.revision++;next.title='新图最后发布';
+    const created=await store.create(createProject('runtime index重试')),url=await renderer.preview(created.root,created.project),old=await graph(url),next=structuredClone(created.project);next.revision++;next.title='新图最后发布';
     const shot=next.shots[0]!,changed={html:'<p>new scene</p>',css:'p{color:red}',js:'export function render(ctx){ctx.root.dataset.revision="new";}'};
     const saved=await store.commit(created.root,next,{[shot.id]:changed},{expectedRevision:created.project.revision});let attempts=0,syncs=0;const published:string[]=[],temporaries=new Set<string>();
-    t.mock.method(fs,'open',async(...[file,flags,mode]:Parameters<typeof fs.open>)=>{const handle=await open(file,flags,mode);if(typeof file==='string'&&file.startsWith(index+'.tmp-')&&flags==='wx'){temporaries.add(file);const sync=handle.sync.bind(handle);t.mock.method(handle,'sync',async()=>{syncs++;await sync();});}return handle;});
+    const pageFile=(file:unknown)=>typeof file==='string'&&/[\\/]runtime[\\/]page-[a-f0-9]{64}\.html$/.test(file);
+    t.mock.method(fs,'open',async(...[file,flags,mode]:Parameters<typeof fs.open>)=>{const handle=await open(file,flags,mode);if(typeof file==='string'&&/[\\/]runtime[\\/]page-[a-f0-9]{64}\.html\.tmp-/.test(file)&&flags==='wx'){temporaries.add(file);const sync=handle.sync.bind(handle);t.mock.method(handle,'sync',async()=>{syncs++;await sync();});}return handle;});
     t.mock.method(fs,'rename',async(...[from,to]:Parameters<typeof fs.rename>)=>{
-      if(to===index){attempts++;if(attempts===1){first.resolve();await releaseFailure.promise;throw denied();}if(attempts===2){second.resolve();await releaseSuccess.promise;}}
+      if(pageFile(to)){attempts++;if(attempts===1){first.resolve();await releaseFailure.promise;throw denied();}if(attempts===2){second.resolve();await releaseSuccess.promise;}}
       const result=await rename(from,to);published.push(relative(created.root,String(to)).replaceAll('\\','/'));return result;
     });syncBuiltinESMExports();
     // Keep controlled HTTP gates independent of scheduler latency; expiry of
@@ -42,9 +43,9 @@ test('a temporarily denied Windows index rename preserves the old HTTP graph and
     await bounded(Promise.race([first.promise,preparing.then(()=>{throw new Error('missing first index rename gate');})]));Object.defineProperty(process,'platform',platform);
     assert.deepEqual(await graph(url),old);releaseFailure.resolve();
     await bounded(Promise.race([second.promise,preparing.then(()=>{throw new Error('missing Windows retry');})]));assert.deepEqual(await graph(url),old,'retry等待及第二次发布前，旧index和资源必须仍完整');
-    releaseSuccess.resolve();const result=await graph(await bounded(preparing));assert.equal(attempts,2);assert.equal(temporaries.size,2);assert.equal(syncs,2,'每次尝试都同步新临时文件');assert.equal(published.at(-1),'index.html');
+    releaseSuccess.resolve();const result=await graph(await bounded(preparing));assert.equal(attempts,2);assert.equal(temporaries.size,2);assert.equal(syncs,2,'每次尝试都同步新临时文件');assert.match(published.at(-1)??'',/^runtime\/page-[a-f0-9]{64}\.html$/);
     const source=result.data.sources.find((item:any)=>item.id===shot.id);assert.equal(source.html,changed.html);assert.equal(result.resources.get(new URL(source.moduleUrl,new URL('./runtime/',url)).href),changed.js);
-    for(const [resource,bytes]of old.resources)assert.equal(await text(resource),bytes);assert.ok(!(await fs.readdir(created.root)).some(name=>name.startsWith('index.html.tmp-')));
+    for(const [resource,bytes]of old.resources)assert.equal(await text(resource),bytes);assert.ok(!(await fs.readdir(join(created.root,'runtime'))).some(name=>name.includes('.tmp-')));
   }finally{Object.defineProperty(process,'platform',platform);releaseFailure.resolve();releaseSuccess.resolve();await preparing?.catch(()=>{});t.mock.restoreAll();syncBuiltinESMExports();await renderer.close();await fs.rm(directory,{recursive:true,force:true});}
 });
 

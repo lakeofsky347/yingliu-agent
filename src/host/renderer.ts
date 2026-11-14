@@ -21,7 +21,12 @@ export interface FrameCapture { frame:number; shotId:string; path:string; sha256
 export interface RenderIssue { shotId?:string; frame?:number; message:string;failure?:TaskFailureDiagnostic;comparison?:ReturnType<typeof compareFramePng>&{phase:'backward'|'cold';frame:number;expectedHash:string;actualHash:string;fontsStatus:'loaded'|'loading'|'unavailable';fontFaces:number;deviceScaleFactor:number} }
 export interface RenderCheckResult { ok:boolean; errors:RenderIssue[]; frames:FrameCapture[]; reportPath?:string }
 export function renderCheckError(result:RenderCheckResult):Error{const error=new Error(result.errors.map(issue=>issue.message).join('\n'));return Object.assign(error,{failure:result.errors.find(issue=>issue.failure)?.failure??taskFailure(error,'render_check')});}
-interface ProjectServer { server:Server; origin:string; root:string }
+interface ProjectServer { server:Server; origin:string; root:string; pageName?:string }
+const runtimeReads=new Map<string,number>();
+function holdRead(file:string):()=>void{
+  const key=path.resolve(file);runtimeReads.set(key,(runtimeReads.get(key)??0)+1);let released=false;
+  return ()=>{if(released)return;released=true;const next=(runtimeReads.get(key)??1)-1;if(next<=0)runtimeReads.delete(key);else runtimeReads.set(key,next);};
+}
 const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.txt':'text/plain; charset=utf-8','.woff2':'font/woff2','.mp4':'video/mp4','.wav':'audio/wav','.mp3':'audio/mpeg','.m4a':'audio/mp4','.aac':'audio/aac','.flac':'audio/flac','.ogg':'audio/ogg'};
 
 export function detectEnvironment(settings:Partial<EnvironmentSettings>={},options:ToolEnvironmentOptions={}):EnvironmentInfo {
@@ -32,13 +37,14 @@ function json(value:unknown):string { return JSON.stringify(value,null,2)+'\n'; 
 /** Runtime-only: retry the observed Windows EPERM/rename without weakening publication.
  * Await each complete durable write; never race an abandoned write against a timeout. */
 export async function writeRuntimeFile(file:string,content:string,platform:NodeJS.Platform=process.platform):Promise<void>{
-  const deadline=performance.now()+750;let firstError:unknown;
+  const started=performance.now(),deadline=started+750;let firstError:unknown;
   for(let attempt=1;;attempt++){
     try{await writeDurableFile(file,content);return;}
     catch(error){
       const io=error&&typeof error==='object'?error as NodeJS.ErrnoException:undefined;
       if(platform!=='win32'||io?.code!=='EPERM'||io.syscall!=='rename')throw error;
       firstError??=error;
+      if(process.platform==='win32')console.error(JSON.stringify({t:new Date().toISOString(),event:'runtime-rename-eperm',attempt,elapsedMs:Math.round(performance.now()-started),reads:runtimeReads.get(path.resolve(file))??0,file:path.basename(file)}));
       if(attempt>=8||performance.now()+100>=deadline)throw firstError;
       await new Promise(resolve=>setTimeout(resolve,100));
       if(performance.now()>=deadline)throw firstError;
@@ -74,10 +80,14 @@ function stopChild(child:ChildProcess):void {
   fallback.unref();child.once('close',()=>clearTimeout(fallback));
 }
 
+function publishedPage(pageName:string|undefined):string|undefined{
+  return pageName&&/^runtime\/page-[a-f0-9]{64}\.html$/.test(pageName)?pageName:undefined;
+}
 async function projectServer(root:string):Promise<ProjectServer> {
   const absoluteRoot=path.resolve(root);
+  const state:ProjectServer={server:undefined!,origin:'',root:absoluteRoot};
   const server=createServer(async(req,res)=>{
-    let file:Awaited<ReturnType<typeof fs.open>>|undefined;
+    let file:Awaited<ReturnType<typeof fs.open>>|undefined,release=()=>{};
     try {
       if(!['GET','HEAD'].includes(req.method??'')){res.writeHead(405);res.end();return;}
       // A loopback listener is insufficient if a foreign website can send a forged Host header.
@@ -89,11 +99,12 @@ async function projectServer(root:string):Promise<ProjectServer> {
       const allowed=relative==='index.html'||/^runtime\/(?:frame(?:-[a-f0-9]{64})?\.mjs|spec(?:-[a-f0-9]{64})?\.json|scenes\/[\w-]+\.mjs|audio\/mix-[\w-]+\.wav)$/.test(relative)||
         /^assets\/[\w./-]+$/.test(relative)||/^\.studio\/inspection\/[\w-]+\.png$/.test(relative)||/^exports\/[\w-]+\/video\.mp4$/.test(relative);
       if(!allowed){res.writeHead(403);res.end('Resource is private');return;}
-      const full=await projectPath(absoluteRoot,relative),type=mime[path.extname(full).toLowerCase()];
+      const page=relative==='index.html'?publishedPage(state.pageName):undefined;
+      const full=await projectPath(absoluteRoot,page??relative),type=mime[path.extname(full).toLowerCase()];
       if(!type){res.writeHead(415);res.end('Unsupported file type');return;}
-      // Match headers and bytes to one inode even if prepare atomically replaces
-      // the public path while this request is in flight.
-      file=await fs.open(full,'r');const stat=await file.stat();if(!stat.isFile())throw new Error('File expected');
+      // Read one inode. Text responses copy the bytes and close before the body
+      // is written, so a later publish does not rename a path this request holds.
+      file=await fs.open(full,'r');release=holdRead(full);const stat=await file.stat();if(!stat.isFile())throw new Error('File expected');
       const headers:Record<string,string|number>={'Content-Type':type,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff',
         'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; worker-src 'none'"};
       const media=type==='video/mp4'||type.startsWith('audio/');if(media)headers['Accept-Ranges']='bytes';
@@ -106,16 +117,20 @@ async function projectServer(root:string):Promise<ProjectServer> {
         if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start>end||start>=stat.size){res.writeHead(416,{'Content-Range':'bytes */'+stat.size});res.end();return;}
         status=206;headers['Content-Range']='bytes '+start+'-'+end+'/'+stat.size;
       }
+      if(!media&&stat.size<=1_048_576&&!req.headers.range){
+        const body=await file.readFile();await file.close();file=undefined;release();release=()=>{};
+        headers['Content-Length']=body.length;res.writeHead(status,headers);if(req.method!=='HEAD')res.end(body);else res.end();return;
+      }
       headers['Content-Length']=Math.max(0,end-start+1);res.writeHead(status,headers);
       if(req.method==='HEAD'){res.end();return;}
-      const stream=file.createReadStream({start,end,autoClose:true});file=undefined;stream.on('error',()=>res.destroy());res.on('close',()=>stream.destroy());stream.pipe(res);
+      const stream=file.createReadStream({start,end,autoClose:true});file=undefined;const done=release;stream.on('error',()=>res.destroy());stream.on('close',done);res.on('close',()=>{stream.destroy();done();});stream.pipe(res);
     }catch { if(!res.headersSent)res.writeHead(404);res.end('Not found'); }
-    finally{if(file)try{await file.close();}catch{res.destroy();}}
+    finally{if(file){try{await file.close();}catch{res.destroy();}release();}}
   });
   await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',()=>{server.off('error',reject);resolve();});});
   const address=server.address();if(!address||typeof address==='string')throw new Error('Unable to bind preview server');
   // A distinct site lets Chromium isolate generated JS from the editor renderer.
-  return {root:absoluteRoot,server,origin:'http://localhost:'+address.port};
+  state.server=server;state.origin='http://localhost:'+address.port;return state;
 }
 async function closeServer(server:Server):Promise<void> {
   server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));
@@ -181,10 +196,14 @@ export class VideoRenderer {
     operation='runtime_spec_publish';await writeImmutableRuntime(await projectPath(root,'runtime/'+specName),manifest);
     operation='runtime_frame_alias_publish';await writeRuntimeFile(await projectPath(root,'runtime/frame.mjs'),browserRuntime);
     operation='runtime_spec_alias_publish';await writeRuntimeFile(await projectPath(root,'runtime/spec.json'),manifest);
-    // index.html is the publication point. Its immutable manifest and modules
-    // already exist in full; an old document keeps its old complete graph while
-    // another preview/check prepares a new revision in the same project.
-    operation='runtime_index_publish';await writeRuntimeFile(await projectPath(root,'index.html'),runtimeHtml(spec.target.width,spec.target.height,{runtimeUrl:'./runtime/'+runtimeName,specUrl:'./runtime/'+specName}));
+    // The document is content-addressed. Replacing a stable index.html races the
+    // preview iframe's read on Windows (MoveFileEx → EPERM). The public URL stays
+    // /index.html; the server switches to this file only after it is durable.
+    // An old document keeps the hashed modules it already loaded.
+    const html=runtimeHtml(spec.target.width,spec.target.height,{runtimeUrl:'./runtime/'+runtimeName,specUrl:'./runtime/'+specName});
+    const pageName='runtime/page-'+hash(html)+'.html';
+    operation='runtime_index_publish';await writeImmutableRuntime(await projectPath(root,pageName),html);
+    (await this.server(root)).pageName=pageName;
     return spec;
     }catch(error){throw withTaskFailure(error,operation);}
   }
@@ -322,7 +341,9 @@ export class VideoRenderer {
     }
     const spec=await this.prepare(snapshotRoot,snapshot),errors:RenderIssue[]=[],frames:FrameCapture[]=[];
     if(spec.target.width%2||spec.target.height%2)throw new Error('H.264 yuv420p requires even width and height');
-    const snapshotServer=await projectServer(snapshotRoot);let connection:Awaited<ReturnType<VideoRenderer['openPage']>>|undefined,encoder:ChildProcess|undefined;
+    // prepare already bound this snapshot root and published its page. A second
+    // server would not see that page, and root index.html is no longer rewritten.
+    const snapshotServer=await this.server(snapshotRoot);let connection:Awaited<ReturnType<VideoRenderer['openPage']>>|undefined,encoder:ChildProcess|undefined;
     const mp4Path=path.join(outputRoot,'video.mp4'),logPath=path.join(outputRoot,'ffmpeg.log');let log='',audioMix:AudioMix|null=null;
     const cancel=()=>{if(encoder)stopChild(encoder);};signal.addEventListener('abort',cancel,{once:true});
     let encoderResult:Promise<void>|undefined;
@@ -366,7 +387,7 @@ export class VideoRenderer {
       await fs.rm(mp4Path,{force:true});throw new Error(signal.aborted?'Task cancelled':(error as Error).message);
     }finally{
       signal.removeEventListener('abort',cancel);if(connection){connection.removeAbort();await connection.browser.close().catch(()=>{});this.browsers.delete(connection.browser);}
-      await closeServer(snapshotServer.server);
+      this.servers.delete(path.resolve(snapshotRoot));await closeServer(snapshotServer.server);
     }
   }
   private async mediaQa(file:string,spec:VideoSpec,settings:EnvironmentSettings,signal:AbortSignal,expectedAudio=false):Promise<Record<string,unknown>> {

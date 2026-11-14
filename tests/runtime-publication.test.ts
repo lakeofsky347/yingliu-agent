@@ -78,7 +78,8 @@ test('runtime HTTP reads size and bytes from the same index inode across atomic 
   const originalOpen=fs.open.bind(fs);let reading:Promise<string>|undefined;
   try{
     const project=createProject('HTTP文件身份');project.target.width=320;project.target.height=240;
-    const created=await store.create(project),url=await renderer.preview(created.root,created.project),indexFile=join(created.root,'index.html'),before=await fs.readFile(indexFile,'utf8');
+    const created=await store.create(project),url=await renderer.preview(created.root,created.project),pages=(await fs.readdir(join(created.root,'runtime'))).filter(name=>/^page-[a-f0-9]{64}\.html$/.test(name));
+    assert.equal(pages.length,1);const indexFile=join(created.root,'runtime',pages[0]!),before=await fs.readFile(indexFile,'utf8');
     const changed=structuredClone(created.project);changed.revision++;changed.target.width=1920;changed.target.height=1080;
     const next=await store.commit(created.root,changed,{}, {expectedRevision:created.project.revision});let blocked=false;
     t.mock.method(fs,'open',async(...[file,flags,mode]:Parameters<typeof fs.open>)=>{
@@ -87,9 +88,11 @@ test('runtime HTTP reads size and bytes from the same index inode across atomic 
     });syncBuiltinESMExports();
     reading=text(url);void reading.catch(()=>{});
     await bounded(Promise.race([entered.promise,reading.then(()=>{throw new Error('HTTP读取未经过index open门闩');})]),'等待index open门闩');
-    await renderer.preview(created.root,next);const expected=await fs.readFile(indexFile,'utf8');
+    const nextUrl=await renderer.preview(created.root,next);const published=(await fs.readdir(join(created.root,'runtime'))).filter(name=>/^page-[a-f0-9]{64}\.html$/.test(name)&&name!==pages[0]);
+    assert.equal(published.length,1);const expected=await fs.readFile(join(created.root,'runtime',published[0]!),'utf8');
     assert.notEqual(Buffer.byteLength(expected),Buffer.byteLength(before),'fixture必须改变index长度才能检测旧size/新inode混用');
-    release.resolve();assert.equal(await bounded(reading,'HTTP读取完整index'),expected,'Content-Length与流数据必须来自同一已打开文件');
+    release.resolve();assert.equal(await bounded(reading,'HTTP读取完整index'),before,'进行中的请求必须读完已打开的那一版页面');
+    assert.equal(await text(nextUrl),expected,'发布完成后新请求读取新页面');assert.equal(await fs.readFile(indexFile,'utf8'),before);
   }finally{release.resolve();await reading?.catch(()=>{});t.mock.restoreAll();syncBuiltinESMExports();await renderer.close();await fs.rm(directory,{recursive:true,force:true});}
 });
 
@@ -117,7 +120,7 @@ test('identical content-addressed runtime resources avoid an existing-target EPE
     const created=await store.create({project:initial,sources:Object.entries(oldSources).map(([shotId,source])=>({shotId,source}))}),url=await renderer.preview(created.root,created.project),old=await graph(url);let replacements=0,newFiles=0;
     t.mock.method(fs,'rename',async(...[from,to]:Parameters<typeof fs.rename>)=>{
       const destination=typeof to==='string'?relative(created.root,to).replaceAll('\\','/'):'';
-      if(/^runtime\/(?:frame-[a-f0-9]{64}\.mjs|spec-[a-f0-9]{64}\.json|scenes\/[^/]+-[a-f0-9]{64}\.mjs)$/.test(destination)){
+      if(/^runtime\/(?:frame-[a-f0-9]{64}\.mjs|spec-[a-f0-9]{64}\.json|scenes\/[^/]+-[a-f0-9]{64}\.mjs|page-[a-f0-9]{64}\.html)$/.test(destination)){
         let exists=false;try{await fs.stat(to);exists=true;}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
         if(exists){replacements++;throw Object.assign(new Error('synthetic Windows existing-target rename failure'),{code:'EPERM',syscall:'rename'});}newFiles++;
       }
@@ -125,7 +128,7 @@ test('identical content-addressed runtime resources avoid an existing-target EPE
     });syncBuiltinESMExports();
     await renderer.preview(created.root,created.project);assert.equal(replacements,0,'相同hash资源不可尝试替换已发布文件');assert.equal(newFiles,0);assert.deepEqual((await graph(url)).resources,old.resources);
     const next=structuredClone(created.project);next.revision++;next.title='新版本仍须完整发布';const shot=next.shots[0]!,changed=source('new',shot.id),saved=await store.commit(created.root,next,{[shot.id]:changed},{expectedRevision:created.project.revision});
-    const published=await graph(await renderer.preview(created.root,saved));assert.equal(replacements,0);assert.equal(newFiles,2,'变更镜头与新spec应各耐久发布一个新hash文件');
+    const published=await graph(await renderer.preview(created.root,saved));assert.equal(replacements,0);assert.equal(newFiles,3,'变更镜头、新spec与新页面应各耐久发布一个新hash文件');
     for(const item of published.spec.sources){const expected=item.id===shot.id?changed:oldSources[item.id]!;assert.equal(item.html,expected.html);assert.equal(item.css,expected.css);assert.equal(published.resources.get(new URL(item.moduleUrl,new URL('./runtime/',url)).href),expected.js);}
     for(const [resource,bytes]of old.resources)assert.equal(await text(resource),bytes,'旧hash资源继续保留原完整内容');
   }finally{t.mock.restoreAll();syncBuiltinESMExports();await renderer.close();await fs.rm(directory,{recursive:true,force:true});}

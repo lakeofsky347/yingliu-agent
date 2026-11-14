@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { AgentContent, AgentEvent, AgentMessage, AgentPort, AgentRun, AgentStartInput, AgentTool, PublicRun, RunStep, ToolCall, ToolResult, ToolRisk, ToolSuccessReceipt } from './contracts.ts';
+import type { AgentEvent, AgentMessage, AgentPort, AgentRun, AgentStartInput, AgentTool, PublicRun, RunStep, ToolCall, ToolResult, ToolRisk, ToolSuccessReceipt } from './contracts.ts';
 import { chatTurn, looksLikeNoToolSupport, type ChatConfig } from './model-client.ts';
 import { backoff, budgetFrom, chargeModel, chargeTool, classify, emptyUsage, needsApproval, overBudget, tokenCost } from './budget.ts';
 import { bound, capabilityPrompt, compressMessages, summarizeProject, systemPrompt } from './context.ts';
@@ -78,7 +78,6 @@ export class AgentService {
   private projectCommands = new Map<string, Promise<void>>();
   private listeners = new Set<(event: AgentEvent) => void>();
   private store: RunStore; private tools: AgentTool[]; private initialized?: Promise<void>; private stopped = false;
-  private imageBuffer = new Map<string, AgentContent[]>();
   private stories: ProjectDocs<Story>; private ledgers: ProjectDocs<Ledger>; private qcs: ProjectDocs<{ version: number; report?: QcReport }>;
   constructor(directory: string, private readonly port: AgentPort, private readonly options: AgentServiceOptions) {
     this.store = new RunStore(directory, options.redact); this.tools = options.tools ?? createTools();
@@ -394,7 +393,6 @@ export class AgentService {
         if (outcome === 'suspend') return;
         continue;
       }
-      const images = this.imageBuffer.get(run.id); if (images?.length) { run.messages.push({ role: 'user', content: [{ type: 'text', text: '上面工具截取的画面：' }, ...images] }); this.imageBuffer.delete(run.id); }
       const limit = await this.budgetLimit(run, 'model');
       if (limit) { run.status = 'budget_exceeded'; run.message = '已停止：' + limit; await this.store.trace(run.id, { event: 'budget', reason: limit, usage: run.usage }); await this.save(run); return; }
       const compressed = compressMessages(run.messages, this.options.contextChars ?? 120_000);
@@ -556,8 +554,10 @@ export class AgentService {
     if (receipt.risk === 'cost') await this.spend(run.projectId, receipt.tool, result.waitFor ? null : result.cost, false, key);
     if (receipt.risk === 'write') meta.dirty = true;
     if (result.images?.length) {
-      if ((model?.vision ?? true) && meta.allowImages) this.imageBuffer.set(run.id, [...(this.imageBuffer.get(run.id) ?? []), ...result.images.map(image => ({ type: 'image_url' as const, image_url: { url: `data:${image.mime};base64,${Buffer.from(image.bytes).toString('base64')}` } }))]);
-      else result = { ...result, content: result.content + '（画面已截取；当前模型或设置不允许发送图片，请用 visual_review 或 render_check 检查）' };
+      const note = meta.allowImages && model?.vision
+        ? '（画面已截取。像素只发给单独配置的多模态模型，请用 visual_review 检查，不会附在文本模型请求上）'
+        : '（画面已截取；多模态接口未配置或未允许发送图片，请用 render_check 检查）';
+      result = { ...result, content: result.content + note };
     }
     const step = run.steps[receipt.stepIndex]; if (step) await this.finishStep(run, step, { status: 'complete', summary: bound(result.content, 300) });
     if (result.projectTask && !run.taskRefs?.some(task => task.id === result.projectTask!.id)) (run.taskRefs ??= []).push({ ...result.projectTask, callId: call.id, execId: call.execId });

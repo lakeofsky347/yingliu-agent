@@ -8,7 +8,7 @@ import { createProject, defaultSceneSource, updateShot } from '../src/core/index
 import type { StudioSnapshot, RpcResult, VideoProject } from '../src/shared/types.ts';
 import type { BackendPort, ChatInput, SecretStore } from '../src/app/contracts.ts';
 import { authorizedImages, compileDirectorPlan, ConversationService } from '../src/app/conversation.ts';
-import { ProviderManager, type ModelMessage } from '../src/app/model.ts';
+import { DEFAULT_TEXT_MODEL, ProviderManager, type ModelMessage } from '../src/app/model.ts';
 import { createFileSymlinkOrSkip } from './fixtures/symlink.ts';
 
 class MemorySecrets implements SecretStore {values=new Map<string,string>();async get(ref:string){return this.values.get(ref);}async set(ref:string,value:string){this.values.set(ref,value);}async delete(ref:string){this.values.delete(ref);}}
@@ -31,7 +31,7 @@ class MockProvider extends ProviderManager {
   async ready(){await this.save({apiKey:'mock-only-not-a-paid-key'});return this;}
   override async complete(turns:ModelMessage[],system:string,signal:AbortSignal){signal.throwIfAborted();this.prompts.push(structuredClone(turns));this.systems.push(system);const value=this.respond(turns,this.prompts.length);return typeof value==='string'?value:JSON.stringify(value);}
 }
-const chat=(message:string,projectId?:string):ChatInput=>({message,projectId,provider:'custom',model:'deepseek-chat'});
+const chat=(message:string,projectId?:string):ChatInput=>({message,projectId,provider:'custom',model:DEFAULT_TEXT_MODEL});
 function patchPlan(project:VideoProject,patch:Record<string,unknown>,id=project.shotOrder[1]){return {intent:'modify',done:true,message:'修改已规划',actions:[{tool:'video_update',arguments:{expectedRevision:project.revision,update:{shotPatches:[{id,patch}]}}}]};}
 function firstPlan(count=1){return {intent:'create',done:true,message:'初稿已规划',actions:[{tool:'video_update',arguments:{expectedRevision:0,update:{storyboard:{shots:Array.from({length:count},(_,index)=>({title:'镜头 '+index,durationSeconds:5,params:{text:'主题 '+index}}))},sourcesByIndex:Array.from({length:count},()=>defaultSceneSource())}}}]};}
 
