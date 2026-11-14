@@ -78,7 +78,8 @@ test('runtime HTTP reads size and bytes from the same index inode across atomic 
   const originalOpen=fs.open.bind(fs);let reading:Promise<string>|undefined;
   try{
     const project=createProject('HTTP文件身份');project.target.width=320;project.target.height=240;
-    const created=await store.create(project),url=await renderer.preview(created.root,created.project),indexFile=join(created.root,'index.html'),before=await fs.readFile(indexFile,'utf8');
+    const created=await store.create(project),url=await renderer.preview(created.root,created.project),pages=(await fs.readdir(join(created.root,'runtime'))).filter(name=>/^page-[a-f0-9]{64}\.html$/.test(name));
+    assert.equal(pages.length,1);const indexFile=join(created.root,'runtime',pages[0]!),before=await fs.readFile(indexFile,'utf8');
     const changed=structuredClone(created.project);changed.revision++;changed.target.width=1920;changed.target.height=1080;
     const next=await store.commit(created.root,changed,{}, {expectedRevision:created.project.revision});let blocked=false;
     t.mock.method(fs,'open',async(...[file,flags,mode]:Parameters<typeof fs.open>)=>{
@@ -87,9 +88,20 @@ test('runtime HTTP reads size and bytes from the same index inode across atomic 
     });syncBuiltinESMExports();
     reading=text(url);void reading.catch(()=>{});
     await bounded(Promise.race([entered.promise,reading.then(()=>{throw new Error('HTTP读取未经过index open门闩');})]),'等待index open门闩');
-    await renderer.preview(created.root,next);const expected=await fs.readFile(indexFile,'utf8');
+    const nextUrl=await renderer.preview(created.root,next);const published=(await fs.readdir(join(created.root,'runtime'))).filter(name=>/^page-[a-f0-9]{64}\.html$/.test(name)&&name!==pages[0]);
+    assert.equal(published.length,1);const expected=await fs.readFile(join(created.root,'runtime',published[0]!),'utf8');
     assert.notEqual(Buffer.byteLength(expected),Buffer.byteLength(before),'fixture必须改变index长度才能检测旧size/新inode混用');
-    release.resolve();assert.equal(await bounded(reading,'HTTP读取完整index'),expected,'Content-Length与流数据必须来自同一已打开文件');
+    release.resolve();assert.equal(await bounded(reading,'HTTP读取完整index'),before,'进行中的请求必须读完已打开的那一版页面');
+    assert.equal(await text(nextUrl),expected,'发布完成后新请求读取新页面');
+    assert.equal(await text(url),before,'已返回的预览地址冷重载时仍然绑定到原页面');
+    assert.equal(await text(new URL('index.html',url).href),expected,'旧入口仍跟随最近发布的页面');
+    assert.equal(await fs.readFile(indexFile,'utf8'),before);
+    const unauthorized=new URL(nextUrl);unauthorized.searchParams.set('page','a'.repeat(64));
+    assert.equal((await fetch(unauthorized)).status,404,'只能访问本进程为当前工程发布的页面');
+    const direct=new URL('runtime/'+published[0]!,nextUrl);
+    assert.equal((await fetch(direct)).status,403,'禁止通过预览源直接打开磁盘上的哈希页面');
+    await renderer.close();
+    assert.equal(await text(await renderer.preview(created.root,next)),expected,'重建预览服务后可重新发布已保存的工程页面');
   }finally{release.resolve();await reading?.catch(()=>{});t.mock.restoreAll();syncBuiltinESMExports();await renderer.close();await fs.rm(directory,{recursive:true,force:true});}
 });
 
@@ -110,13 +122,22 @@ test('runtime HTTP closes the opened descriptor on HEAD and rejected media range
   }finally{t.mock.restoreAll();syncBuiltinESMExports();await renderer.close();await fs.rm(directory,{recursive:true,force:true});}
 });
 
-test('runtime HTTP closes the opened descriptor when a browser cancels a preview download',{timeout:30_000},async t=>{
+for(const resource of ['index.html','assets/fixture.wav'])test(`runtime HTTP closes the opened descriptor after cancellation of ${resource}`,{timeout:30_000},async t=>{
   const directory=await fs.mkdtemp(join(tmpdir(),'yingliu-runtime-http-abort-')),renderer=new VideoRenderer();
   const originalOpen=fs.open.bind(fs),opened=deferred(),resumeStat=deferred(),closed=deferred();
-  const file=join(directory,'index.html'),signal=new AbortController();
+  const file=join(directory,resource),signal=new AbortController();
   try{
-    await fs.writeFile(file,'<!doctype html><title>cancelled preview</title>');
-    const base=await renderer.assetBaseUrl(directory);
+    const media=resource.startsWith('assets/');
+    if(media)await fs.mkdir(join(directory,'assets'));
+    await fs.writeFile(file,media?Buffer.alloc(2*1024*1024):'<!doctype html><title>cancelled preview</title>');
+    const url=new URL(resource,await renderer.assetBaseUrl(directory));
+    const headers=media?{range:'bytes=8-15'}:undefined;
+    if(media){
+      const response=await fetch(url,{headers});
+      assert.equal(response.status,206);
+      assert.equal(response.headers.get('content-range'),'bytes 8-15/2097152');
+      assert.equal((await response.arrayBuffer()).byteLength,8);
+    }
     t.mock.method(fs,'open',async(...[path,flags,mode]:Parameters<typeof fs.open>)=>{
       const handle=await originalOpen(path,flags,mode);
       if(path===file&&flags==='r'){
@@ -126,7 +147,7 @@ test('runtime HTTP closes the opened descriptor when a browser cancels a preview
       }
       return handle;
     });syncBuiltinESMExports();
-    const pending=fetch(new URL('index.html',base),{signal:signal.signal});
+    const pending=fetch(url,{headers,signal:signal.signal});
     void pending.catch(()=>{});
     await bounded(opened.promise,'等待预览文件打开');
     signal.abort();
@@ -138,6 +159,37 @@ test('runtime HTTP closes the opened descriptor when a browser cancels a preview
   }finally{signal.abort();resumeStat.resolve();t.mock.restoreAll();syncBuiltinESMExports();await renderer.close();await fs.rm(directory,{recursive:true,force:true});}
 });
 
+test('runtime HTTP closes the file after a client disconnects during a streamed media range',{timeout:30_000},async t=>{
+  const directory=await fs.mkdtemp(join(tmpdir(),'yingliu-runtime-range-abort-')),renderer=new VideoRenderer();
+  const originalOpen=fs.open.bind(fs),paused=deferred(),resumeRead=deferred(),closed=deferred();
+  const file=join(directory,'assets','fixture.wav'),signal=new AbortController();
+  try{
+    await fs.mkdir(join(directory,'assets'));
+    await fs.writeFile(file,Buffer.alloc(2*1024*1024));
+    const url=new URL('assets/fixture.wav',await renderer.assetBaseUrl(directory));
+    t.mock.method(fs,'open',async(...[filePath,flags,mode]:Parameters<typeof fs.open>)=>{
+      const handle=await originalOpen(filePath,flags,mode);
+      if(filePath===file&&flags==='r'){
+        const read=handle.read.bind(handle),close=handle.close.bind(handle);let reads=0;
+        t.mock.method(handle,'read',async(...args:Parameters<typeof handle.read>)=>{
+          if(++reads===2){paused.resolve();await resumeRead.promise;}
+          return read(...args);
+        });
+        t.mock.method(handle,'close',async()=>{try{await close();}finally{closed.resolve();}});
+      }
+      return handle;
+    });syncBuiltinESMExports();
+    const response=await fetch(url,{signal:signal.signal,headers:{range:'bytes=512-'}});
+    assert.equal(response.status,206);
+    assert.equal(response.headers.get('content-range'),'bytes 512-2097151/2097152');
+    const reader=response.body!.getReader();
+    const packet=await reader.read();assert.ok(!packet.done&&packet.value.length);
+    await bounded(paused.promise,'等待后续媒体读取');
+    signal.abort();await renderer.close();resumeRead.resolve();
+    await bounded(closed.promise,'流被取消后关闭媒体文件描述符');reader.releaseLock();
+  }finally{signal.abort();resumeRead.resolve();t.mock.restoreAll();syncBuiltinESMExports();await renderer.close();await fs.rm(directory,{recursive:true,force:true});}
+});
+
 test('identical content-addressed runtime resources avoid an existing-target EPERM rename while changed revisions still publish completely',{timeout:30_000},async t=>{
   const directory=await fs.mkdtemp(join(tmpdir(),'yingliu-runtime-reuse-')),store=new ProjectStore({baseDirectory:directory}),renderer=new VideoRenderer(store),rename=fs.rename.bind(fs);
   try{
@@ -145,7 +197,7 @@ test('identical content-addressed runtime resources avoid an existing-target EPE
     const created=await store.create({project:initial,sources:Object.entries(oldSources).map(([shotId,source])=>({shotId,source}))}),url=await renderer.preview(created.root,created.project),old=await graph(url);let replacements=0,newFiles=0;
     t.mock.method(fs,'rename',async(...[from,to]:Parameters<typeof fs.rename>)=>{
       const destination=typeof to==='string'?relative(created.root,to).replaceAll('\\','/'):'';
-      if(/^runtime\/(?:frame-[a-f0-9]{64}\.mjs|spec-[a-f0-9]{64}\.json|scenes\/[^/]+-[a-f0-9]{64}\.mjs)$/.test(destination)){
+      if(/^runtime\/(?:frame-[a-f0-9]{64}\.mjs|spec-[a-f0-9]{64}\.json|scenes\/[^/]+-[a-f0-9]{64}\.mjs|page-[a-f0-9]{64}\.html)$/.test(destination)){
         let exists=false;try{await fs.stat(to);exists=true;}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
         if(exists){replacements++;throw Object.assign(new Error('synthetic Windows existing-target rename failure'),{code:'EPERM',syscall:'rename'});}newFiles++;
       }
@@ -153,7 +205,7 @@ test('identical content-addressed runtime resources avoid an existing-target EPE
     });syncBuiltinESMExports();
     await renderer.preview(created.root,created.project);assert.equal(replacements,0,'相同hash资源不可尝试替换已发布文件');assert.equal(newFiles,0);assert.deepEqual((await graph(url)).resources,old.resources);
     const next=structuredClone(created.project);next.revision++;next.title='新版本仍须完整发布';const shot=next.shots[0]!,changed=source('new',shot.id),saved=await store.commit(created.root,next,{[shot.id]:changed},{expectedRevision:created.project.revision});
-    const published=await graph(await renderer.preview(created.root,saved));assert.equal(replacements,0);assert.equal(newFiles,2,'变更镜头与新spec应各耐久发布一个新hash文件');
+    const published=await graph(await renderer.preview(created.root,saved));assert.equal(replacements,0);assert.equal(newFiles,3,'变更镜头、新spec与新页面应各耐久发布一个新hash文件');
     for(const item of published.spec.sources){const expected=item.id===shot.id?changed:oldSources[item.id]!;assert.equal(item.html,expected.html);assert.equal(item.css,expected.css);assert.equal(published.resources.get(new URL(item.moduleUrl,new URL('./runtime/',url)).href),expected.js);}
     for(const [resource,bytes]of old.resources)assert.equal(await text(resource),bytes,'旧hash资源继续保留原完整内容');
   }finally{t.mock.restoreAll();syncBuiltinESMExports();await renderer.close();await fs.rm(directory,{recursive:true,force:true});}

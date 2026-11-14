@@ -19,6 +19,8 @@ import type { AgentPort, AgentStartInput } from '../agent/contracts.ts';
 import { redactKey } from '../agent/model-client.ts';
 import type { GenRole } from '../agent/contracts.ts';
 import { ROLE_OUTPUT, ROLE_PROTOCOLS } from '../models/contracts.ts';
+import { uploadDestination, type AuthorizeUpload } from '../models/upload-consent.ts';
+import { chatCompletionSupportsTools } from '../models/provider-defaults.ts';
 import { pollTemplate, submitTemplate } from '../models/adapters/template.ts';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -31,6 +33,7 @@ for(const endpoint of ['models.list','models.connection.save','models.connection
 for(const endpoint of ['workflows.run','workflows.list','workflows.get','workflows.retry','workflows.pause','workflows.apply'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['agent.start','agent.list','agent.get','agent.trace','agent.approve','agent.reject','agent.resume','agent.pause','agent.cancel','agent.tools','agent.capabilities','story.get','story.save','agent.qc','agent.qc.last','agent.ledger','agent.budget.set'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['app.onboarding.get','app.onboarding.complete'])ENDPOINTS.add(endpoint);
+for(const endpoint of ['app.appearance.get','app.appearance.save'])ENDPOINTS.add(endpoint);
 ENDPOINTS.add('providers.vision.save');
 export class MemorySecrets implements SecretStore {
   private values=new Map<string,string>();
@@ -43,6 +46,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
   if(!Number.isFinite(projectRootWaitMs)||projectRootWaitMs<0)throw new RangeError('工程目录锁等待时间必须是非负有限数字');
   const {dataDirectory,projectsDirectory}=applicationDirectories(options);
   const onboardingFile=join(dataDirectory,'onboarding-v1');
+  const appearanceFile=join(dataDirectory,'appearance-v1');
   const ownership=options.ownership??await acquireApplicationOwner({dataDirectory,projectsDirectory},'application');
   const cleanups:(()=>Promise<unknown>)[]=[];
   try{
@@ -62,7 +66,8 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
     commit:(id,expectedRevision,project,sources,label)=>backend.call('apply',{projectId:id,expectedRevision,project,sources:Object.entries(sources).map(([shotId,source])=>({shotId,source})),label}),
     stageMedia:(id,task,files,signal)=>backend.stageWorkflowMedia(id,task,files,signal),
     capture:(id,frame,signal,candidate)=>backend.workflowCapture(id,frame,signal,candidate),
-    text:async(role,prompt,signal,_request,images)=>role==='vision'?analyzeFrames(prompt,images??[],signal):providers.complete([{role:'user',content:prompt}],'你是视频制作团队的'+role+'。依据提供的工程文本执行任务。',signal,undefined,role),
+    uploadDestination:async purpose=>uploadDestination(purpose==='review'?(await providers.requireVision()).route:await providers.registry.resolve('video')),
+    text:async(role,prompt,signal,_request,images,authorizeUpload)=>role==='vision'?analyzeFrames(prompt,images??[],signal,authorizeUpload):providers.complete([{role:'user',content:prompt}],'你是视频制作团队的'+role+'。依据提供的工程文本执行任务。',signal,undefined,role),
     voice:async(id,shotId,text,signal)=>{
       const state=providers.registry.snapshot();if(!state.roles.some(binding=>binding.role==='speech'))return backend.workflowVoice(id,shotId,text,signal);
       let release:(()=>void)|undefined;
@@ -179,11 +184,20 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         throw withSubmission(failure,'unknown',jobId);
       }finally{release();}
     },
+    visionDestination:()=>workflowPort.uploadDestination('review'),
     vision:analyzeFrames,
+    videoReferenceDestination:()=>workflowPort.uploadDestination('video-reference'),
+    generateVideoReference:(request,authorizeUpload)=>media.generate(request,authorizeUpload),
   };
-  function analyzeFrames(prompt:string,images:{mime:string;bytes:Uint8Array}[],signal:AbortSignal):Promise<string>{
-    const content:ModelContent[]=images.map(image=>({type:'image_url',image_url:{url:`data:${image.mime};base64,${Buffer.from(image.bytes).toString('base64')}`}}));
-    return providers.analyzeImages(content,prompt,signal);
+  async function analyzeFrames(prompt:string,images:{mime:string;bytes:Uint8Array}[],signal:AbortSignal,authorizeUpload?:AuthorizeUpload):Promise<string>{
+    if(!authorizeUpload)throw new Error('发送关键帧需要明确的上传授权');
+    const {route}=await providers.requireVision();
+    const release=providers.registry.acquire(route.connection.id,route.model.id);
+    try{
+      signal.throwIfAborted();authorizeUpload(uploadDestination(route));
+      const content:ModelContent[]=images.map(image=>({type:'image_url',image_url:{url:`data:${image.mime};base64,${Buffer.from(image.bytes).toString('base64')}`}}));
+      return await providers.analyzeImages(content,prompt,signal,route);
+    }finally{release();}
   }
   const agentArchive={export:(projectId:string)=>agent.exportDocs(projectId),import:(projectId:string,docs:Partial<Record<'story'|'ledger'|'qc',unknown>>)=>agent.importDocs(projectId,docs),validate:(docs:Partial<Record<'story'|'ledger'|'qc',unknown>>)=>agent.validateDocs(docs)};
   const agent=new AgentService(join(dataDirectory,'agent-runs'),agentPort,{
@@ -192,7 +206,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
     resolveModel:async()=>{
       const resolved=await providers.resolveText('director'),parameters=resolved.model.parameters as Record<string,unknown>;
       return {connectionId:resolved.connection.id,parameters,config:{baseUrl:resolved.connection.baseUrl,model:resolved.model.model,key:await providers.registry.credential(resolved.connection),
-        timeoutMs:Number(resolved.connection.requestTimeoutMs)||120000,maxTokens:Number(parameters.maxTokens)||4096,...(typeof parameters.temperature==='number'?{temperature:parameters.temperature}:{}),supportsTools:parameters.supportsTools!==false}};
+        timeoutMs:Number(resolved.connection.requestTimeoutMs)||120000,maxTokens:Number(parameters.maxTokens)||4096,...(typeof parameters.temperature==='number'?{temperature:parameters.temperature}:{}),supportsTools:parameters.supportsTools!==false&&chatCompletionSupportsTools(resolved.connection.baseUrl,resolved.model.model)}};
     },
   });
   cleanups.push(()=>agent.dispose());
@@ -214,7 +228,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         case 'agent.trace':value={events:await agent.trace(String(data.runId))};break;
         case 'agent.approve':value=await agent.approve(String(data.runId),String(data.callId),typeof data.execId==='string'?data.execId:undefined,typeof data.argsHash==='string'?data.argsHash:undefined);break;
         case 'agent.reject':value=await agent.reject(String(data.runId),String(data.callId),typeof data.execId==='string'?data.execId:undefined,typeof data.reason==='string'?data.reason:'');break;
-        case 'agent.resume':value=await agent.resume(String(data.runId));break;
+        case 'agent.resume':value=await agent.resume(String(data.runId),typeof data.visionConsentId==='string'?data.visionConsentId:undefined,data.disableVision===true);break;
         case 'agent.pause':value=await agent.pause(String(data.runId));break;
         case 'agent.cancel':value=await agent.cancel(String(data.runId));break;
         case 'agent.tools':value={tools:agent.toolList.map(tool=>({name:tool.name,risk:tool.risk,description:tool.description}))};break;
@@ -225,12 +239,12 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         case 'agent.qc.last':value={report:await agent.lastQc(String(data.projectId))};break;
         case 'agent.ledger':value=await agent.ledger(String(data.projectId));break;
         case 'agent.budget.set':value=await agent.setProjectBudget(String(data.projectId),data.maxCost===null||data.maxCost===undefined||data.maxCost===''?null:Number(data.maxCost),typeof data.currency==='string'?data.currency:undefined);break;
-        case 'workflows.run':if(data.review===true&&data.allowImageUpload===true)await providers.requireVision();value=await workflows.run(data as unknown as WorkflowRequest);break;
+        case 'workflows.run':value=await workflows.run(data as unknown as WorkflowRequest);break;
         case 'workflows.list':value={workflows:await workflows.list(typeof data.projectId==='string'?data.projectId:undefined)};break;
         case 'workflows.get':value=await workflows.get(String(data.workflowId));break;
-        case 'workflows.retry':value=await workflows.retry(String(data.workflowId));break;
+        case 'workflows.retry':value=await workflows.retry(String(data.workflowId),typeof data.uploadConsentId==='string'?data.uploadConsentId:undefined);break;
         case 'workflows.pause':value=await workflows.pause(String(data.workflowId));break;
-        case 'workflows.apply':value=await workflows.apply(String(data.workflowId),Number(data.expectedRevision));break;
+        case 'workflows.apply':value=await workflows.apply(String(data.workflowId),Number(data.expectedRevision),typeof data.uploadConsentId==='string'?data.uploadConsentId:undefined);break;
         case 'models.list':value=await providers.registry.list();break;
         case 'models.connection.save':value=await providers.registry.saveConnection(data as ConnectionInput);await backend.call('catalog');break;
         case 'models.connection.remove':await providers.registry.removeConnection(String(data.id));value=await providers.registry.list();break;
@@ -254,6 +268,20 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         case 'app.onboarding.complete':{
           await writeDurableFile(onboardingFile,'1\n');
           value={completed:true};
+          break;
+        }
+        case 'app.appearance.get':{
+          let look:string|undefined;
+          try{look=(await readFile(appearanceFile,'utf8')).trim();}
+          catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+          value={look:look==='graphite'||look==='lightbox'?look:null};
+          break;
+        }
+        case 'app.appearance.save':{
+          const {look}=data;
+          if(look!=='graphite'&&look!=='lightbox')throw new Error('主题无效');
+          await writeDurableFile(appearanceFile,look+'\n');
+          value={look};
           break;
         }
         case 'app.exportProject':value=await exportProjectArchive(backend,data,agentArchive);break;

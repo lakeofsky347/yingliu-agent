@@ -92,6 +92,8 @@ Workflow 的主记录与独立成功回执使用文件 fsync、原子 rename 和
 
 画面服务使用 `localhost` origin。Electron 强制 site-per-process，使模型场景与编辑器处于不同系统 renderer 进程；实际验收还检查二者 PID 不同。画面没有 preload bridge、Node 或 IPC，网络由 CSP 限制，资源服务只开放 runtime、媒体素材、检查图与成片，拒绝 project、凭据和日志。子 frame 导航和新窗口受控。
 
+运行时页面和依赖按内容哈希耐久发布。预览、截帧、检查与导出仍通过 `/index.html` 加载，查询参数把页面固定到本次准备的哈希版本，避免 Windows 替换正在读取的文件以及冷重载读到另一版。媒体 Range 响应持有同一文件句柄直至传输结束或取消；小文档在响应之前释放句柄。
+
 主画面与缩略帧以 ready/frame 回执和十秒 watchdog 判断无响应，后续 render 请求不能不断延迟这个界限。原生 resetScene 仅处理当前编辑窗口关联的 localhost child frame，排除 editor PID，再通过限定的 Chrome 调试协议中止对应 iframe target 的 JavaScript，并临时导航到空白页；重载采用最新已保存源码，可恢复无限循环场景，编辑器保留。没有宣称 CPU/内存配额、任意恶意代码完全隔离或通用执行资源沙箱。
 
 桌面 Key 用 safeStorage 加密持久化，注册表只保存凭据引用，界面只读 hasKey/credentialStatus；不可用时阻止需密钥的操作，不降级到明文。无密钥服务和手动制作可继续使用。对话图片默认只有元信息，实际发送需模型图片能力、enableVision、本轮明确图片 IDs 与上传授权，同时校验路径、尺寸、类型和字节限制。图生视频也只发送本轮选中的工程图片；工作流视觉检查的渲染帧须另有本轮明确授权。

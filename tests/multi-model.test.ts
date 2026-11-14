@@ -37,3 +37,68 @@ test('deleting and recreating the legacy connection keeps its isolated credentia
   try{const manager=new ProviderManager(directory,secrets);await manager.save({apiKey:'first-synthetic-key'});await manager.registry.removeConnection('custom');assert.equal((await manager.settings()).ready,false);await manager.save({apiKey:'replacement-synthetic-key'});const selected=await manager.registry.resolve('director');assert.equal(selected.connection.credentialRef,'yingliu.custom-model.api-key');assert.equal(await manager.registry.credential(selected.connection),'replacement-synthetic-key');assert.equal((await manager.settings()).ready,true);}
   finally{await rm(directory,{recursive:true,force:true});}
 });
+
+test('existing quick vision slot from the alternate v3 profile retains its storage and route',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'studio-model-v3-')),secrets=new Secrets();
+  const priorVision={id:'custom-vision',name:'原审片接口',baseUrl:'https://vision.invalid/v1',model:'original-vision'};
+  const previousKeyRef='yingliu.custom-vision.api-key';
+  try{
+    await writeFile(join(directory,'provider.json'),JSON.stringify({version:3,mode:'custom',vision:priorVision}));
+    await secrets.set(previousKeyRef,'fixture-original-key');
+    const manager=new ProviderManager(directory,secrets);
+    const initial=await manager.settings();
+    assert.equal(initial.config.model,'gpt-4.1-mini');
+    assert.equal(initial.visionConfig?.id,priorVision.id);
+    assert.equal(initial.visionConfig?.model,priorVision.model);
+    assert.equal(initial.visionEnabled,true);
+    assert.equal(initial.visionHasKey,true);
+    assert.equal(initial.visionReady,true);
+    assert.equal((await manager.registry.resolve('vision')).connection.credentialRef,previousKeyRef);
+    await assert.rejects(manager.registry.bindRole('director','custom-vision-model'),/仅供视觉/);
+    await assert.rejects(manager.saveVision({baseUrl:'https://other.invalid/v1'}),/更换接口域名/);
+
+    const {route}=await manager.requireVision();
+    const disabled=await manager.saveVision({enabled:false});
+    assert.equal(disabled.visionEnabled,false);
+    assert.equal(disabled.visionReady,false);
+    assert.equal(disabled.visionHasKey,true);
+    await assert.rejects(manager.analyzeImages([],'不会发送',new AbortController().signal,route),/视觉连接或角色已变化/);
+    const reopened=new ProviderManager(directory,secrets);
+    assert.equal((await reopened.settings()).visionEnabled,false);
+    assert.equal((await reopened.saveVision({apiKey:''})).visionEnabled,false);
+    assert.equal(await secrets.get(previousKeyRef),undefined);
+    await reopened.saveVision({apiKey:'fixture-replacement-key'});
+    const enabled=await reopened.saveVision({enabled:true});
+    assert.equal(enabled.visionReady,true);
+    assert.equal(enabled.visionRoute?.provider,priorVision.id);
+    assert.deepEqual([...secrets.values.entries()],[[previousKeyRef,'fixture-replacement-key']]);
+  }finally{await rm(directory,{recursive:true,force:true});}
+});
+
+test('persisted registry and advanced vision role govern settings over a stale v3 projection',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'studio-model-role-state-')),secrets=new Secrets();
+  try{
+    const manager=new ProviderManager(directory,secrets);
+    await manager.initialize();
+    const custom=await manager.registry.saveConnection({id:'custom-vision',baseUrl:'https://legacy.invalid/v1',apiKey:'fixture-legacy'});
+    const quick=await manager.registry.saveModel({id:'custom-vision-model',connectionId:custom.id,model:'legacy-vision',inputModalities:['text','image'],parameters:{enableVision:true}});
+    const advanced=await manager.registry.saveConnection({baseUrl:'https://advanced.invalid/v1',apiKey:'fixture-advanced'});
+    const bound=await manager.registry.saveModel({connectionId:advanced.id,model:'advanced-vision',inputModalities:['text','image'],parameters:{enableVision:true}});
+    await manager.registry.bindRole('vision',bound.id);
+    await writeFile(join(directory,'provider.json'),JSON.stringify({version:3,mode:'custom',vision:{baseUrl:'file:///stale',model:'stale-vision'}}));
+    const reopened=new ProviderManager(directory,secrets);
+    assert.equal((await reopened.settings()).visionConfig?.baseUrl,custom.baseUrl);
+    const next=await reopened.saveVision({model:'updated-fixture',enabled:false});
+    assert.equal(next.visionConfig?.model,'updated-fixture');
+    assert.equal(next.visionEnabled,false);
+    assert.equal(next.visionReady,true);
+    assert.equal(next.visionRoute?.provider,advanced.id);
+    assert.equal(await secrets.get(custom.credentialRef),'fixture-legacy');
+    assert.equal(await secrets.get(advanced.credentialRef),'fixture-advanced');
+    await reopened.registry.removeModel(quick.id);
+    await reopened.registry.removeConnection(custom.id);
+    const fresh=new ProviderManager(directory,secrets);
+    assert.equal((await fresh.settings()).visionConfig?.id,'vision-custom');
+    assert.equal((await fresh.registry.resolve('vision')).model.id,bound.id);
+  }finally{await rm(directory,{recursive:true,force:true});}
+});

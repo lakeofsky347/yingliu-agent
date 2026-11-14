@@ -3,10 +3,14 @@ import test from 'node:test';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
 import { createProject } from '../src/core/index.ts';
 import { DEMO_MODEL, demoSceneSource, demoStoryboard, ProviderManager } from '../src/app/model.ts';
 import type { SecretStore } from '../src/app/contracts.ts';
 import { OPENAI_BASE_URL, OPENAI_CHAT_MODEL, VISION_CONNECTION_ID } from '../src/models/provider-defaults.ts';
+import { chatTurn } from '../src/agent/model-client.ts';
+import type { AgentTool } from '../src/agent/contracts.ts';
 
 class MemorySecrets implements SecretStore {values=new Map<string,string>();async get(ref:string){return this.values.get(ref);}async set(ref:string,value:string){this.values.set(ref,value);}async delete(ref:string){this.values.delete(ref);}}
 
@@ -61,11 +65,70 @@ test('vision-only completion keeps separate credentials and enforces request tex
     assert.equal(settings.visionReady,true);assert.equal(settings.visionRoute?.provider,VISION_CONNECTION_ID);
     await assert.rejects(providers.registry.bindRole('director','vision-custom-model'),/仅供视觉/);
     await providers.analyzeImages([image],'本轮授权图片',signal);
-    assert.equal(captured[0]!.body.messages[1].content[1].image_url.url,image.image_url.url);assert.equal(captured[0]!.url,'https://vision.invalid/v1/chat/completions');assert.equal(captured[0]!.header,'Bearer vision-credential');assert.equal(captured[0]!.body.max_tokens,1800);assert.equal(captured[0]!.redirect,'error');
+    assert.equal(captured[0]!.body.messages[1].content[1].image_url.url,image.image_url.url);assert.equal(captured[0]!.url,'https://vision.invalid/v1/chat/completions');assert.equal(captured[0]!.header,'Bearer vision-credential');assert.equal(captured[0]!.body.max_tokens,1800);assert.equal(captured[0]!.redirect,'manual');
     await providers.complete([{role:'user',content:'文本请求'}],'system',signal);
     assert.equal(captured[1]!.url,OPENAI_BASE_URL+'/chat/completions');assert.equal(captured[1]!.header,'Bearer mock-key');assert.equal(captured[1]!.body.max_completion_tokens,7000);assert.ok(!('max_tokens' in captured[1]!.body));
     await assert.rejects(providers.complete([{role:'user',content:'x'.repeat(8001)}],'system',signal),/文本上下文/);await assert.rejects(providers.analyzeImages([image,image,image,image],'system',signal),/图片数量/);const oversized={type:'image_url' as const,image_url:{url:'data:image/png;base64,'+Buffer.alloc(1025).toString('base64')}};await assert.rejects(providers.analyzeImages([oversized],'system',signal),/总字节/);assert.equal(calls,2);
   }finally{await rm(directory,{recursive:true,force:true});}
+});
+
+test('OpenAI reasoning models use only supported Chat Completions options',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'yingliu-gpt6-shape-'));
+  const payloads:Record<string,unknown>[]=[];
+  const fixtureFetch:typeof fetch=async(_url,options)=>{
+    payloads.push(JSON.parse(String(options?.body)));
+    return Response.json({choices:[{message:{content:'fixture reply'},finish_reason:'stop'}]});
+  };
+  const tools:AgentTool[]=[{name:'read_project',description:'Return project summary',risk:'read',parameters:{type:'object'},run:async()=>({content:'fixture summary'})}];
+  const signal=new AbortController().signal;
+  try{
+    const provider=new ProviderManager(directory,new MemorySecrets(),{fetch:fixtureFetch});
+    await provider.save({model:'gpt-6-luna',apiKey:'fixture-key'});
+    await provider.complete([{role:'user',content:'fixture request'}],'fixture system',signal);
+    assert.equal(payloads[0]?.max_completion_tokens,7000);
+    assert.ok(!('temperature' in payloads[0]!)&&!('max_tokens' in payloads[0]!));
+
+    const config={baseUrl:OPENAI_BASE_URL,model:'gpt-6-luna',timeoutMs:5000,temperature:.7,maxTokens:7000,supportsTools:true};
+    assert.equal((await chatTurn(config,'fixture',[],tools,signal,fixtureFetch)).mode,'tools');
+    assert.equal(payloads[1]?.reasoning_effort,'none');
+    assert.ok(Array.isArray(payloads[1]?.tools));
+
+    assert.equal((await chatTurn({...config,model:'gpt-6.1-terra'},'fixture',[],tools,signal,fixtureFetch)).mode,'plan-json');
+    assert.equal(payloads[2]?.max_completion_tokens,7000);
+    assert.ok(!('tools' in payloads[2]!)&&!('temperature' in payloads[2]!));
+
+    await chatTurn({...config,baseUrl:'https://compatible.invalid/v1'},'fixture',[],tools,signal,fixtureFetch);
+    assert.equal(payloads[3]?.max_tokens,7000);
+    assert.equal(payloads[3]?.temperature,.7);
+    assert.ok(!('reasoning_effort' in payloads[3]!));
+  }finally{await rm(directory,{recursive:true,force:true});}
+});
+
+test('text, vision, and agent chat POSTs do not follow redirects with private payloads',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'yingliu-model-redirect-'));
+  let forwarded=0;
+  const sink=createServer((_request,response)=>{forwarded++;response.end();}).listen(0,'127.0.0.1');
+  await once(sink,'listening');
+  const redirector=createServer(async(request,response)=>{
+    for await(const _chunk of request){ /* drain request before redirecting */ }
+    response.writeHead(307,{Location:`http://127.0.0.1:${(sink.address() as {port:number}).port}/collect`});
+    response.end();
+  }).listen(0,'127.0.0.1');
+  await once(redirector,'listening');
+  const baseUrl=`http://127.0.0.1:${(redirector.address() as {port:number}).port}/v1`;
+  try{
+    const provider=new ProviderManager(directory,new MemorySecrets()),signal=new AbortController().signal;
+    await provider.save({baseUrl,model:'fixture-text',apiKey:'fixture-text-key'});
+    await provider.saveVision({baseUrl,model:'fixture-vision',apiKey:'fixture-vision-key'});
+    const image={type:'image_url' as const,image_url:{url:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jM1sAAAAASUVORK5CYII='}};
+    await assert.rejects(provider.complete([{role:'user',content:'synthetic private context'}],'fixture',signal),/重定向/);
+    await assert.rejects(provider.analyzeImages([image],'synthetic reference',signal),/重定向/);
+    await assert.rejects(chatTurn({baseUrl,model:'fixture-agent',timeoutMs:5000,maxTokens:500,supportsTools:true},'synthetic agent context',[],[],signal),/重定向/);
+    assert.equal(forwarded,0);
+  }finally{
+    await Promise.all([sink,redirector].map(server=>new Promise<void>(resolve=>server.close(()=>resolve()))));
+    await rm(directory,{recursive:true,force:true});
+  }
 });
 
 

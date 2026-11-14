@@ -52,6 +52,7 @@
 .yl-provider-tabs small { line-height: 1.5; }
 .yl-provider-route { margin: 0 0 16px; color: #b2d4c9; font-size: 12px; overflow-wrap: anywhere; }
 .yl-provider-help { margin: 0 0 13px; color: #aabdc9; font-size: 11px; line-height: 1.7; }
+.yl-vision-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; color: var(--yl-muted); }
 .yl-provider-fields select {
   min-width: 0;
   width: 100%;

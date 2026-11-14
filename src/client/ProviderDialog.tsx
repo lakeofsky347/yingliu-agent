@@ -82,7 +82,7 @@ export function ProviderDialog({ api, initial, initialSection = 'text', onClose,
   const disabled = busy || blocked;
   const activeRoute = vision ? initial?.visionRoute : initial?.route;
   const activeReady = vision ? initial?.visionReady : initial?.ready ?? initial?.hasKey;
-  const activeOverride = !!(slot && activeRoute && (activeRoute.provider !== connectionIds[slot] || activeRoute.model !== saved?.model));
+  const activeOverride = !!(slot && activeRoute && (activeRoute.provider !== saved?.id || activeRoute.model !== saved?.model));
 
   function edit(patch: Partial<ProviderConfig>) {
     if (!slot || !config) return;
@@ -117,7 +117,7 @@ export function ProviderDialog({ api, initial, initialSection = 'text', onClose,
     try {
       if (action !== 'remove' && !valid) throw new Error('请填写接口名称、有效的 HTTP(S) 接口地址和模型 ID。');
       if (action !== 'remove' && changedOrigin && !enteredKey) throw new Error('接口站点已变更。请填写新密钥，或先删除已保存的密钥。');
-      const payload = action === 'remove' ? { apiKey: '' } : {
+      const payload = action === 'remove' ? { id: config.id, apiKey: '' } : {
         ...config, ...(vision ? {} : { mode: 'custom' }), ...(enteredKey ? { apiKey: enteredKey } : {}),
       };
       const value = await api.call<ProviderSettings>(vision ? 'providers.vision.save' : 'providers.save', payload);
@@ -125,7 +125,8 @@ export function ProviderDialog({ api, initial, initialSection = 'text', onClose,
       if (action !== 'remove') setDrafts(previous => ({ ...previous, [slot]: undefined }));
       await onSave(value);
       if (action === 'check') {
-        const checked = await api.call<{ ok: boolean; message: string }>('providers.check', { connectionId: connectionIds[slot] });
+        const connectionId = vision ? value.visionConfig?.id ?? saved?.id : saved?.id;
+        const checked = await api.call<{ ok: boolean; message: string }>('providers.check', { connectionId });
         if (!checked.ok) throw new Error(`设置已保存，${checked.message}`);
         setStatus(checked.message);
       } else {
@@ -135,6 +136,22 @@ export function ProviderDialog({ api, initial, initialSection = 'text', onClose,
       const message = errorMessage(cause);
       setError(enteredKey ? message.split(enteredKey).join('[redacted]') : message);
     } finally { setBusy(false); }
+  }
+
+  async function toggleVision(enabled: boolean) {
+    if (disabled) return;
+    setBusy(true);
+    setError('');
+    setStatus('');
+    try {
+      const value = await api.call<ProviderSettings>('providers.vision.save', { id: saved?.id, enabled });
+      await onSave(value);
+      setStatus(enabled ? '已启用快速视觉连接。' : '已暂停快速视觉连接，配置和密钥已保留。');
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
   }
 
   function handleKeys(event: KeyboardEvent<HTMLElement>) {
@@ -165,6 +182,10 @@ export function ProviderDialog({ api, initial, initialSection = 'text', onClose,
         <p className="yl-provider-route">{vision ? '视觉理解' : '创作对话'}{activeReady ? `已配置 · ${activeRoute?.model ?? config.model}` : '尚未配置'}{activeOverride ? ' · 角色由高级模型中心管理' : ''}</p>
         {!vision && initial?.sceneRoute && <p className="yl-provider-help">场景代码 · {initial.sceneRoute.model}{initial.sceneReady === false ? '（待配置）' : ''}</p>}
         {vision && <p className="yl-provider-help">选择支持图片输入的模型。对话中的参考图在你选择图片并授权本次请求后才会发送。</p>}
+        {vision && initial?.visionEnabled !== undefined && <div className="yl-vision-toggle">
+          <span>{initial.visionEnabled ? '快速视觉连接已启用' : '快速视觉连接已暂停'}</span>
+          <button type="button" className="yl-button" disabled={disabled} onClick={() => void toggleVision(!initial.visionEnabled)}>{initial.visionEnabled ? '暂停连接' : '启用连接'}</button>
+        </div>}
         <div className="yl-field-pair">
           <label className="yl-field"><span>服务商</span><select aria-label="服务商" value={presetFor(config.baseUrl)} onChange={event => changePreset(event.target.value)} disabled={disabled}>
             <option value="openai">OpenAI</option>{!vision && <option value="deepseek">DeepSeek</option>}<option value="compatible">自定义 OpenAI 兼容接口</option>

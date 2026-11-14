@@ -145,10 +145,19 @@ export function createTools(): AgentTool[] {
       async run(args, ctx) { const task = await rpc(ctx, 'media.generate', { expectedRevision: revision(args), operation: 'text-to-image', prompt: await anchored(ctx, args), ...(args.shotId ? { shotId: args.shotId } : {}), clientRequestId: `${ctx.runId}.${String(args.__callId ?? '')}` }) as { id: string }; return { content: json({ taskId: task.id }), waitFor: { kind: 'media', id: task.id } }; } },
     { name: 'generate_video', risk: 'cost', requires: ['video'], description: '用视频模型生成片段（产生费用，需要用户批准）。传 characterIds 自动拼接一致性锚点；imageAssetId 为首帧（可来自 frame_handoff）；useReference=true 且未给首帧时用第一个角色的参考图作首帧。', parameters: object({ expectedRevision: int('当前工程版本'), prompt: str('画面与运动描述'), shotId: str('关联镜头'), imageAssetId: str('可选：首帧图片素材 ID'), characterIds: { type: 'array', items: { type: 'string' } }, useReference: { type: 'boolean' } }, ['expectedRevision', 'prompt']),
       estimate: () => null,
+      async referenceImage(args,ctx){
+        if(typeof args.imageAssetId==='string'&&args.imageAssetId)return args.imageAssetId;
+        if(args.useReference!==true)return '';
+        const story=await ctx.docs.story();
+        const first=ids(args.characterIds).map(id=>story.characters.find(c=>c.id===id||c.name===id)).find(c=>c?.referenceAssetIds.length);
+        return first?.referenceAssetIds[0]??'';
+      },
       async run(args, ctx) {
-        let image = typeof args.imageAssetId === 'string' && args.imageAssetId ? args.imageAssetId : '';
-        if (!image && args.useReference === true) { const story = await ctx.docs.story(); const first = ids(args.characterIds).map(id => story.characters.find(c => c.id === id || c.name === id)).find(c => c?.referenceAssetIds.length); if (first) image = first.referenceAssetIds[0]; }
-        const task = await rpc(ctx, 'media.generate', { expectedRevision: revision(args), operation: image ? 'image-to-video' : 'text-to-video', prompt: await anchored(ctx, args), ...(args.shotId ? { shotId: args.shotId } : {}), ...(image ? { imageAssetIds: [image], allowImageUpload: true } : {}), clientRequestId: `${ctx.runId}.${String(args.__callId ?? '')}` }) as { id: string }; return { content: json({ taskId: task.id, firstFrame: image || undefined }), waitFor: { kind: 'media', id: task.id } }; } },
+        const image=ctx.videoReference?.assetId??'';
+        const request={projectId:ctx.projectId,expectedRevision:revision(args),operation:image?'image-to-video' as const:'text-to-video' as const,prompt:await anchored(ctx,args),...(typeof args.shotId==='string'&&args.shotId?{shotId:args.shotId}:{}),...(image?{imageAssetIds:[image],allowImageUpload:true}:{}),clientRequestId:`${ctx.runId}.${String(args.__callId??'')}`};
+        const task=ctx.videoReference&&ctx.port.generateVideoReference?await ctx.port.generateVideoReference(request,ctx.videoReference.authorizeUpload):await rpc(ctx,'media.generate',request) as {id:string};
+        return {content:json({taskId:task.id,firstFrame:image||undefined}),waitFor:{kind:'media',id:task.id}};
+      } },
     { name: 'media_apply', risk: 'write', description: '把已就绪的生成素材采用到工程。', parameters: object({ taskId: str('媒体任务 ID'), expectedRevision: int('当前工程版本') }, ['taskId', 'expectedRevision']),
       async run(args, ctx) { const value = await rpc(ctx, 'media.apply', { taskId: need(args, 'taskId'), expectedRevision: revision(args) }); return { content: json(value) }; } },
     { name: 'generate_voice', risk: 'cost', requires: ['speech'], description: '为镜头生成配音并登记为工程素材（产生费用，需要用户批准）。单镜头传 shotId+text；多个镜头一次批准传 lines=[{shotId,text}]。之后用 audio_edit 放到音轨或 align_to_voice 对齐。', parameters: object({ expectedRevision: int('当前工程版本'), shotId: str('镜头 ID'), text: str('旁白文字'), lines: { type: 'array', items: object({ shotId: str('镜头 ID'), text: str('旁白文字') }, ['shotId', 'text']) } }),

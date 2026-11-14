@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { MODEL_PROTOCOLS, MODEL_ROLES, ROLE_PROTOCOLS, ROLE_OUTPUT } from './contracts.ts';
 import { resolveTemplate, templateOutput } from './adapters/template.ts';
-import { VISION_CONNECTION_ID } from './provider-defaults.ts';
+import { isQuickVisionConnection } from './provider-defaults.ts';
 import type { ConnectionInput, ModelDefinition, ModelInput, ModelProtocol, ModelRole, ModelSecrets, ModelSelection, Modality, ProviderConnection, RegistrySeed, RegistrySnapshot, RegistryState, ResolvedModel, RoleBinding } from './contracts.ts';
 
 const modalities:readonly Modality[]=['text','image','video','audio'];
@@ -22,9 +22,9 @@ export class ModelRegistry {
   private leases=new Map<string,number>();
   constructor(private directory:string,private secrets:ModelSecrets,private options:{filename?:string;namespace?:string;credentialRefFactory?:(connectionId:string)=>string}={}){}
   private get file(){return join(this.directory,this.options.filename??'model-registry.json');}
-  initialize(seed?:RegistrySeed):Promise<void>{return this.initialized??=(async()=>{
+  initialize(seed?:RegistrySeed|(()=>RegistrySeed)):Promise<void>{return this.initialized??=(async()=>{
     try{const value=JSON.parse(await readFile(this.file,'utf8')) as RegistryState;this.validate(value);this.state=value;}
-    catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;const next:RegistryState=seed?{version:1,...structuredClone(seed)}:empty();this.validate(next);await this.persist(next);}
+    catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;const next:RegistryState=seed?{version:1,...structuredClone(typeof seed==='function'?seed():seed)}:empty();this.validate(next);await this.persist(next);}
   })();}
   /** Non-secret cached state for synchronous host catalog adapters; initialize first. */
   snapshot():RegistryState{return structuredClone(this.state);}
@@ -81,7 +81,8 @@ export class ModelRegistry {
   async removeModel(id:string):Promise<void>{return this.mutate(async()=>{const model=this.state.models.find(m=>m.id===id);if(!model)throw new Error('模型不存在');await this.assertUnused(model.connectionId,id);const state=this.snapshot();state.models=state.models.filter(m=>m.id!==id);state.roles=state.roles.filter(r=>r.modelId!==id);await this.persist(state);});}
   async bindRole(role:ModelRole,modelId:string|null):Promise<void>{return this.mutate(async()=>{if(!MODEL_ROLES.includes(role))throw new Error('模型角色无效');const state=this.snapshot();if(modelId!==null){
     this.validateBinding(state,role,modelId);
-    if((role==='director'||role==='scene')&&state.models.find(model=>model.id===modelId)?.connectionId===VISION_CONNECTION_ID)throw new Error('快速设置中的多模态连接仅供视觉分析使用');
+    const connectionId=state.models.find(model=>model.id===modelId)?.connectionId;
+    if((role==='director'||role==='scene')&&connectionId&&isQuickVisionConnection(connectionId))throw new Error('快速设置中的多模态连接仅供视觉分析使用');
   }state.roles=state.roles.filter(r=>r.role!==role);if(modelId!==null)state.roles.push({role,modelId});await this.persist(state);});}
   async resolve(selection:ModelSelection):Promise<ResolvedModel>{await this.initialize();await this.writes;const input=typeof selection==='string'?{role:selection}:selection;const role=input.role;const id=input.modelId??(role?this.state.roles.find(r=>r.role===role)?.modelId:undefined);const provider=input.connectionId??input.provider;const model=id?this.state.models.find(m=>m.id===id):this.state.models.find(m=>m.connectionId===provider&&(m.id===input.model||m.model===input.model));if(!model)throw new Error(role?'请先配置 '+role+' 角色的模型':'所选模型不存在或已变更');const connection=this.state.connections.find(c=>c.id===model.connectionId);if(!connection||!connection.enabled||!model.enabled)throw new Error('所选模型连接已停用');if(provider&&provider!==connection.id)throw new Error('模型与连接不匹配');if(input.protocol&&input.protocol!==connection.protocol)throw new Error('模型协议不匹配');if(role)this.validateBinding(this.state,role,model.id);return structuredClone({connection,model});}
   async credential(connection:ProviderConnection|string):Promise<string|undefined>{

@@ -1,7 +1,7 @@
 import { fetch } from '../host/http.ts';
 import { randomUUID } from 'node:crypto';
 import type { AgentMessage, AgentTool, ModelTurn, ToolCall } from './contracts.ts';
-import { chatCompletionTokenLimit } from '../models/provider-defaults.ts';
+import { chatCompletionParameters, chatCompletionSupportsTools } from '../models/provider-defaults.ts';
 
 export interface ChatConfig {
   baseUrl: string; model: string; key?: string; timeoutMs: number; temperature?: number; maxTokens: number;
@@ -46,21 +46,24 @@ export function parsePlanJson(text: string): { content: string; toolCalls: ToolC
 }
 
 export async function chatTurn(config: ChatConfig, system: string, messages: AgentMessage[], tools: AgentTool[], signal: AbortSignal, fetchImpl: typeof fetch = fetch): Promise<ModelTurn> {
-  const mode = config.supportsTools ? 'tools' : 'plan-json';
+  const mode = config.supportsTools && chatCompletionSupportsTools(config.baseUrl, config.model) ? 'tools' : 'plan-json';
   // Old saved runs can still contain image blocks. Director requests only use their text.
   const textMessages=messages.map(message=>Array.isArray(message.content)
     ? {...message,content:message.content.flatMap(part=>part.type==='text'?[part.text]:[]).join('\n')}
     : message);
   const body: Record<string, unknown> = {
-    model: config.model, ...chatCompletionTokenLimit(config.baseUrl,config.maxTokens), stream: false,
-    ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
+    model: config.model, ...chatCompletionParameters(config.baseUrl, config.model, config.maxTokens, config.temperature, mode === 'tools'), stream: false,
     messages: [{ role: 'system', content: mode === 'tools' ? system : system + '\n\n' + planJsonSystem(tools) }, ...(mode === 'tools' ? textMessages : flattenForPlan(textMessages))],
   };
   if (mode === 'tools' && tools.length) { body.tools = toolSchemas(tools); body.tool_choice = 'auto'; }
   const response = await fetchImpl(config.baseUrl.replace(/\/$/, '') + '/chat/completions', {
-    method: 'POST', signal: AbortSignal.any([signal, AbortSignal.timeout(config.timeoutMs)]),
+    method: 'POST', redirect: 'manual', signal: AbortSignal.any([signal, AbortSignal.timeout(config.timeoutMs)]),
     headers: { 'Content-Type': 'application/json', ...(config.key ? { Authorization: `Bearer ${config.key}` } : {}) }, body: JSON.stringify(body),
   });
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel().catch(() => {});
+    throw new ModelHttpError('模型接口返回重定向，请直接配置最终 API 地址', response.status, false);
+  }
   if (!response.ok) {
     const text = redactKey((await response.text().catch(() => '')).slice(0, 400), config.key);
     throw new ModelHttpError(`模型请求失败（HTTP ${response.status}）：${text}`, response.status, response.status === 429 || response.status >= 500);

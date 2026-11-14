@@ -34,7 +34,8 @@ async function fixture(t:TestContext){
   const audio:Asset={id:'voice-fixture',kind:'audio',name:'隔离配音素材',description:'not real provider acceptance',path:'assets/voice-fixture.wav',duration:1,mime:'audio/wav'};
   const port:WorkflowPort={
     async snapshot(){await hooks.snapshot?.();return snapshot();},async source(){return defaultSceneSource();},
-    async text(role){calls[role]++;const override=hooks.textOutput?.(role);if(override!==undefined)return override;if(role==='director')return JSON.stringify({shots:project.shots.map(shot=>({shotId:shot.id,prompt:'隔离画面',narration:'隔离旁白'}))});if(role==='vision')return '仅检查所提供的fixture帧';hooks.scene?.();return JSON.stringify({...defaultSceneSource(),html:'<main>隔离源码</main>'});},
+    async uploadDestination(){return {fingerprint:'vision-fixture',origin:'https://vision.invalid',model:'fixture-vision'};},
+    async text(role,_prompt,_signal,_request,_images,authorizeUpload){if(role==='vision')authorizeUpload?.(await port.uploadDestination('review'));calls[role]++;const override=hooks.textOutput?.(role);if(override!==undefined)return override;if(role==='director')return JSON.stringify({shots:project.shots.map(shot=>({shotId:shot.id,prompt:'隔离画面',narration:'隔离旁白'}))});if(role==='vision')return '仅检查所提供的fixture帧';hooks.scene?.();return JSON.stringify({...defaultSceneSource(),html:'<main>隔离源码</main>'});},
     async voice(){calls.voice++;await hooks.voice?.();return clone(audio);},
     async stageMedia(_id,task){await hooks.stage?.();return [{id:'asset-'+task.id,kind:'image',name:'fixture image',description:'fixture',path:'assets/'+task.id+'.png',mime:'image/png'}];},
     async capture(){const bytes=Buffer.from(hooks.frame);return {bytes,mime:'image/png',sha256:createHash('sha256').update(bytes).digest('hex')};},

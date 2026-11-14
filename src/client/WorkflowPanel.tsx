@@ -35,6 +35,8 @@ export function WorkflowPanel({controller,project,selectedShot,plugin=false,visi
       await controller.mediaCommand('workflows.run',{
         prompt:prompt.trim(),visual,narration,review,
         allowImageUpload:(review&&allowReviewFrames)||(selectedImageIds.length>0&&allowVideoReferences),
+        allowReviewUpload:review&&allowReviewFrames,
+        allowVideoReferenceUpload:selectedImageIds.length>0&&allowVideoReferences,
         imageAssetIds:selectedImageIds,
         ...(shotIds.length?{shotIds}:{}),maxTasks,...(maxCost!==''?{maxCost:Number(maxCost)}:{}),...(plugin?{textRoute:state.route}:{}),
       });
@@ -60,7 +62,16 @@ export function WorkflowPanel({controller,project,selectedShot,plugin=false,visi
       <button className="vs-primary" disabled={disabled||!prompt.trim()||requiresImageConsent||(scope==='selected'&&!selectedShot)} onClick={()=>void start()}>开始协作制作</button>
     </div><div className="vs-media-task-list"><div className="vs-media-heading"><h4>制作流程</h4><button disabled={disabled} onClick={()=>void execute(refresh,'流程状态已刷新。')}>刷新</button></div>{!records.length?<p className="vs-media-help">此工程还没有协作流程。</p>:records.map(record=><article className="vs-media-task" key={record.id} data-workflow-id={record.id}><div className="vs-media-task-title"><strong>{statusNames[record.status]}</strong><small>{new Date(record.createdAt).toLocaleString()}</small></div><p>{record.request.prompt}</p><p>{record.message}</p>{record.error&&<p className="vs-inline-error">{record.error}</p>}<small>{record.usage.generatedTasks} 项生成任务 · {record.usage.cost===null?'费用未知':`${record.usage.cost.toFixed(4)} ${record.usage.currency||'（币种未提供）'}`}{record.committedRevision!==undefined?` · 工程 v${record.committedRevision}`:''}</small>
       <ol className="vs-workflow-steps">{record.steps.map(step=><li key={step.id}><strong>{stepNames[step.kind]}{step.shotId?` · ${project.shots.find(shot=>shot.id===step.shotId)?.title||'镜头'}`:''}</strong><span>{stepStatus[step.status]}</span><p>{step.message}</p>{step.review&&<details><summary>查看检查意见</summary><p>{step.review}</p>{step.frameEvidence?.length?<small>检查了 {step.frameEvidence.length} 个实际关键帧。</small>:null}</details>}</li>)}</ol>
-      <div className="vs-media-actions">{record.status==='running'&&<button disabled={disabled} onClick={()=>void execute(async()=>{await controller.mediaCommand('workflows.pause',{workflowId:record.id});},'已暂停本地流程，已生成产物保留。')}>暂停流程</button>}{['paused','failed'].includes(record.status)&&<button disabled={disabled} onClick={()=>void execute(async()=>{await controller.mediaCommand('workflows.retry',{workflowId:record.id});},'已恢复流程，将复用已完成步骤。')}>恢复／重试</button>}{record.status==='awaiting-apply'&&<button disabled={disabled} onClick={()=>void execute(async()=>{await controller.mediaCommand('workflows.apply',{workflowId:record.id},true);},'候选结果已采用。')}>采用候选结果</button>}</div>
+      {record.uploadConsentRequired&&<p className="vs-media-help" role="status">
+        继续前请确认将{record.uploadConsentRequired.purpose==='review'?'关键帧':'视频生成参考图'}发送给 {record.uploadConsentRequired.model}（{record.uploadConsentRequired.origin}）。
+      </p>}
+      <div className="vs-media-actions">{record.status==='running'&&<button disabled={disabled} onClick={()=>void execute(async()=>{await controller.mediaCommand('workflows.pause',{workflowId:record.id});},'已暂停本地流程，已生成产物保留。')}>暂停流程</button>}{['paused','failed'].includes(record.status)&&<button disabled={disabled} onClick={()=>void execute(async()=>{
+        const consent=record.uploadConsentRequired;
+        await controller.mediaCommand('workflows.retry',{workflowId:record.id,...(consent?{uploadConsentId:consent.id}:{})});
+      },'已恢复流程，将复用已完成步骤。')}>{record.uploadConsentRequired?'授权并重试':'恢复／重试'}</button>}{record.status==='awaiting-apply'&&<button disabled={disabled} onClick={()=>void execute(async()=>{
+        const consent=record.uploadConsentRequired;
+        await controller.mediaCommand('workflows.apply',{workflowId:record.id,...(consent?{uploadConsentId:consent.id}:{})},true);
+      },'候选结果已采用。')}>{record.uploadConsentRequired?'授权并采用':'采用候选结果'}</button>}</div>
     </article>)}</div></div>
   </section>;
 }
