@@ -64,3 +64,23 @@ test('deleting and recreating the legacy connection keeps its isolated credentia
   try{const manager=new ProviderManager(directory,secrets);await manager.save({apiKey:'first-synthetic-key'});await manager.registry.removeConnection('custom');assert.equal((await manager.settings()).ready,false);await manager.save({apiKey:'replacement-synthetic-key'});const selected=await manager.registry.resolve('director');assert.equal(selected.connection.credentialRef,'yingliu.custom-model.api-key');assert.equal(await manager.registry.credential(selected.connection),'replacement-synthetic-key');assert.equal((await manager.settings()).ready,true);}
   finally{await rm(directory,{recursive:true,force:true});}
 });
+
+test('quick multimodal settings do not borrow or replace another vision connection key',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'studio-model-vision-slot-')),secrets=new Secrets();
+  try{
+    const manager=new ProviderManager(directory,secrets);await manager.save({apiKey:'text-secret'});
+    const other=await manager.registry.saveConnection({name:'模型中心视觉',baseUrl:'https://other.example/v1',apiKey:'other-vision-secret'});
+    const model=await manager.registry.saveModel({connectionId:other.id,model:'other-vision',inputModalities:['text','image'],outputModalities:['text'],parameters:{enableVision:true}});
+    await manager.registry.bindRole('vision',model.id);
+    const before=await manager.settings();
+    assert.equal(before.vision?.ready,true);assert.equal(before.vision?.hasKey,false);assert.equal(before.vision?.configured,false);assert.equal(before.vision?.route?.provider,other.id);
+    await manager.save({vision:{name:'OpenAI 多模态',baseUrl:'https://api.openai.com/v1',model:'gpt-6.1-terra'}});
+    const kept=await manager.registry.resolve('vision');
+    assert.equal(kept.connection.id,other.id);assert.equal(await secrets.get(other.credentialRef),'other-vision-secret');assert.equal(await secrets.get(VISION_KEY_REF),undefined);assert.equal((await manager.settings()).vision?.hasKey,false);
+    await manager.save({vision:{apiKey:''}});assert.equal(await secrets.get(other.credentialRef),'other-vision-secret');
+    await manager.save({vision:{name:'OpenAI 多模态',baseUrl:'https://api.openai.com/v1',model:'gpt-6.1-terra',apiKey:'slot-secret'}});
+    const switched=await manager.registry.resolve('vision');
+    assert.equal(switched.model.id,'custom-vision-model');assert.equal(await secrets.get(VISION_KEY_REF),'slot-secret');assert.equal(await secrets.get(other.credentialRef),'other-vision-secret');
+    assert.equal((await manager.settings()).vision?.hasKey,true);assert.equal((await manager.settings()).vision?.ready,true);
+  }finally{await rm(directory,{recursive:true,force:true});}
+});

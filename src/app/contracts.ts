@@ -18,7 +18,7 @@ export interface ProviderConfig {
   contextMessageLimit?:number; contextCharLimit?:number; enableVision?:boolean;
   maxVisionImages?:number; maxVisionBytes?:number; maxVisionDimension?:number;
 }
-/** Dedicated multimodal slot. `configured` is the saved quick-config; `ready` means some vision role can actually be called. */
+/** Quick multimodal slot. `hasKey` is only that slot's credential. `ready` means the currently bound vision role can be called. */
 export interface VisionSettings {
   configured:boolean; ready:boolean; config:ProviderConfig; hasKey:boolean;
   credentialStatus?:SecretStoreStatus; route?:{provider:string;model:string};

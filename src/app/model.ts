@@ -98,9 +98,10 @@ export class ProviderManager {
   }
   private async visionSettings():Promise<VisionSettings>{
     let resolved:ResolvedModel|undefined;try{resolved=await this.registry.resolve('vision');}catch{/* No vision role is the normal unconfigured state. */}
-    const ref=resolved?.connection.credentialRef??VISION_KEY_REF;const credential=resolved?.connection.auth==='none'?{hasKey:false}:await inspectCredential(this.secrets,ref);
-    const ready=!!resolved&&(resolved.connection.auth==='none'||credential.hasKey)&&resolved.model.inputModalities.includes('image')&&resolved.model.parameters.enableVision===true;
-    return {configured:this.vision!==null,ready,config:structuredClone(this.vision??visionPlaceholder()),...credential,...(resolved?{route:{provider:resolved.connection.id,model:resolved.model.model}}:{})};
+    const slot=await inspectCredential(this.secrets,VISION_KEY_REF);
+    let ready=false;
+    if(resolved){const roleCredential=resolved.connection.auth==='none'?{hasKey:false}:resolved.connection.credentialRef===VISION_KEY_REF?slot:await inspectCredential(this.secrets,resolved.connection.credentialRef);ready=(resolved.connection.auth==='none'||roleCredential.hasKey)&&resolved.model.inputModalities.includes('image')&&resolved.model.parameters.enableVision===true;}
+    return {configured:this.vision!==null,ready,config:structuredClone(this.vision??visionPlaceholder()),hasKey:slot.hasKey,...(slot.credentialStatus?{credentialStatus:slot.credentialStatus}:{}),...(resolved?{route:{provider:resolved.connection.id,model:resolved.model.model}}:{})};
   }
   async save(input:Partial<ProviderConfig>&{apiKey?:string;mode?:'demo'|'custom';vision?:(Partial<ProviderConfig>&{apiKey?:string})|null}):Promise<ProviderSettings>{
     await this.initialize();const captured=structuredClone(input);const work=this.writes.then(async()=>{
@@ -129,7 +130,9 @@ export class ProviderManager {
     const previous=this.vision;const project=async()=>{this.vision=next;try{await this.persistFile();}catch(error){this.vision=previous;throw error;}};
     const write=async()=>{
       await this.registry.saveBundle(this.connectionOf(next,VISION_CONNECTION,VISION_KEY_REF),this.visionModel(next),[{role:'vision',modelId:VISION_MODEL_ID}],project);
-      if(this.registry.snapshot().roles.find(item=>item.role==='vision')?.modelId!==VISION_MODEL_ID)await this.registry.bindRole('vision',VISION_MODEL_ID);
+      const bound=this.registry.snapshot().roles.find(item=>item.role==='vision');
+      const stored=apiKey!==undefined?apiKey.trim():await this.secrets.get(VISION_KEY_REF);
+      if(bound?.modelId!==VISION_MODEL_ID&&stored)await this.registry.bindRole('vision',VISION_MODEL_ID);
     };
     if(apiKey===undefined)await write();else await updateCredential(this.secrets,VISION_KEY_REF,apiKey.trim()||undefined,write);
   }
