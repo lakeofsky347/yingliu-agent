@@ -119,7 +119,7 @@ for(const mode of ['weak-backend','decrypt-failure'] as const){
       const current=await application.backend.call('current',{projectId:project.project!.id});assert.equal(current.project!.title,'手工工程');assert.equal(current.ttsConfigured,false);assert.equal(current.credentialStatus?.hasStoredKey,true);assert.equal(current.credentialStatus?.available,false);
       const result=await application.route('providers.get');assert.equal(result.ok,true);if(result.ok){const settings=result.value as ProviderSettings;assert.equal(settings.hasKey,false);assert.equal(settings.credentialStatus?.hasStoredKey,true);}
       const manual=await application.backend.call('apply',{projectId:current.project!.id,expectedRevision:current.project!.revision,title:'仍可保存'});assert.equal(manual.project!.title,'仍可保存');assert.equal(await readFile(f.file,'utf8'),original);
-      const chat=await application.route('chat.send',{projectId:project.project!.id,provider:'custom',model:'deepseek-chat',message:'不会发送到模型',intent:'discuss'});assert.equal(chat.ok,false);if(!chat.ok)assert.match(chat.error.message,/钥匙环/);
+      const chat=await application.route('chat.send',{projectId:project.project!.id,provider:'custom',model:'gpt-6-luna',message:'不会发送到模型',intent:'discuss'});assert.equal(chat.ok,false);if(!chat.ok)assert.match(chat.error.message,/钥匙环/);
       await application.backend.call<StudioSnapshot>('tts',{apiKey:''});assert.equal((await store.status(TTS_REF)).hasStoredKey,false);assert.equal((await store.status(MODEL_REF)).hasStoredKey,true);
       const cleared=await application.route('providers.save',{apiKey:''});assert.equal(cleared.ok,true);assert.equal((await store.status(MODEL_REF)).hasStoredKey,false);
     }finally{await application?.dispose();await f.close();}

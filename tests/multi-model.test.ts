@@ -3,7 +3,7 @@ import test from 'node:test';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ProviderManager } from '../src/app/model.ts';
+import { ProviderManager, TEXT_KEY_REF, VISION_KEY_REF } from '../src/app/model.ts';
 import type { SecretStore } from '../src/app/contracts.ts';
 class Secrets implements SecretStore {values=new Map<string,string>();async get(ref:string){return this.values.get(ref);}async set(ref:string,value:string){this.values.set(ref,value);}async delete(ref:string){this.values.delete(ref);}}
 
@@ -14,7 +14,34 @@ test('legacy provider settings and credential ref migrate once, preserving role 
     const manager=new ProviderManager(directory,secrets);await manager.initialize();const migrated=await manager.registry.resolve('director');assert.equal(migrated.connection.credentialRef,'yingliu.custom-model.api-key');assert.equal(migrated.model.model,'old-chat');assert.equal((await manager.settings()).hasKey,true);
     const local=await manager.registry.saveConnection({name:'新本地模型',baseUrl:'http://127.0.0.1:8001/v1',auth:'none'});const model=await manager.registry.saveModel({connectionId:local.id,model:'local-chat'});await manager.registry.bindRole('director',model.id);
     const reopened=new ProviderManager(directory,secrets);const settings=await reopened.settings();assert.equal(settings.ready,true);assert.equal(settings.hasKey,false);assert.equal(settings.route?.provider,local.id);assert.equal(settings.sceneRoute?.provider,'custom');assert.equal(settings.legacyConfig?.model,'old-chat');
-    assert.ok(!(await readFile(join(directory,'model-registry.json'),'utf8')).includes('old-synthetic-secret'));
+    assert.ok(!(await readFile(join(directory,'model-registry.json'),'utf8')).includes('old-synthetic-secret'));assert.equal(await secrets.get(TEXT_KEY_REF),'old-synthetic-secret');
+  }finally{await rm(directory,{recursive:true,force:true});}
+});
+
+test('an existing registry without provider.json keeps its text connection instead of swapping in the new default',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'studio-model-registry-only-')),secrets=new Secrets();
+  try{
+    await writeFile(join(directory,'model-registry.json'),JSON.stringify({version:1,connections:[{id:'custom',name:'DeepSeek / 兼容接口',protocol:'chat-completions',baseUrl:'https://api.deepseek.com/v1',auth:'bearer',credentialRef:TEXT_KEY_REF,enabled:true,revision:1,requestTimeoutMs:90000,concurrency:2}],models:[{id:'custom-model',connectionId:'custom',model:'deepseek-chat',name:'deepseek-chat',enabled:true,inputModalities:['text'],outputModalities:['text'],parameters:{}}],roles:[{role:'director',modelId:'custom-model'},{role:'scene',modelId:'custom-model'}]}));
+    await secrets.set(TEXT_KEY_REF,'kept-text-secret');
+    const settings=await new ProviderManager(directory,secrets).settings();
+    assert.equal(settings.config.model,'deepseek-chat');assert.equal(settings.config.baseUrl,'https://api.deepseek.com/v1');assert.equal(settings.legacyConfig?.name,'DeepSeek / 兼容接口');
+    assert.equal(settings.hasKey,true);assert.equal(await secrets.get(TEXT_KEY_REF),'kept-text-secret');assert.equal(settings.vision?.configured,false);
+  }finally{await rm(directory,{recursive:true,force:true});}
+});
+
+test('a shared vision flag migrates onto the text slot and keeps its key off the multimodal slot',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'studio-model-vision-migration-')),secrets=new Secrets();
+  try{
+    await writeFile(join(directory,'provider.json'),JSON.stringify({version:2,mode:'custom',config:{name:'旧接口',baseUrl:'https://old.invalid/v1',model:'old-chat',supportsVision:true,enableVision:true}}));
+    await writeFile(join(directory,'model-registry.json'),JSON.stringify({version:1,connections:[{id:'custom',name:'旧接口',protocol:'chat-completions',baseUrl:'https://old.invalid/v1',auth:'bearer',credentialRef:TEXT_KEY_REF,enabled:true,revision:1,requestTimeoutMs:90000,concurrency:2}],models:[{id:'custom-model',connectionId:'custom',model:'old-chat',name:'old-chat',enabled:true,inputModalities:['text','image'],outputModalities:['text'],parameters:{enableVision:true,temperature:.7}}],roles:[{role:'director',modelId:'custom-model'},{role:'scene',modelId:'custom-model'},{role:'vision',modelId:'custom-model'}]}));
+    await secrets.set(TEXT_KEY_REF,'kept-text-secret');
+    const manager=new ProviderManager(directory,secrets);await manager.initialize();
+    const settings=await manager.settings(),text=await manager.registry.resolve('director');
+    assert.equal(text.model.model,'old-chat');assert.deepEqual(text.model.inputModalities,['text']);assert.equal(text.model.parameters.enableVision,undefined);
+    assert.equal(settings.vision?.configured,false);assert.equal(settings.vision?.ready,false);assert.equal(settings.config.supportsVision,false);
+    assert.equal(await secrets.get(TEXT_KEY_REF),'kept-text-secret');assert.equal(await secrets.get(VISION_KEY_REF),undefined);
+    const stored=JSON.parse(await readFile(join(directory,'provider.json'),'utf8'));assert.equal(stored.version,3);assert.equal(stored.vision,null);assert.ok(!JSON.stringify(stored).includes('kept-text-secret'));
+    await assert.rejects(manager.registry.resolve('vision'),/vision/);
   }finally{await rm(directory,{recursive:true,force:true});}
 });
 

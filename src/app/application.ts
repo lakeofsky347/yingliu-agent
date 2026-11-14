@@ -184,7 +184,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
     resolveModel:async()=>{
       const resolved=await providers.registry.resolve('director'),parameters=resolved.model.parameters as Record<string,unknown>;
       let vision=false;try{await providers.registry.resolve('vision');vision=true;}catch{}
-      return {connectionId:resolved.connection.id,parameters,vision:vision||resolved.model.inputModalities.includes('image'),config:{baseUrl:resolved.connection.baseUrl,model:resolved.model.model,key:await providers.registry.credential(resolved.connection),
+      return {connectionId:resolved.connection.id,parameters,vision,config:{baseUrl:resolved.connection.baseUrl,model:resolved.model.model,key:await providers.registry.credential(resolved.connection),
         timeoutMs:Number(resolved.connection.requestTimeoutMs)||120000,maxTokens:Number(parameters.maxTokens)||4096,...(typeof parameters.temperature==='number'?{temperature:parameters.temperature}:{}),supportsTools:parameters.supportsTools!==false}};
     },
   });
@@ -218,7 +218,11 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         case 'agent.qc.last':value={report:await agent.lastQc(String(data.projectId))};break;
         case 'agent.ledger':value=await agent.ledger(String(data.projectId));break;
         case 'agent.budget.set':value=await agent.setProjectBudget(String(data.projectId),data.maxCost===null||data.maxCost===undefined||data.maxCost===''?null:Number(data.maxCost),typeof data.currency==='string'?data.currency:undefined);break;
-        case 'workflows.run':value=await workflows.run(data as unknown as WorkflowRequest);break;
+        case 'workflows.run':{
+          const request=data as unknown as WorkflowRequest;
+          if(request.review){try{await providers.registry.resolve('vision');}catch{throw new Error('未配置多模态接口，不能做视觉检查。请先单独保存多模态模型，或关闭视觉检查。文本制作和手动编辑不受影响。');}}
+          value=await workflows.run(request);break;
+        }
         case 'workflows.list':value={workflows:await workflows.list(typeof data.projectId==='string'?data.projectId:undefined)};break;
         case 'workflows.get':value=await workflows.get(String(data.workflowId));break;
         case 'workflows.retry':value=await workflows.retry(String(data.workflowId));break;

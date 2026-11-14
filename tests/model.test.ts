@@ -4,14 +4,14 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createProject } from '../src/core/index.ts';
-import { DEMO_MODEL, demoSceneSource, demoStoryboard, ProviderManager } from '../src/app/model.ts';
+import { DEFAULT_TEXT_MODEL, DEFAULT_VISION_MODEL, DEMO_MODEL, demoSceneSource, demoStoryboard, OPENAI_BASE_URL, ProviderManager, TEXT_KEY_REF, VISION_KEY_REF } from '../src/app/model.ts';
 import type { SecretStore } from '../src/app/contracts.ts';
 
 class MemorySecrets implements SecretStore {values=new Map<string,string>();async get(ref:string){return this.values.get(ref);}async set(ref:string,value:string){this.values.set(ref,value);}async delete(ref:string){this.values.delete(ref);}}
 
 test('provider production defaults are custom and fixture never appears in normal catalog',async()=>{
   const directory=await mkdtemp(join(tmpdir(),'yingliu-model-'));const secrets=new MemorySecrets();
-  try{const providers=new ProviderManager(directory,secrets);await providers.initialize();let settings=await providers.settings();assert.equal(settings.mode,'custom');assert.equal(settings.config.baseUrl,'https://api.deepseek.com/v1');assert.equal(settings.config.model,'deepseek-chat');assert.equal(settings.hasKey,false);
+    try{const providers=new ProviderManager(directory,secrets);await providers.initialize();let settings=await providers.settings();assert.equal(settings.mode,'custom');assert.equal(settings.config.baseUrl,OPENAI_BASE_URL);assert.equal(settings.config.model,DEFAULT_TEXT_MODEL);assert.equal(settings.config.name,'OpenAI');assert.equal(settings.hasKey,false);assert.equal(settings.vision?.configured,false);assert.equal(settings.vision?.ready,false);
     assert.deepEqual(providers.host().listProviders().map(p=>p.id),['custom']);await assert.rejects(providers.host().listModels('demo'),/未知/);await assert.rejects(providers.save({mode:'demo'}),/仅供测试/);assert.equal((await new ProviderManager(join(directory,'fixture'),secrets,{allowFixtures:true}).host().listModels('demo'))[0]?.id,DEMO_MODEL);
     settings=await providers.save({apiKey:'fixture-secret-do-not-persist',mode:'custom',name:'我的接口'});assert.equal(settings.hasKey,true);const config=await readFile(join(directory,'provider.json'),'utf8');assert.ok(!config.includes('fixture-secret'));
     const reopened=new ProviderManager(directory,secrets);assert.equal((await reopened.settings()).config.name,'我的接口');assert.equal((await reopened.settings()).mode,'custom');
@@ -19,10 +19,10 @@ test('provider production defaults are custom and fixture never appears in norma
   }finally{await rm(directory,{recursive:true,force:true});}
 });
 
-test('model settings serialize concurrent partial saves and vision requires both explicit flags',async()=>{
+test('model settings serialize concurrent partial saves and keep multimodal credentials on their own ref',async()=>{
   const directory=await mkdtemp(join(tmpdir(),'yingliu-settings-'));
-  try{const providers=new ProviderManager(directory,new MemorySecrets());await Promise.all([providers.save({temperature:.3,name:'my custom'}),providers.save({maxTokens:1024,requestTimeoutMs:10000})]);const config=(await providers.settings()).config;assert.equal(config.name,'my custom');assert.equal(config.temperature,.3);assert.equal(config.maxTokens,1024);
-    await providers.save({supportsVision:true});assert.deepEqual((await providers.host().listModels('custom'))[0]?.inputModalities,['text']);await providers.save({enableVision:true});assert.deepEqual((await providers.host().resolveModelInfo!('custom','deepseek-chat'))?.inputModalities,['text','image']);await assert.rejects(providers.save({maxTokens:1}),/maxTokens/);await assert.rejects(providers.save({supportsVision:false}),/确认/);
+  try{const secrets=new MemorySecrets(),providers=new ProviderManager(directory,secrets);await Promise.all([providers.save({temperature:.3,name:'my custom'}),providers.save({maxTokens:1024,requestTimeoutMs:10000})]);const config=(await providers.settings()).config;assert.equal(config.name,'my custom');assert.equal(config.temperature,.3);assert.equal(config.maxTokens,1024);
+    await assert.rejects(providers.save({supportsVision:true}),/单独保存多模态/);assert.deepEqual((await providers.host().listModels('custom'))[0]?.inputModalities,['text']);await providers.save({vision:{name:'OpenAI 多模态',baseUrl:'https://vision.example/v1',model:DEFAULT_VISION_MODEL,apiKey:'vision-only-secret'}});assert.equal(await secrets.get(VISION_KEY_REF),'vision-only-secret');assert.equal(await secrets.get(TEXT_KEY_REF),undefined);assert.equal((await providers.settings()).vision?.configured,true);assert.equal((await providers.settings()).vision?.ready,true);assert.deepEqual((await providers.host().resolveModelInfo!('custom-vision',DEFAULT_VISION_MODEL))?.inputModalities,['text','image']);assert.deepEqual((await providers.host().resolveModelInfo!('custom',DEFAULT_TEXT_MODEL))?.inputModalities,['text']);await assert.rejects(providers.save({maxTokens:1}),/maxTokens/);await providers.save({vision:null});assert.equal((await providers.settings()).vision?.configured,false);assert.equal(await secrets.get(VISION_KEY_REF),'vision-only-secret');await assert.rejects(providers.registry.resolve('vision'),/vision/);
   }finally{await rm(directory,{recursive:true,force:true});}
 });
 
@@ -52,19 +52,19 @@ test('provider rejects truncated responses and never fetches without an app key'
 
 test('custom transport sends only enabled embedded images and enforces request text/image budgets',async()=>{
   const directory=await mkdtemp(join(tmpdir(),'yingliu-model-vision-'));let calls=0;const captured:Record<string,any>[]=[];
-  try{const providers=new ProviderManager(directory,new MemorySecrets(),{fetch:async(_url,options)=>{calls++;captured.push(JSON.parse(String(options?.body)));return Response.json({choices:[{message:{content:'完整回复'},finish_reason:'stop'}]});}});await providers.save({apiKey:'mock-key',supportsVision:true,contextCharLimit:8000,maxVisionBytes:1024});
+  try{const providers=new ProviderManager(directory,new MemorySecrets(),{fetch:async(url,options)=>{calls++;captured.push({url:String(url),body:JSON.parse(String(options?.body))});return Response.json({choices:[{message:{content:'完整回复'},finish_reason:'stop'}]});}});await providers.save({apiKey:'mock-key',contextCharLimit:8000});
     const image={type:'image_url' as const,image_url:{url:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jM1sAAAAASUVORK5CYII='}};await assert.rejects(providers.complete([{role:'user',content:[image]}],'system',new AbortController().signal),/未启用/);assert.equal(calls,0);
-    await providers.save({enableVision:true});await providers.complete([{role:'user',content:[{type:'text',text:'本轮授权图片'},image]}],'system',new AbortController().signal);assert.equal(captured[0]!.messages[1].content[1].image_url.url,image.image_url.url);
-    await assert.rejects(providers.complete([{role:'user',content:'x'.repeat(8001)}],'system',new AbortController().signal),/文本上下文/);await assert.rejects(providers.complete([{role:'user',content:[image,image,image,image]}],'system',new AbortController().signal),/图片数量/);const oversized={type:'image_url' as const,image_url:{url:'data:image/png;base64,'+Buffer.alloc(1025).toString('base64')}};await assert.rejects(providers.complete([{role:'user',content:[oversized]}],'system',new AbortController().signal),/总字节/);assert.equal(calls,1);
+    await providers.save({vision:{name:'看图',baseUrl:'https://vision.example/v1',model:'gpt-vision',apiKey:'vision-key',maxVisionBytes:1024}});await providers.complete([{role:'user',content:[{type:'text',text:'本轮授权图片'},image]}],'system',new AbortController().signal,undefined,'vision');assert.equal(captured[0]!.url,'https://vision.example/v1/chat/completions');assert.equal(captured[0]!.body.model,'gpt-vision');assert.equal(captured[0]!.body.messages[1].content[1].image_url.url,image.image_url.url);
+    await assert.rejects(providers.complete([{role:'user',content:[image]}],'system',new AbortController().signal),/未启用/);await assert.rejects(providers.complete([{role:'user',content:'x'.repeat(8001)}],'system',new AbortController().signal),/文本上下文/);await assert.rejects(providers.complete([{role:'user',content:[image,image,image,image]}],'system',new AbortController().signal,undefined,'vision'),/图片数量/);const oversized={type:'image_url' as const,image_url:{url:'data:image/png;base64,'+Buffer.alloc(1025).toString('base64')}};await assert.rejects(providers.complete([{role:'user',content:[oversized]}],'system',new AbortController().signal,undefined,'vision'),/总字节/);assert.equal(calls,1);
   }finally{await rm(directory,{recursive:true,force:true});}
 });
 
 
 test('the transport validates real image dimensions for workflow and direct vision calls',async()=>{
   const directory=await mkdtemp(join(tmpdir(),'yingliu-vision-dimension-'));let requests=0;
-  try{const providers=new ProviderManager(directory,new MemorySecrets(),{fetch:async()=>{requests++;return Response.json({choices:[{message:{content:'ok'},finish_reason:'stop'}]});}});await providers.save({apiKey:'synthetic-only',supportsVision:true,enableVision:true,maxVisionDimension:64});
+  try{const providers=new ProviderManager(directory,new MemorySecrets(),{fetch:async()=>{requests++;return Response.json({choices:[{message:{content:'ok'},finish_reason:'stop'}]});}});await providers.save({apiKey:'synthetic-only'});await providers.save({vision:{name:'看图',baseUrl:'https://vision.example/v1',model:'gpt-vision',apiKey:'synthetic-only',maxVisionDimension:64}});
     const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jM1sAAAAASUVORK5CYII=','base64');png.writeUInt32BE(65,16);
-    await assert.rejects(providers.complete([{role:'user',content:[{type:'image_url',image_url:{url:'data:image/png;base64,'+png.toString('base64')}}]}],'检查关键帧',new AbortController().signal),/像素尺寸/);assert.equal(requests,0);
-    await assert.rejects(providers.complete([{role:'user',content:[{type:'image_url',image_url:{url:'data:image/png;base64,AA=='}}]}],'检查关键帧',new AbortController().signal),/格式|尺寸/);assert.equal(requests,0);
+    await assert.rejects(providers.complete([{role:'user',content:[{type:'image_url',image_url:{url:'data:image/png;base64,'+png.toString('base64')}}]}],'检查关键帧',new AbortController().signal,undefined,'vision'),/像素尺寸/);assert.equal(requests,0);
+    await assert.rejects(providers.complete([{role:'user',content:[{type:'image_url',image_url:{url:'data:image/png;base64,AA=='}}]}],'检查关键帧',new AbortController().signal,undefined,'vision'),/格式|尺寸/);assert.equal(requests,0);
   }finally{await rm(directory,{recursive:true,force:true});}
 });

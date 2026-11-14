@@ -4,18 +4,34 @@ import { mkdir, readFile, rename, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultSceneSource, defaultShot, normalizeSceneDurations } from '../core/index.ts';
 import type { SceneSource, Shot, VideoProject } from '../shared/types.ts';
-import type { ProviderConfig, ProviderHost, ProviderSettings, SecretStore } from './contracts.ts';
+import type { ProviderConfig, ProviderHost, ProviderSettings, SecretStore, VisionSettings } from './contracts.ts';
 import { inspectCredential, updateCredential } from './secrets.ts';
 import { checkTemplate } from '../models/adapters/template.ts';
 import { ModelRegistry } from '../models/registry.ts';
 import { imageMetadata } from '../models/image-input.ts';
-import type { ModelDefinition, ModelSelection, ResolvedModel } from '../models/contracts.ts';
+import type { ModelDefinition, ModelSelection, ResolvedModel, RoleBinding } from '../models/contracts.ts';
 
 export const DEMO_PROVIDER = 'demo';
 export const DEMO_MODEL = 'offline-director';
-const KEY_REF = 'yingliu.custom-model.api-key';
-const DEFAULT:ProviderConfig={id:'custom',name:'DeepSeek / 兼容接口',baseUrl:'https://api.deepseek.com/v1',model:'deepseek-chat',supportsVision:false,
+/** Official Chat Completions root. DeepSeek and other vendors stay available as a filled-in compatible URL. */
+export const OPENAI_BASE_URL = 'https://api.openai.com/v1';
+/**
+ * Text-slot default. OpenAI's Nov 2026 catalog does not publish a text-only id;
+ * gpt-6-luna is the current efficient chat model. Images are never sent to this slot.
+ */
+export const DEFAULT_TEXT_MODEL = 'gpt-6-luna';
+/** Suggested multimodal id (visual reasoning). Stored only after the user saves that section. */
+export const DEFAULT_VISION_MODEL = 'gpt-6.1-terra';
+export const TEXT_KEY_REF = 'yingliu.custom-model.api-key';
+export const VISION_KEY_REF = 'yingliu.custom-vision.api-key';
+const KEY_REF = TEXT_KEY_REF;
+const TEXT_CONNECTION = 'custom';
+const VISION_CONNECTION = 'custom-vision';
+const TEXT_MODEL_ID = 'custom-model';
+const VISION_MODEL_ID = 'custom-vision-model';
+const DEFAULT:ProviderConfig={id:TEXT_CONNECTION,name:'OpenAI',baseUrl:OPENAI_BASE_URL,model:DEFAULT_TEXT_MODEL,supportsVision:false,
   temperature:.7,maxTokens:7000,requestTimeoutMs:90000,contextMessageLimit:24,contextCharLimit:90000,enableVision:false,maxVisionImages:3,maxVisionBytes:6*1024*1024,maxVisionDimension:4096};
+function visionPlaceholder():ProviderConfig{return {...DEFAULT,id:VISION_CONNECTION,name:'OpenAI 多模态',model:DEFAULT_VISION_MODEL,supportsVision:true,enableVision:true};}
 export type ModelContent={type:'text';text:string}|{type:'image_url';image_url:{url:string;detail?:'auto'|'low'|'high'}};
 export type ModelMessage={role:'system'|'user'|'assistant';content:string|ModelContent[]};
 type StreamOptions=Parameters<ProviderHost['stream']>[0];
@@ -46,41 +62,82 @@ function finishReason(reason:unknown){return reason==='stop'?{kind:'stop'}:reaso
 
 /** Configuration is local to this app; only the injected SecretStore handles keys. */
 export class ProviderManager {
-  private config:ProviderConfig={...DEFAULT};private mode:'demo'|'custom'='custom';private initialized?:Promise<void>;
+  private config:ProviderConfig={...DEFAULT};private vision:ProviderConfig|null=null;private mode:'demo'|'custom'='custom';private initialized?:Promise<void>;
   private writes:Promise<void>=Promise.resolve();
   readonly registry:ModelRegistry;
-  constructor(private dataDirectory:string,private secrets:SecretStore,private options:{allowFixtures?:boolean;fetch?:typeof fetch}={}){this.registry=new ModelRegistry(dataDirectory,secrets,{credentialRefFactory:id=>id==='custom'?KEY_REF:`yingliu.models.${id}.api-key`});}
+  constructor(private dataDirectory:string,private secrets:SecretStore,private options:{allowFixtures?:boolean;fetch?:typeof fetch}={}){this.registry=new ModelRegistry(dataDirectory,secrets,{credentialRefFactory:id=>id===TEXT_CONNECTION?KEY_REF:id===VISION_CONNECTION?VISION_KEY_REF:`yingliu.models.${id}.api-key`});}
   initialize():Promise<void>{return this.initialized??=(async()=>{
-    try{const saved=object(JSON.parse(await readFile(join(this.dataDirectory,'provider.json'),'utf8')));this.config=configuration(object(saved.config));this.mode=saved.mode==='demo'&&this.options.allowFixtures?'demo':'custom';}
+    let migrated=false,hadFile=false;
+    try{const saved=object(JSON.parse(await readFile(join(this.dataDirectory,'provider.json'),'utf8')));hadFile=true;this.config=configuration({...object(saved.config),supportsVision:false,enableVision:false,id:TEXT_CONNECTION});this.mode=saved.mode==='demo'&&this.options.allowFixtures?'demo':'custom';
+      if(saved.vision&&typeof saved.vision==='object')this.vision=configuration({...object(saved.vision),id:VISION_CONNECTION,supportsVision:true,enableVision:true});
+      else if(saved.version!==3)migrated=true;}
     catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
-    await this.registry.initialize({connections:[{id:'custom',name:this.config.name,protocol:'chat-completions',baseUrl:this.config.baseUrl,auth:'bearer',credentialRef:KEY_REF,enabled:true,revision:1,requestTimeoutMs:this.config.requestTimeoutMs!,concurrency:2}],models:[this.legacyModel()],roles:[{role:'director',modelId:'custom-model'},{role:'scene',modelId:'custom-model'}]});
+    const connections=[{id:TEXT_CONNECTION,name:this.config.name,protocol:'chat-completions' as const,baseUrl:this.config.baseUrl,auth:'bearer' as const,credentialRef:KEY_REF,enabled:true,revision:1,requestTimeoutMs:this.config.requestTimeoutMs!,concurrency:2}];
+    const models=[this.legacyModel()];const roles:RoleBinding[]=[{role:'director',modelId:TEXT_MODEL_ID},{role:'scene',modelId:TEXT_MODEL_ID}];
+    if(this.vision){connections.push({id:VISION_CONNECTION,name:this.vision.name,protocol:'chat-completions',baseUrl:this.vision.baseUrl,auth:'bearer',credentialRef:VISION_KEY_REF,enabled:true,revision:1,requestTimeoutMs:this.vision.requestTimeoutMs!,concurrency:2});models.push(this.visionModel(this.vision));roles.push({role:'vision',modelId:VISION_MODEL_ID});}
+    await this.registry.initialize({connections,models,roles});
+    if(!hadFile){const snap=this.registry.snapshot(),connection=snap.connections.find(item=>item.id===TEXT_CONNECTION),model=snap.models.find(item=>item.id===TEXT_MODEL_ID&&item.connectionId===TEXT_CONNECTION);
+      if(connection&&model)this.config=configuration({...DEFAULT,...model.parameters,id:TEXT_CONNECTION,name:connection.name,baseUrl:connection.baseUrl,model:model.model,supportsVision:false,enableVision:false,requestTimeoutMs:Math.min(300000,connection.requestTimeoutMs)});}
+    if(migrated){const snap=this.registry.snapshot(),model=snap.models.find(item=>item.id===TEXT_MODEL_ID);
+      if(snap.roles.some(item=>item.role==='vision'&&item.modelId===TEXT_MODEL_ID))await this.registry.bindRole('vision',null);
+      if(model&&(model.inputModalities.includes('image')||model.parameters.enableVision===true)){const parameters={...model.parameters};delete parameters.enableVision;await this.registry.saveModel({...model,inputModalities:['text'],parameters});}
+      await this.persistFile();}
   })();}
-  private legacyModel(config=this.config):ModelDefinition {const {id,name,baseUrl,model,supportsVision,...parameters}=config;return {id:'custom-model',connectionId:'custom',name:model,model,enabled:true,inputModalities:supportsVision?['text','image']:['text'],outputModalities:['text'],parameters:parameters as ModelDefinition['parameters']};}
+  private async persistFile(config=this.config,mode=this.mode){await mkdir(this.dataDirectory,{recursive:true});const path=join(this.dataDirectory,'provider.json'),temporary=path+'.tmp-'+randomUUID();try{await writeFile(temporary,JSON.stringify({version:3,config,vision:this.vision,mode},null,2)+'\n');await rename(temporary,path);}finally{await rm(temporary,{force:true});}}
+  private legacyModel(config=this.config):ModelDefinition {const {id,name,baseUrl,model,supportsVision,enableVision,...parameters}=config;void id;void name;void baseUrl;void supportsVision;void enableVision;return {id:TEXT_MODEL_ID,connectionId:TEXT_CONNECTION,name:model,model,enabled:true,inputModalities:['text'],outputModalities:['text'],parameters:parameters as ModelDefinition['parameters']};}
+  private visionModel(config:ProviderConfig):ModelDefinition {const {id,name,baseUrl,model,supportsVision,...parameters}=config;void id;void name;void baseUrl;void supportsVision;return {id:VISION_MODEL_ID,connectionId:VISION_CONNECTION,name:model,model,enabled:true,inputModalities:['text','image'],outputModalities:['text'],parameters:{...parameters,enableVision:true} as ModelDefinition['parameters']};}
+  private connectionOf(config:ProviderConfig,id:string,credentialRef:string){return {id,name:config.name,protocol:'chat-completions' as const,baseUrl:config.baseUrl,auth:'bearer' as const,credentialRef,enabled:true,revision:1,requestTimeoutMs:config.requestTimeoutMs!,concurrency:2};}
   private textConfig(resolved:ResolvedModel):ProviderConfig {const {connection,model}=resolved;if(connection.protocol!=='chat-completions')throw new Error('所选模型不是文本接口');return configuration({...DEFAULT,...model.parameters,id:connection.id,name:connection.name,baseUrl:connection.baseUrl,model:model.model,supportsVision:model.inputModalities.includes('image'),requestTimeoutMs:Math.min(300000,connection.requestTimeoutMs)});}
   async settings(selection?:ModelSelection):Promise<ProviderSettings>{
     await this.initialize();await this.writes;let resolved:ResolvedModel;
-    try{resolved=await this.registry.resolve(selection??'director');}catch(error){if(selection)throw error;return {config:structuredClone(this.config),hasKey:false,ready:false,mode:this.mode};}
+    try{resolved=await this.registry.resolve(selection??'director');}catch(error){if(selection)throw error;return {config:structuredClone(this.config),hasKey:false,ready:false,mode:this.mode,vision:await this.visionSettings()};}
     const credential=resolved.connection.auth==='none'?{hasKey:false}:await inspectCredential(this.secrets,resolved.connection.credentialRef);
     let sceneRoute;try{const scene=await this.registry.resolve('scene');sceneRoute={provider:scene.connection.id,model:scene.model.model};}catch{/* A missing role is shown in the model center. */}
     const legacyCredential=await inspectCredential(this.secrets,KEY_REF);
-    return {config:this.textConfig(resolved),...credential,legacyHasKey:legacyCredential.hasKey,legacyCredentialStatus:legacyCredential.credentialStatus,ready:resolved.connection.auth==='none'||credential.hasKey,mode:this.mode,route:{provider:resolved.connection.id,model:resolved.model.model},sceneRoute,legacyConfig:structuredClone(this.config)};
+    return {config:this.textConfig(resolved),...credential,legacyHasKey:legacyCredential.hasKey,legacyCredentialStatus:legacyCredential.credentialStatus,ready:resolved.connection.auth==='none'||credential.hasKey,mode:this.mode,route:{provider:resolved.connection.id,model:resolved.model.model},sceneRoute,legacyConfig:structuredClone(this.config),vision:await this.visionSettings()};
   }
-  async save(input:Partial<ProviderConfig>&{apiKey?:string;mode?:'demo'|'custom'}):Promise<ProviderSettings>{
+  private async visionSettings():Promise<VisionSettings>{
+    let resolved:ResolvedModel|undefined;try{resolved=await this.registry.resolve('vision');}catch{/* No vision role is the normal unconfigured state. */}
+    const ref=resolved?.connection.credentialRef??VISION_KEY_REF;const credential=resolved?.connection.auth==='none'?{hasKey:false}:await inspectCredential(this.secrets,ref);
+    const ready=!!resolved&&(resolved.connection.auth==='none'||credential.hasKey)&&resolved.model.inputModalities.includes('image')&&resolved.model.parameters.enableVision===true;
+    return {configured:this.vision!==null,ready,config:structuredClone(this.vision??visionPlaceholder()),...credential,...(resolved?{route:{provider:resolved.connection.id,model:resolved.model.model}}:{})};
+  }
+  async save(input:Partial<ProviderConfig>&{apiKey?:string;mode?:'demo'|'custom';vision?:(Partial<ProviderConfig>&{apiKey?:string})|null}):Promise<ProviderSettings>{
     await this.initialize();const captured=structuredClone(input);const work=this.writes.then(async()=>{
-      const {apiKey,mode,...fields}=captured;if(Object.keys(fields).length)await this.registry.assertUnused('custom');const next=configuration({...this.config,...fields,id:'custom'});
+      if('vision' in captured)await this.commitVision(captured.vision??null);
+      const {apiKey,mode,vision:visionInput,...fields}=captured;void visionInput;
+      if(fields.supportsVision||fields.enableVision)throw new Error('文本接口不发送图片。请单独保存多模态接口。');
+      if(!Object.keys(fields).length&&apiKey===undefined&&mode===undefined)return;
+      if(Object.keys(fields).length)await this.registry.assertUnused(TEXT_CONNECTION);const next=configuration({...this.config,...fields,id:TEXT_CONNECTION,supportsVision:false,enableVision:false});
       if(mode!==undefined&&!['demo','custom'].includes(mode))throw new Error('模型模式无效');
       if(mode==='demo'&&!this.options.allowFixtures)throw new Error('离线 fixture 仅供测试，正常应用使用已配置的模型服务');
-      const nextMode=mode??this.mode;await mkdir(this.dataDirectory,{recursive:true});
-      const path=join(this.dataDirectory,'provider.json'),temporary=path+'.tmp-'+randomUUID();
-      const project=async()=>{await writeFile(temporary,JSON.stringify({version:2,config:next,mode:nextMode},null,2)+'\n');await rename(temporary,path);};
+      const nextMode=mode??this.mode;
+      const project=async()=>{await this.persistFile(next,nextMode);};
       const commit=async()=>{
-        if(!Object.keys(fields).length&&this.registry.snapshot().models.some(m=>m.id==='custom-model'))await project();
-        else await this.registry.saveBundle({id:'custom',name:next.name,protocol:'chat-completions',baseUrl:next.baseUrl,auth:'bearer',credentialRef:KEY_REF,enabled:true,revision:1,requestTimeoutMs:next.requestTimeoutMs!,concurrency:2},this.legacyModel(next),[{role:'director',modelId:'custom-model'},{role:'scene',modelId:'custom-model'}],project);
+        if(!Object.keys(fields).length&&this.registry.snapshot().models.some(m=>m.id===TEXT_MODEL_ID))await project();
+        else await this.registry.saveBundle(this.connectionOf(next,TEXT_CONNECTION,KEY_REF),this.legacyModel(next),[{role:'director',modelId:TEXT_MODEL_ID},{role:'scene',modelId:TEXT_MODEL_ID}],project);
         this.config=next;this.mode=nextMode;
       };
-      try{if(apiKey===undefined)await commit();else await updateCredential(this.secrets,KEY_REF,apiKey.trim()||undefined,commit);}
-      finally{await rm(temporary,{force:true});}
+      if(apiKey===undefined)await commit();else await updateCredential(this.secrets,KEY_REF,apiKey.trim()||undefined,commit);
     });this.writes=work.then(()=>undefined,()=>undefined);await work;return this.settings();
+  }
+  private async commitVision(input:(Partial<ProviderConfig>&{apiKey?:string})|null){
+    if(input===null){await this.disableVision();await this.persistFile();return;}
+    const {apiKey,...fields}=input;
+    if(!Object.keys(fields).length){if(apiKey!==undefined)await updateCredential(this.secrets,VISION_KEY_REF,apiKey.trim()||undefined,()=>this.persistFile());return;}
+    const next=configuration({...(this.vision??visionPlaceholder()),...fields,id:VISION_CONNECTION,supportsVision:true,enableVision:true});
+    const previous=this.vision;const project=async()=>{this.vision=next;try{await this.persistFile();}catch(error){this.vision=previous;throw error;}};
+    const write=async()=>{
+      await this.registry.saveBundle(this.connectionOf(next,VISION_CONNECTION,VISION_KEY_REF),this.visionModel(next),[{role:'vision',modelId:VISION_MODEL_ID}],project);
+      if(this.registry.snapshot().roles.find(item=>item.role==='vision')?.modelId!==VISION_MODEL_ID)await this.registry.bindRole('vision',VISION_MODEL_ID);
+    };
+    if(apiKey===undefined)await write();else await updateCredential(this.secrets,VISION_KEY_REF,apiKey.trim()||undefined,write);
+  }
+  private async disableVision(){
+    const snap=this.registry.snapshot();
+    if(snap.connections.some(item=>item.id===VISION_CONNECTION&&item.enabled))await this.registry.saveConnection({id:VISION_CONNECTION,enabled:false});
+    if(snap.roles.some(item=>item.role==='vision'&&item.modelId===VISION_MODEL_ID))await this.registry.bindRole('vision',null);
+    this.vision=null;
   }
   async check(connectionId?:string):Promise<{ok:boolean;message:string}>{
     await this.initialize();if(this.mode==='demo')return {ok:true,message:'离线演示模型可用；这是确定性演示，未连接远程模型。'};
@@ -95,8 +152,8 @@ export class ProviderManager {
   }
   host():ProviderHost{return {
     listProviders:()=>[...(this.options.allowFixtures?[{id:DEMO_PROVIDER,name:'测试 fixture'}]:[]),...this.registry.snapshot().connections.filter(c=>c.enabled&&c.protocol==='chat-completions').map(c=>({id:c.id,name:c.name}))],
-    listModels:async id=>{await this.initialize();if(id===DEMO_PROVIDER&&this.options.allowFixtures)return [{id:DEMO_MODEL,name:'测试 fixture',inputModalities:['text']}];const state=this.registry.snapshot(),connection=state.connections.find(c=>c.id===id&&c.enabled&&c.protocol==='chat-completions');if(!connection)throw new Error('未知模型供应商');return state.models.filter(m=>m.connectionId===id&&m.enabled).map(m=>({id:m.model,name:m.name,inputModalities:m.parameters.enableVision?m.inputModalities:['text']}));},
-    resolveModelInfo:async(id,model,signal)=>{signal?.throwIfAborted();if(id===DEMO_PROVIDER&&this.options.allowFixtures&&model===DEMO_MODEL)return {inputModalities:['text']};await this.initialize();const resolved=await this.registry.resolve({provider:id,model,protocol:'chat-completions'});return {inputModalities:resolved.model.parameters.enableVision?resolved.model.inputModalities:['text']};},
+    listModels:async id=>{await this.initialize();if(id===DEMO_PROVIDER&&this.options.allowFixtures)return [{id:DEMO_MODEL,name:'测试 fixture',inputModalities:['text']}];const state=this.registry.snapshot(),connection=state.connections.find(c=>c.id===id&&c.enabled&&c.protocol==='chat-completions');if(!connection)throw new Error('未知模型供应商');return state.models.filter(m=>m.connectionId===id&&m.enabled).map(m=>({id:m.model,name:m.name,inputModalities:connection.id===TEXT_CONNECTION||!m.parameters.enableVision?['text']:m.inputModalities}));},
+    resolveModelInfo:async(id,model,signal)=>{signal?.throwIfAborted();if(id===DEMO_PROVIDER&&this.options.allowFixtures&&model===DEMO_MODEL)return {inputModalities:['text']};await this.initialize();const resolved=await this.registry.resolve({provider:id,model,protocol:'chat-completions'});return {inputModalities:resolved.connection.id===TEXT_CONNECTION||!resolved.model.parameters.enableVision?['text']:resolved.model.inputModalities};},
     stream:options=>this.stream(options),
   };}
   /** Resolve a role or explicit route once per request; no credentials enter returned metadata. */
@@ -128,7 +185,7 @@ export class ProviderManager {
     const config=this.textConfig(resolved);
     const redact=(value:string)=>key?value.split(key).join('[redacted]'):value;
     const signal=AbortSignal.any([options.signal,AbortSignal.timeout(config.requestTimeoutMs!)]);
-    const normalized=turns(options.messages,config.supportsVision&&config.enableVision);let textSize=options.system.length,images=0,imageBytes=0;const imageInputs:{mime:string;buffer:Buffer}[]=[];
+    const allowImages=resolved.connection.id!==TEXT_CONNECTION&&!!(config.supportsVision&&config.enableVision);const normalized=turns(options.messages,allowImages);let textSize=options.system.length,images=0,imageBytes=0;const imageInputs:{mime:string;buffer:Buffer}[]=[];
     for(const turn of normalized){if(typeof turn.content==='string')textSize+=turn.content.length;else for(const part of turn.content){if(part.type==='text')textSize+=part.text.length;else{images++;const url=part.image_url.url,buffer=Buffer.from(url.slice(url.indexOf(',')+1),'base64');imageBytes+=buffer.length;imageInputs.push({mime:url.slice(5,url.indexOf(';')),buffer});}}}
     if(textSize>config.contextCharLimit!)throw new Error('模型文本上下文超过配置上限');
     if(images>config.maxVisionImages!||imageBytes>config.maxVisionBytes!)throw new Error('模型图片数量或总字节超过配置上限');

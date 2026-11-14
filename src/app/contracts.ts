@@ -18,9 +18,15 @@ export interface ProviderConfig {
   contextMessageLimit?:number; contextCharLimit?:number; enableVision?:boolean;
   maxVisionImages?:number; maxVisionBytes?:number; maxVisionDimension?:number;
 }
+/** Dedicated multimodal slot. `configured` is the saved quick-config; `ready` means some vision role can actually be called. */
+export interface VisionSettings {
+  configured:boolean; ready:boolean; config:ProviderConfig; hasKey:boolean;
+  credentialStatus?:SecretStoreStatus; route?:{provider:string;model:string};
+}
 export interface ProviderSettings {
   config:ProviderConfig; hasKey:boolean; mode:'demo'|'custom'; credentialStatus?:SecretStoreStatus;
   ready?:boolean; route?:{provider:string;model:string}; sceneRoute?:{provider:string;model:string}; legacyConfig?:ProviderConfig; legacyHasKey?:boolean; legacyCredentialStatus?:SecretStoreStatus;
+  vision?:VisionSettings;
 }
 export interface ChatMessage {
   id:string; role:'user'|'assistant'; content:string; createdAt:string;
