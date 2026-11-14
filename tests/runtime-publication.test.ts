@@ -110,6 +110,34 @@ test('runtime HTTP closes the opened descriptor on HEAD and rejected media range
   }finally{t.mock.restoreAll();syncBuiltinESMExports();await renderer.close();await fs.rm(directory,{recursive:true,force:true});}
 });
 
+test('runtime HTTP closes the opened descriptor when a browser cancels a preview download',{timeout:30_000},async t=>{
+  const directory=await fs.mkdtemp(join(tmpdir(),'yingliu-runtime-http-abort-')),renderer=new VideoRenderer();
+  const originalOpen=fs.open.bind(fs),opened=deferred(),resumeStat=deferred(),closed=deferred();
+  const file=join(directory,'index.html'),signal=new AbortController();
+  try{
+    await fs.writeFile(file,'<!doctype html><title>cancelled preview</title>');
+    const base=await renderer.assetBaseUrl(directory);
+    t.mock.method(fs,'open',async(...[path,flags,mode]:Parameters<typeof fs.open>)=>{
+      const handle=await originalOpen(path,flags,mode);
+      if(path===file&&flags==='r'){
+        const stat=handle.stat.bind(handle),close=handle.close.bind(handle);
+        t.mock.method(handle,'stat',async()=>{opened.resolve();await resumeStat.promise;return stat();});
+        t.mock.method(handle,'close',async()=>{try{await close();}finally{closed.resolve();}});
+      }
+      return handle;
+    });syncBuiltinESMExports();
+    const pending=fetch(new URL('index.html',base),{signal:signal.signal});
+    void pending.catch(()=>{});
+    await bounded(opened.promise,'等待预览文件打开');
+    signal.abort();
+    await assert.rejects(pending,{name:'AbortError'});
+    // Let the server close the HTTP connection before allowing stat to finish.
+    await renderer.close();
+    resumeStat.resolve();
+    await bounded(closed.promise,'取消预览后关闭文件描述符');
+  }finally{signal.abort();resumeStat.resolve();t.mock.restoreAll();syncBuiltinESMExports();await renderer.close();await fs.rm(directory,{recursive:true,force:true});}
+});
+
 test('identical content-addressed runtime resources avoid an existing-target EPERM rename while changed revisions still publish completely',{timeout:30_000},async t=>{
   const directory=await fs.mkdtemp(join(tmpdir(),'yingliu-runtime-reuse-')),store=new ProjectStore({baseDirectory:directory}),renderer=new VideoRenderer(store),rename=fs.rename.bind(fs);
   try{
