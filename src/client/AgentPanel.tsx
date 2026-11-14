@@ -10,6 +10,7 @@ export const runStatusNames:Record<PublicRun['status'],string>={running:'进行�
 export const riskNames:Record<ToolRisk,string>={read:'只读',write:'修改工程',plan:'创作计划',cost:'收费生成',export:'导出'};
 const roleNames:Record<string,string>={image:'生图',video:'生视频',speech:'配音',music:'音乐',sfx:'音效',vision:'视觉检查'};
 const stepKinds:Record<RunStep['kind'],string>={model:'思考',tool:'工具',approval:'审批',review:'自检',compress:'整理上下文'};
+const stepStatusNames:Record<RunStep['status'],string>={running:'进行中',complete:'完成',failed:'失败',pending:'待批准',rejected:'已拒绝',skipped:'已跳过'};
 
 export function AgentPanel({controller,project}:{controller:StudioController;project:VideoProject}){
   const state=useSyncExternalStore(controller.subscribe,controller.getSnapshot,controller.getSnapshot);
@@ -40,30 +41,31 @@ export function AgentPanel({controller,project}:{controller:StudioController;pro
   const autoApprove:ToolRisk[]=allowWrite?['read','write']:['read'];if(autoPlan)autoApprove.push('plan');
   return <div className="vs-agent-panel">
     <div className="vs-agent-compose">
-      <h3>交给智能体</h3>
-      <p>用一句话描述目标，智能体会读取工程、逐步修改镜头、检查画面并汇报。收费生成和导出每次都会先请你批准。{live?' · 实时连接':' · 轮询模式'}</p>
+      <div className="vs-agent-heading"><h3>交给智能体</h3><span className={`vs-agent-live ${live?'is-live':''}`} title={live?'实时连接':'轮询模式'}>{live?'实时':'轮询'}</span></div>
       <textarea rows={3} aria-label="智能体目标" placeholder="例如：把三个镜头统一成奶油色调，标题从左侧滑入，并检查文字是否溢出。" value={goal} onChange={e=>setGoal(e.target.value)}/>
       <div className="vs-agent-options">
-        <label><input type="checkbox" checked={allowWrite} onChange={e=>setAllowWrite(e.target.checked)}/>修改工程无需逐步确认（可撤销）</label>
-        <label><input type="checkbox" checked={autoPlan} onChange={e=>setAutoPlan(e.target.checked)}/>创作计划无需审批</label>
-        <label><input type="checkbox" checked={allowImages} onChange={e=>setAllowImages(e.target.checked)}/>允许把截图发送给模型自检</label>
+        <label className="vs-check"><input type="checkbox" checked={allowWrite} onChange={e=>setAllowWrite(e.target.checked)}/>修改工程无需逐步确认（可撤销）</label>
+        <label className="vs-check"><input type="checkbox" checked={autoPlan} onChange={e=>setAutoPlan(e.target.checked)}/>创作计划无需审批</label>
+        <label className="vs-check"><input type="checkbox" checked={allowImages} onChange={e=>setAllowImages(e.target.checked)}/>允许把截图发送给模型自检</label>
+      </div>
+      <div className="vs-agent-limits">
         <label>最多步数 <input type="number" min={1} max={200} value={maxSteps} onChange={e=>setMaxSteps(Number(e.target.value)||24)}/></label>
         <label>费用上限 <input type="number" min={0} step="0.01" placeholder="不限" value={maxCost} onChange={e=>setMaxCost(e.target.value)}/></label>
+        <button className="vs-primary" disabled={disabled||!goal.trim()} onClick={()=>void act(async()=>{const created=await controller.mediaCommand<PublicRun>('agent.start',{projectId:project.id,goal,autoApprove,allowImages,budget:{maxSteps,maxCost:maxCost===''?null:Number(maxCost)}});setSelected(created.id);setGoal('');})}>开始</button>
       </div>
-      <button className="vs-primary" disabled={disabled||!goal.trim()} onClick={()=>void act(async()=>{const created=await controller.mediaCommand<PublicRun>('agent.start',{projectId:project.id,goal,autoApprove,allowImages,budget:{maxSteps,maxCost:maxCost===''?null:Number(maxCost)}});setSelected(created.id);setGoal('');})}>开始</button>
       {error&&<p className="vs-error" role="alert">{error}</p>}
-      {caps&&<div className="vs-agent-caps" aria-label="当前能力">
-        <h4>当前能力</h4>
+      {caps&&<details className="vs-agent-caps" aria-label="当前能力">
+        <summary><span>当前能力</span><small>{caps.capabilities.director??'导演模型未配置'}</small></summary>
         <p>导演：{caps.capabilities.director??'未配置（请在模型中心绑定 director 角色）'}</p>
         <p>已接入：{caps.capabilities.roles.length?caps.capabilities.roles.map(role=>`${roleNames[role]??role}${caps.capabilities.models?.[role]?`（${caps.capabilities.models[role]}）`:''}`).join('、'):'无，只用导演文本模型'}</p>
         {caps.selfMade.length>0&&<p>由导演用代码自制：{caps.selfMade.join('、')}</p>}
         <p className="vs-agent-tools">{caps.tools.map(tool=><span key={tool.name} className={'is-'+tool.risk} title={riskNames[tool.risk]}>{tool.name}</span>)}</p>
         <button disabled={disabled} onClick={()=>void refreshCaps()}>刷新能力</button>
-      </div>}
+      </details>}
       <StoryPanel controller={controller} project={project}/>
     </div>
     <div className="vs-agent-runs">
-      <ul aria-label="智能体运行">{runs.map(item=><li key={item.id}><button className={item.id===selected?'is-active':''} onClick={()=>setSelected(item.id)}>{runStatusNames[item.status]} · {item.goal.slice(0,40)}</button></li>)}</ul>
+      {runs.length?<ul aria-label="智能体运行">{runs.map(item=><li key={item.id}><button className={`is-${item.status} ${item.id===selected?'is-active':''}`} onClick={()=>setSelected(item.id)}>{runStatusNames[item.status]} · {item.goal.slice(0,40)}</button></li>)}</ul>:<div className="vs-agent-empty">还没有运行记录</div>}
       {run&&<div className="vs-agent-run">
         <header><strong>{runStatusNames[run.status]}</strong> <span>{run.message}</span></header>
         {run.active&&<p className="vs-agent-active">本步激活工具：{run.active.tools.join('、')}</p>}
@@ -81,7 +83,7 @@ export function AgentPanel({controller,project}:{controller:StudioController;pro
           <button disabled={disabled} onClick={()=>void act(async()=>{await controller.load();})}>刷新工程</button>
         </div>
         <ol className="vs-agent-steps" aria-label="步骤">{run.steps.map(step=><li key={step.index} className={'is-'+step.status}>
-          <span>{stepKinds[step.kind]}{step.tool?` · ${step.tool}`:''}{step.risk?`（${riskNames[step.risk]}）`:''}</span> <em>{step.status}</em>{step.durationMs!==undefined&&<small> {Math.round(step.durationMs)}ms</small>}
+          <span>{stepKinds[step.kind]}{step.tool?` · ${step.tool}`:''}{step.risk?`（${riskNames[step.risk]}）`:''}</span> <em>{stepStatusNames[step.status]??step.status}</em>{step.durationMs!==undefined&&<small> {step.durationMs>=1000?`${(step.durationMs/1000).toFixed(1)} 秒`:`${Math.round(step.durationMs)} 毫秒`}</small>}
           {(step.summary||step.error)&&<details><summary>详情</summary>{step.arguments&&<pre>{step.arguments}</pre>}<p>{step.error??step.summary}</p></details>}
         </li>)}</ol>
         <div className="vs-agent-transcript">{run.transcript.filter(item=>item.role!=='tool').map((item,index)=><p key={index} className={'is-'+item.role}><b>{item.role==='user'?'你':'智能体'}</b>{item.tool?` → ${item.tool}`:''}：{item.content}</p>)}</div>

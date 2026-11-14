@@ -1,0 +1,376 @@
+/* 2026-11 界面整理层：在 styles.css / app.css 之后加载，覆盖其中的旧补丁规则。 */
+
+/* ---------- 全局 ---------- */
+.yl-status-dot{width:7px;height:7px}
+kbd{font:11px/1.4 ui-monospace,'SFMono-Regular',Consolas,monospace;color:var(--yl-muted);border:1px solid var(--yl-border);border-bottom-width:2px;border-radius:4px;padding:1px 6px;background:var(--n2)}
+
+/* ---------- 顶栏 ---------- */
+.yl-header{min-height:60px;padding:10px 22px;gap:16px}
+.yl-logo>span{width:32px;height:32px;border-radius:9px}
+.yl-logo>span svg{width:20px;height:20px}
+.yl-logo strong{font-size:17px;letter-spacing:1px}
+.yl-logo strong span{font-size:13px;letter-spacing:.5px;margin-left:7px}
+.yl-header-actions .yl-button{min-height:34px}
+
+/* ---------- 首页 ---------- */
+.yl-home{padding:36px 40px 64px}
+.yl-home-head{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+.yl-home-head h1{font-size:24px;font-weight:500;letter-spacing:.5px;margin:0;color:var(--accent-hi)}
+.yl-home-head h1 small{font-size:14px;font-weight:400;color:var(--yl-muted);margin-left:6px;font-variant-numeric:tabular-nums}
+.yl-home-actions{gap:8px}
+.yl-home-actions .yl-button{padding:9px 14px;font-size:13px;min-height:38px}
+.yl-readiness{display:flex;flex-wrap:wrap;gap:8px;padding:0 0 28px}
+.yl-readiness>button{flex:0 0 auto;gap:8px;padding:7px 13px;border-radius:999px;background:color-mix(in srgb,var(--n3) 50.2%,transparent);color:var(--n11)}
+.yl-readiness strong{display:inline;font-size:12px}
+.yl-readiness small{display:inline;margin:0;font-size:12px;color:var(--yl-muted)}
+.yl-library-heading{justify-content:flex-start;margin-bottom:16px}
+.yl-library-tools{gap:10px}
+.yl-library-tabs button{font-size:12px;padding:6px 12px}
+.yl-library-tools input{font-size:12px;padding:8px 12px;width:220px}
+.yl-project-grid{grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+.yl-project-cover{height:92px;padding:0 20px;justify-content:flex-end;cursor:pointer}
+.yl-project-cover svg{width:30px;height:30px;opacity:.55;transition:opacity .15s,transform .15s}
+.yl-project-cover:hover:not(:disabled) svg{opacity:.9;transform:scale(1.08)}
+.yl-project-cover:disabled{cursor:default}
+.yl-project-card-content{padding:16px 18px}
+.yl-project-card-title{font-size:15px}
+.yl-project-card-content>p{font-size:11px;margin:6px 0 10px}
+.yl-project-card-meta{font-size:12px;margin-bottom:14px;font-variant-numeric:tabular-nums}
+.yl-project-card-actions{padding-top:12px}
+.yl-project-card-actions button{font-size:12px}
+.yl-library-empty{min-height:220px}
+.yl-library-empty h3{margin:16px 0 18px}
+
+/* ---------- 新建影片 ---------- */
+.yl-modal-heading{margin-bottom:18px}
+.yl-modal-heading h2{margin:0}
+.yl-start-options{margin:18px 0}
+.yl-start-options>button{display:flex;align-items:center;gap:10px;padding:14px 16px}
+.yl-start-options strong{display:inline;margin:0;font-size:13px}
+.yl-start-options small{margin-left:auto;font-size:11px;color:var(--warn)}
+
+/* ---------- 工作区外框 ---------- */
+.yl-body{padding:18px 22px 24px}
+.yl-chat{top:18px;height:calc(100vh - 96px);min-height:560px}
+.yl-chat-rail{top:18px}
+.yl-chat-heading{padding:16px 16px 12px}
+.yl-chat-heading h1{font-size:17px;margin:0}
+.yl-provider-note{align-items:center;padding:9px 11px}
+.yl-provider-note>.yl-status-dot{margin-top:0}
+.yl-provider-note p{margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.yl-provider-note>button{font-size:12px;color:var(--yl-accent)}
+.yl-chat-welcome{display:flex;flex-direction:column;align-items:flex-start}
+.yl-welcome-symbol{margin-bottom:12px}
+.yl-chat-welcome h2{font-size:15px;color:var(--n10);margin:0}
+.yl-chat-welcome blockquote{margin:16px 0 0;align-self:stretch}
+.yl-message-content{font-size:13px;line-height:1.75}
+.yl-composer{margin:0 13px 13px}
+.yl-composer textarea{font-size:13px}
+.yl-chat-running strong{font-size:12px}
+.yl-chat-running small{font-size:11px}
+.yl-chat-notice{font-size:12px}
+
+.yl-editor .vs-studio{min-height:0}
+.yl-editor .vs-projectbar{min-height:0;padding:14px 18px 4px;gap:14px}
+.yl-editor .vs-project-title h1{font-size:19px;margin:0}
+.yl-editor .vs-model-route select{font-size:12px}
+.yl-editor .vs-commandbar{padding:8px 18px 14px}
+.yl-editor .vs-format,.yl-editor .vs-format>.vs-pill{font-size:12px}
+.yl-editor .vs-time{font-size:14px}
+.yl-editor .vs-actions button{font-size:12px}
+
+.yl-project-footer{align-items:center;gap:18px;padding:12px 4px}
+.yl-project-footer button{display:inline-flex;align-items:center;gap:5px;font-size:12px}
+.yl-project-footer .yl-project-folder{margin-right:auto}
+.yl-project-footer svg{width:13px;height:13px}
+
+/* 画布随窗口变高，属性栏跟着画布和镜头条一起伸展 */
+@media(min-width:761px){
+  .yl-editor .vs-workspace{grid-template-rows:clamp(360px,calc(100vh - 330px),720px) 90px minmax(480px,auto);min-height:0}
+  .yl-editor .vs-properties{max-height:none}
+}
+@container(min-width:1000px){
+  .yl-editor .vs-workspace{grid-template-columns:200px minmax(340px,1fr) 260px}
+  .yl-editor .vs-asset-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+}
+@container(min-width:1400px){
+  .yl-editor .vs-workspace{grid-template-columns:230px minmax(420px,1fr) 300px}
+}
+.yl-editor .vs-asset-actions>button{min-width:0;padding:6px 4px;gap:4px;font-size:12px}
+@media(max-width:760px){
+  .yl-editor .vs-asset-actions{position:static;transform:none;width:auto;padding:0 13px 13px}
+  .vs-assets-empty{padding:16px 14px}
+}
+.yl-editor .vs-asset-actions svg{width:14px;height:14px}
+
+/* 面板标签不换行，放不下时横向滚动，右侧按钮保持在同一行 */
+.yl-editor .vs-dock-header{flex-wrap:nowrap;gap:12px}
+.yl-editor .vs-dock-header{padding:0 6px}
+.yl-editor .vs-dock-header .vs-tabs{flex:1;min-width:0;flex-wrap:nowrap;overflow-x:auto;gap:0;scrollbar-width:thin;scrollbar-color:var(--n6) transparent}
+.yl-editor .vs-dock-header .vs-tabs>button{padding:11px 8px}
+.yl-editor .vs-dock-header>button{flex-shrink:0;font-size:12px;padding:5px 10px}
+
+/* ---------- 工作台细节 ---------- */
+.vs-studio .vs-section-header .vs-iconbutton{padding:4px;min-width:24px}
+.vs-studio .vs-section-header .vs-iconbutton svg{width:14px;height:14px}
+.vs-assets-empty{padding:48px 14px}
+.vs-bindings small{font-size:12px;color:var(--vs-muted)}
+.vs-edit-scope h3{margin:0;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vs-edit-scope select{font-size:12px}
+.vs-studio .vs-tabs button{font-size:12px}
+.vs-environment-fields small{font-size:12px}
+
+/* ---------- 智能体面板 ---------- */
+.vs-agent-panel{grid-template-columns:minmax(300px,440px) minmax(0,1fr);gap:0;padding:0;min-height:100%;align-items:stretch}
+.vs-agent-compose{display:flex;flex-direction:column;gap:12px;padding:16px 18px;border-right:1px solid var(--vs-border);min-width:0}
+.vs-agent-heading{display:flex;align-items:center;gap:8px}
+.vs-agent-heading h3{font-size:14px;font-weight:600}
+.vs-agent-live{font-size:11px;line-height:1.5;padding:1px 8px;border-radius:999px;border:1px solid var(--vs-border);color:var(--vs-muted)}
+.vs-agent-live.is-live{color:var(--vs-accent);border-color:color-mix(in srgb,var(--accent) 33.3%,transparent)}
+.vs-agent-live.is-live:before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;margin-right:5px;vertical-align:1px}
+.vs-agent-compose textarea{font-size:13px;min-height:84px}
+.vs-agent-options{display:flex;flex-direction:column;gap:9px;margin:0}
+.vs-check{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--vs-text);cursor:pointer;line-height:1.4}
+.vs-studio .vs-check input{appearance:none;-webkit-appearance:none;flex-shrink:0;width:30px;height:17px;padding:0;margin:0;border-radius:999px;border:1px solid var(--vs-border);background:var(--vs-field);position:relative;cursor:pointer;transition:background .15s,border-color .15s}
+.vs-studio .vs-check input:before{content:'';position:absolute;top:2px;left:2px;width:11px;height:11px;border-radius:50%;background:var(--vs-muted);transition:transform .15s,background .15s}
+.vs-studio .vs-check input:checked{background:color-mix(in srgb,var(--accent) 18%,transparent);border-color:var(--vs-accent)}
+.vs-studio .vs-check input:checked:before{transform:translateX(13px);background:var(--vs-accent)}
+.vs-agent-limits{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.vs-agent-limits label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--vs-muted);white-space:nowrap}
+.vs-agent-limits input{width:64px}
+.vs-agent-limits .vs-primary{margin-left:auto;min-width:88px}
+.vs-agent-caps{margin:0;border:1px solid var(--vs-border);border-radius:8px;background:var(--vs-panel-alt);font-size:12px}
+.vs-agent-caps summary{display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;list-style:none}
+.vs-agent-caps summary::-webkit-details-marker{display:none}
+.vs-agent-caps summary:before{content:'';width:0;height:0;border-left:5px solid var(--vs-muted);border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform .15s}
+.vs-agent-caps[open] summary:before{transform:rotate(90deg)}
+.vs-agent-caps summary small{margin-left:auto;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--vs-muted);font-size:11px}
+.vs-agent-caps>:not(summary){margin:0 12px 10px}
+.vs-agent-caps p{line-height:1.7;color:var(--vs-muted)}
+.vs-agent-tools span{font:11px/1.7 ui-monospace,'SFMono-Regular',Consolas,monospace;border:1px solid var(--vs-border);border-radius:4px;padding:0 6px;color:var(--vs-muted);opacity:1}
+.vs-agent-tools span.is-write,.vs-agent-tools span.is-plan{color:var(--info);border-color:color-mix(in srgb,var(--info) 25.1%,transparent)}
+.vs-agent-tools span.is-cost,.vs-agent-tools span.is-export{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 31.4%,transparent)}
+.vs-story-panel{display:flex;flex-direction:column}
+.vs-story-panel section{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:14px;padding-top:14px;border-top:1px solid var(--vs-border)}
+.vs-story-panel section:first-child{margin-top:0}
+.vs-story-panel section>h4,.vs-story-panel section>p,.vs-story-panel section>table,.vs-story-panel section>.vs-character,.vs-story-panel section>ul{flex-basis:100%;margin:0}
+.vs-story-panel section>p{font-size:12px;line-height:1.7}
+.vs-story-panel section>label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--vs-muted)}
+.vs-story-panel section>label input{width:96px}
+.vs-story-panel section>button{font-size:12px;padding:6px 11px}
+.vs-story-panel h4,.vs-plan-review h4{font-size:13px;font-weight:600}
+.vs-muted{font-size:12px;line-height:1.7}
+.vs-agent-runs{display:flex;flex-direction:column;gap:12px;padding:16px 18px;min-width:0}
+.vs-agent-empty{flex:1;display:grid;place-items:center;min-height:180px;border:1px dashed var(--vs-border);border-radius:8px;color:var(--vs-muted);font-size:12px}
+.vs-agent-runs ul{margin:0;gap:6px}
+.vs-studio .vs-agent-runs li button{border-radius:999px;font-size:12px;padding:5px 12px;max-width:340px;overflow:hidden;text-overflow:ellipsis}
+.vs-studio .vs-agent-runs li button.is-active{outline:0;border-color:var(--vs-accent);color:var(--vs-accent);background:color-mix(in srgb,var(--accent) 7.1%,transparent)}
+.vs-studio .vs-agent-runs li button.is-awaiting_approval{border-color:color-mix(in srgb,var(--warn) 50.2%,transparent)}
+.vs-studio .vs-agent-runs li button.is-failed,.vs-studio .vs-agent-runs li button.is-budget_exceeded{border-color:color-mix(in srgb,var(--danger) 50.2%,transparent)}
+.vs-agent-run{display:flex;flex-direction:column;gap:10px;min-width:0}
+.vs-agent-run header{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.vs-agent-run header strong{font-size:14px}
+.vs-agent-run header span{font-size:12px;color:var(--vs-muted)}
+.vs-agent-active{font-size:12px;color:var(--vs-muted);opacity:1}
+.vs-agent-budget{margin:0;padding:7px 10px;border-radius:6px;background:var(--vs-field);font-size:12px;color:var(--vs-muted);opacity:1;font-variant-numeric:tabular-nums}
+.vs-agent-approval{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0;padding:12px;border:1px solid color-mix(in srgb,var(--warn) 50.2%,transparent);border-radius:8px;background:color-mix(in srgb,var(--warn) 5.1%,transparent)}
+.vs-agent-approval>p,.vs-agent-approval>pre,.vs-agent-approval>.vs-plan-review{flex-basis:100%;margin:0;line-height:1.6}
+.vs-agent-approval pre,.vs-agent-steps pre{background:var(--vs-field);border-radius:6px;padding:8px 10px;font-size:11px}
+.vs-agent-actions{margin:0;flex-wrap:wrap}
+.vs-agent-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px;font-size:12px}
+.vs-agent-steps li{padding:5px 10px;border-left:2px solid var(--vs-border)}
+.vs-agent-steps li.is-complete{border-left-color:color-mix(in srgb,var(--accent) 43.9%,transparent)}
+.vs-agent-steps li.is-running{border-left-color:var(--vs-accent)}
+.vs-agent-steps li.is-pending{border-left-color:var(--warn-lo)}
+.vs-agent-steps li.is-failed,.vs-agent-steps li.is-rejected{border-left-color:var(--danger)}
+.vs-agent-steps li em{font-style:normal;font-size:11px;color:var(--vs-muted);margin-left:4px}
+.vs-agent-steps li small{font-size:11px;color:var(--vs-muted);font-variant-numeric:tabular-nums}
+.vs-agent-steps details{margin-top:4px}
+.vs-agent-steps summary{cursor:pointer;color:var(--vs-muted);font-size:11px}
+.vs-agent-transcript{display:flex;flex-direction:column;gap:6px;max-height:320px;font-size:13px}
+.vs-agent-transcript p{margin:0;padding:8px 11px;border-radius:8px;background:var(--vs-panel-alt);line-height:1.65;white-space:pre-wrap}
+.vs-agent-transcript p.is-user{background:color-mix(in srgb,var(--accent) 6.3%,transparent)}
+.vs-agent-final{padding:11px 13px;border:1px solid color-mix(in srgb,var(--accent) 26.7%,transparent);border-radius:8px;background:color-mix(in srgb,var(--accent) 3.9%,transparent)}
+.vs-agent-final h4{font-size:13px;margin:0 0 6px}
+.vs-agent-final p{line-height:1.7;white-space:pre-wrap}
+@media(max-width:900px){
+  .vs-agent-panel{grid-template-columns:1fr}
+  .vs-agent-compose{border-right:0;border-bottom:1px solid var(--vs-border)}
+}
+
+/* ---------- 弹窗 ---------- */
+.yl-health-path{display:flex;align-items:baseline;gap:10px;font-size:12px;color:var(--yl-muted);margin:2px 0 4px}
+.yl-health-path code{font:12px/1.6 ui-monospace,'SFMono-Regular',Consolas,monospace;color:var(--n11);overflow-wrap:anywhere}
+
+/* ---------- 窄屏 ---------- */
+@media(max-width:720px){
+  .yl-home{padding:24px 16px 40px}
+  .yl-home-head h1{font-size:21px}
+  .yl-home-actions{width:100%;flex-wrap:wrap}
+  .yl-home-actions .yl-button{flex:1 1 40%;padding:9px 10px;white-space:nowrap}
+  .yl-home-actions .yl-primary{flex-basis:100%;order:-1}
+  .yl-library-tools input{width:100%}
+  .yl-header{padding:10px 14px}
+}
+
+/* ======================================================================
+   视觉层：只引用 theme.css 的变量，三套主题共用。
+   ====================================================================== */
+:root[data-look]{
+  font-family:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei UI","Microsoft YaHei",sans-serif;
+  --radius:10px;--radius-sm:7px;
+  --lift:0 1px 2px color-mix(in srgb,var(--n11) 6%,transparent),0 4px 14px color-mix(in srgb,var(--n11) 5%,transparent);
+  --ring:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent);
+  scrollbar-color:var(--n7) transparent;
+}
+.yl-app{background:var(--n1)}
+.yl-status-dot,.yl-status-dot.is-missing{box-shadow:none}
+.yl-status-dot.is-missing{background:var(--warn-lo)}
+
+/* 顶栏 */
+.yl-header{background:var(--n3);border-bottom:1px solid var(--n6)}
+.yl-logo>span{background:var(--accent);border:0;color:var(--accent-ink);border-radius:9px}
+.yl-logo strong{color:var(--n11);font-weight:700;letter-spacing:.5px}
+.yl-logo strong span{color:var(--n9);font-weight:400}
+.yl-project-switch{background:var(--n3);border-color:var(--n6);color:var(--n11);border-radius:var(--radius-sm)}
+
+/* 按钮 */
+.yl-button,.vs-studio button{border-radius:var(--radius-sm);border-color:var(--n6);background:var(--n3);color:var(--n11);font-weight:500}
+.yl-button:hover:not(:disabled),.vs-studio button:hover{background:var(--n5);border-color:var(--n7)}
+.vs-studio button:disabled:hover{background:var(--n3);border-color:var(--n6)}
+.vs-studio .vs-tabs button:hover,.vs-studio .vs-tabs button:disabled:hover{background:transparent;border-color:transparent;color:var(--n11)}
+.yl-button.yl-primary,.vs-studio .vs-primary,.yl-editor .vs-studio .vs-primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+.yl-button.yl-primary:hover:not(:disabled),.vs-studio .vs-primary:hover:not(:disabled),.yl-editor .vs-studio .vs-primary:hover:not(:disabled){background:var(--accent-hi);border-color:var(--accent-hi);color:var(--accent-ink);filter:none}
+.vs-studio .vs-iconbutton,.yl-icon-button.yl-subtle,.yl-modal-heading .yl-icon-button{background:transparent;border-color:transparent;color:var(--n9)}
+.vs-studio .vs-iconbutton:hover:not(:disabled){background:var(--n5);border-color:transparent;color:var(--n11)}
+.vs-studio .vs-iconbutton:disabled:hover{background:transparent;border-color:transparent}
+.vs-studio .vs-danger{color:var(--danger)}
+
+/* 输入 */
+.vs-studio input:not([type=range]):not([type=checkbox]):not([type=color]),.vs-studio select,.vs-studio textarea,
+.yl-field input,.yl-field select,.yl-field textarea,.yl-library-tools input,.yl-modal input:not([type=checkbox]),.yl-modal select,.yl-modal textarea{
+  background:var(--n2);border:1px solid var(--n6);border-radius:var(--radius-sm);color:var(--n11)}
+.vs-studio input:focus,.vs-studio select:focus,.vs-studio textarea:focus,.yl-field input:focus,.yl-field select:focus,.yl-field textarea:focus,.yl-library-tools input:focus,.yl-modal input:focus,.yl-modal select:focus,.yl-modal textarea:focus{
+  outline:none;border-color:var(--accent);box-shadow:var(--ring)}
+.vs-studio input::placeholder,.vs-studio textarea::placeholder,.yl-field input::placeholder,.yl-field textarea::placeholder{color:var(--n8);opacity:1}
+input[type=checkbox],input[type=range]{accent-color:var(--accent)}
+
+/* 首页 */
+.yl-home-head h1{color:var(--n11);font-weight:700}
+.yl-readiness>button{background:var(--n3);border-color:var(--n6);color:var(--n10)}
+.yl-readiness>button:hover{border-color:var(--n7)}
+.yl-library-tabs{background:var(--n2);border-color:var(--n6);border-radius:var(--radius-sm)}
+.yl-library-tabs button{color:var(--n9);border-radius:5px}
+.yl-library-tabs .is-active{background:var(--n3);color:var(--n11);box-shadow:var(--lift)}
+.yl-project-card{background:var(--n3);border-color:var(--n6);border-radius:var(--radius);transition:border-color .15s,box-shadow .15s}
+.yl-project-card:hover{border-color:var(--n7);box-shadow:var(--lift)}
+.yl-project-cover,.yl-project-card:nth-child(3n+2) .yl-project-cover,.yl-project-card:nth-child(3n+3) .yl-project-cover{
+  position:relative;background:var(--accent-surface);border-bottom:1px solid var(--n6);color:var(--accent);justify-content:center}
+/* 封面上下两排胶片齿孔 */
+.yl-project-cover::before,.yl-project-cover::after{content:"";position:absolute;left:12px;right:12px;height:7px;border-radius:2px;
+  background:repeating-linear-gradient(90deg,var(--n3) 0 9px,transparent 9px 18px);opacity:.95;pointer-events:none}
+.yl-project-cover::before{top:9px}
+.yl-project-cover::after{bottom:9px}
+.yl-project-cover svg{opacity:.85}
+.yl-project-card.is-archived .yl-project-cover{background:var(--n5);color:var(--n9);filter:none}
+.yl-project-card-title{color:var(--n11);font-weight:600}
+.yl-project-card-content>p{color:var(--n8)}
+.yl-project-card-meta{color:var(--n9)}
+.yl-project-card-actions{border-top-color:var(--n6)}
+.yl-project-card-actions button{color:var(--n9)}
+.yl-project-card-actions button:hover{color:var(--accent)}
+.yl-library-empty{background:var(--n3);border-color:var(--n7)}
+
+/* 弹窗 */
+.yl-modal-backdrop,.vs-modal-backdrop{background:var(--scrim)}
+.yl-modal,.vs-modal{background:var(--n3);border:1px solid var(--n6);border-radius:14px;box-shadow:0 24px 64px color-mix(in srgb,var(--n11) 18%,transparent)}
+.yl-modal-heading h2{color:var(--n11);font-weight:700;font-size:19px}
+.yl-start-options>button{background:var(--n3);border-color:var(--n6);color:var(--n10)}
+.yl-start-options>button.is-active{background:var(--accent-surface);border-color:var(--accent);color:var(--n11)}
+.yl-start-options svg{color:var(--accent)}
+.yl-start-options small{color:var(--warn)}
+
+/* 对话栏 */
+.yl-chat{background:var(--n3);border-color:var(--n6);box-shadow:none}
+.yl-chat-rail{background:var(--n3);border-color:var(--n6);color:var(--n10)}
+.yl-chat-heading h1{color:var(--n11);font-weight:700}
+.yl-provider-note{background:var(--n2);border-color:var(--n6)}
+.yl-provider-note strong{color:var(--n11)}
+.yl-welcome-symbol{background:var(--accent-surface);border-color:transparent;color:var(--accent)}
+.yl-chat-welcome h2{color:var(--n9);font-weight:500}
+.yl-chat-welcome blockquote{background:var(--n2);border-left-color:var(--accent);color:var(--n10)}
+.yl-composer{background:var(--n2);border-color:var(--n6);box-shadow:none;border-radius:var(--radius)}
+.yl-composer:focus-within{border-color:var(--accent);box-shadow:var(--ring)}
+.yl-intent-tabs>button{background:var(--n3);border-color:var(--n6);color:var(--n9);border-radius:6px}
+.yl-intent-tabs>button.is-active{background:var(--accent-surface);border-color:var(--accent-lo);color:var(--accent)}
+.yl-context>span.is-shot{color:var(--accent)}
+.yl-context>button{color:var(--accent)}
+kbd{background:var(--n3);border-color:var(--n6);color:var(--n9)}
+
+/* 工作台：去掉外层套框，项目栏直接放在页面上，工作区是唯一的面板 */
+.yl-editor{border:0;border-radius:0;background:transparent;box-shadow:none;overflow:visible}
+.yl-editor .vs-studio{background:transparent}
+.yl-editor .vs-projectbar{padding:2px 2px 4px}
+.yl-editor .vs-commandbar{padding:8px 2px 14px}
+.yl-editor .vs-error,.yl-editor .vs-task{margin-left:0;margin-right:0}
+.yl-editor .vs-notice{padding-left:2px}
+.yl-editor .vs-workspace{margin:0;border:1px solid var(--n6);border-radius:12px;background:var(--n6);box-shadow:var(--lift)}
+.yl-editor .vs-project-title h1{font-size:21px;font-weight:700;color:var(--n11)}
+.vs-project-status i{background:var(--accent)}
+.vs-format>.vs-pill{background:var(--n3);border-color:var(--n6);border-radius:6px;font-variant-numeric:tabular-nums}
+.vs-time{font-variant-numeric:tabular-nums;font-weight:600}
+.yl-project-footer button{color:var(--n9)}
+.yl-project-footer button:hover{color:var(--accent)}
+
+/* 工作区内部 */
+.vs-assets-panel,.vs-properties,.vs-shotstrip,.vs-dock,.vs-canvas-toolbar,.vs-graph-navigation,.vs-dock-header{background:var(--n3)}
+.vs-canvas-panel{background:var(--cv-bg)}
+.vs-graph-shell{background-color:var(--cv-bg);background-image:radial-gradient(var(--cv-dot) .8px,transparent .8px)}
+.vs-section-header h2{font-size:13px;font-weight:700;letter-spacing:0;color:var(--n11)}
+.vs-section-header h2 small{color:var(--n8)}
+.vs-canvas-toolbar strong{font-size:13px;font-weight:700}
+.vs-graph-navigation button{background:var(--n3)}
+.vs-graph-legend{background:color-mix(in srgb,var(--n3) 92%,transparent);border-color:var(--n6);border-radius:999px;padding:4px 11px;color:var(--n9)}
+.vs-graph-legend .reference{background:var(--info-2)}
+.vs-chain-note{background:var(--warn-surface);color:var(--warn)}
+.vs-studio .vs-shotchip{background:var(--n2);border-color:var(--n6);border-radius:var(--radius)}
+.vs-studio .vs-shotchip b{color:var(--n8);font-weight:600;font-variant-numeric:tabular-nums}
+.vs-studio .vs-shotchip.is-active{background:var(--accent-surface);border-color:var(--accent)}
+.vs-studio .vs-shotchip.is-active b{color:var(--accent)}
+.vs-studio .vs-addshot{background:transparent;border-color:var(--n7)}
+.vs-studio .vs-asset{background:var(--n2);border-color:var(--n6);border-radius:var(--radius)}
+.vs-studio .vs-asset.is-selected{border-color:var(--accent);box-shadow:var(--ring)}
+.vs-studio .vs-tabs button{color:var(--n9)}
+.vs-studio .vs-tabs button.is-active{color:var(--n11);font-weight:600}
+.vs-tabs button.is-active:after{background:var(--accent);height:2px;border-radius:2px 2px 0 0}
+.vs-field>span{color:var(--n9)}
+.vs-studio .vs-bindings button.is-active{background:var(--accent-surface);border-color:var(--accent);color:var(--accent)}
+.vs-stat-grid>div{background:var(--n2);border-color:var(--n6);border-radius:var(--radius-sm)}
+.vs-stat-grid strong{font-variant-numeric:tabular-nums}
+
+/* 预览画面保持暗底，视频本来就在黑底上看 */
+.vs-preview-screen{background:#0b0c0e;border-color:var(--n6);border-radius:var(--radius-sm)}
+.vs-preview-screen iframe{background:#0b0c0e}
+
+/* 提示条 */
+.vs-error,.yl-error{background:var(--danger-surface);border-color:var(--danger-lo);color:var(--danger)}
+.vs-task{background:var(--n3);border-color:var(--n6)}
+.vs-progress{background:var(--n5)}
+.vs-progress i{background:var(--accent)}
+.vs-notice,.yl-chat-notice,.yl-dialog-success{color:var(--accent)}
+
+/* 打磨：禁用主按钮、状态色、面板标题、停靠区通栏 */
+.yl-button.yl-primary:disabled,.yl-button.yl-primary:disabled:hover,
+.vs-studio .vs-primary:disabled,.vs-studio .vs-primary:disabled:hover,
+.yl-editor .vs-studio .vs-primary:disabled,.yl-editor .vs-studio .vs-primary:disabled:hover{
+  background:var(--n4);border-color:var(--n6);color:var(--n8);opacity:1}
+.vs-env-row .is-ready{color:var(--ok)}
+.vs-env-row .is-missing{color:var(--warn)}
+.yl-panel-heading h3,.vs-environment h3{font-size:14px;font-weight:700;color:var(--n11);margin:0}
+.yl-panel-heading{align-items:center}
+.vs-field small,.yl-field small{font-weight:400;color:var(--n8)}
+.vs-media-help,.vs-audio-empty{color:var(--n8)}
+.yl-editor .vs-assets-panel{grid-row:1/3}
+.yl-editor .vs-dock{grid-column:1/4}
+.vs-dock .vs-environment{display:block;max-width:780px}
+.vs-dock .vs-environment-fields{margin-top:14px}
