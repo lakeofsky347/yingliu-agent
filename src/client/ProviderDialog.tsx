@@ -117,7 +117,7 @@ export function ProviderDialog({ api, initial, initialSection = 'text', onClose,
     try {
       if (action !== 'remove' && !valid) throw new Error('请填写接口名称、有效的 HTTP(S) 接口地址和模型 ID。');
       if (action !== 'remove' && changedOrigin && !enteredKey) throw new Error('接口站点已变更。请填写新密钥，或先删除已保存的密钥。');
-      const payload = action === 'remove' ? { id: config.id, apiKey: '' } : {
+      const payload = action === 'remove' ? { ...(vision ? { id: config.id } : {}), apiKey: '' } : {
         ...config, ...(vision ? {} : { mode: 'custom' }), ...(enteredKey ? { apiKey: enteredKey } : {}),
       };
       const value = await api.call<ProviderSettings>(vision ? 'providers.vision.save' : 'providers.save', payload);

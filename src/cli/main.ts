@@ -10,6 +10,7 @@ import { dirname, join, resolve } from 'node:path';
 import { createApplication } from '../app/application.ts';
 import { detectEnvironment } from '../host/renderer.ts';
 import type { SecretStore } from '../app/contracts.ts';
+import type { PublicRun } from '../agent/contracts.ts';
 import { MODEL_PROTOCOLS, MODEL_ROLES, ROLE_OUTPUT, ROLE_PROTOCOLS, type Modality, type ModelProtocol, type ModelRole } from '../models/contracts.ts';
 import { MOCK_BASE_URL, mockFetch, installMockNetworkGuard } from './mock.ts';
 import { acquireOwnerLease, BusyError, LockConfigError, type OwnerLease } from './lock.ts';
@@ -29,7 +30,7 @@ export function parseArgs(argv: string[]): { positional: string[]; flags: Flags 
   }
   return { positional, flags };
 }
-const BOOL = new Set(['json', 'mock', 'no-wait', 'allow-paid', 'trace', 'force', 'help', 'include-archived', 'run', 'yes']);
+const BOOL = new Set(['json', 'mock', 'no-wait', 'allow-paid', 'trace', 'force', 'help', 'include-archived', 'run', 'yes', 'skip-upload']);
 /** C01: commands that only read. They open the profile with recovery disabled, so they never settle, resume or rewrite state. */
 export function isReadOnly(pos: string[], f: Flags): boolean {
   const [g, s] = pos;
@@ -84,7 +85,9 @@ async function ensureMockModels(ctx: Ctx) {
 /** Trim a run to what an agent needs; the full run is available with --trace. */
 function runView(run: any) {
   const pending = run.pending ? { callId: run.pending.callId, execId: run.pending.execId, argsHash: run.pending.argsHash, tool: run.pending.tool, risk: run.pending.risk, arguments: run.pending.arguments, reason: run.pending.reason, estimate: run.pending.estimate } : undefined;
-  return { id: run.id, projectId: run.projectId, status: run.status, message: run.message, goal: run.goal, usage: run.usage, budget: run.budget, pending, uncertainSubmissions: run.uncertainSubmissions ?? [], final: run.final, error: run.error, steps: (run.steps ?? []).length };
+  return { id: run.id, projectId: run.projectId, status: run.status, message: run.message, goal: run.goal, usage: run.usage, budget: run.budget, pending,
+    ...(run.visionConsentRequired ? { visionConsentRequired: run.visionConsentRequired as PublicRun['visionConsentRequired'] } : {}),
+    uncertainSubmissions: run.uncertainSubmissions ?? [], final: run.final, error: run.error, steps: (run.steps ?? []).length };
 }
 function runExit(status: string): number { return status === 'complete' ? EXIT.OK : STOPPED.has(status) ? EXIT.NEEDS_APPROVAL : status === 'budget_exceeded' ? EXIT.BUDGET : EXIT.RUN_FAILED; }
 async function waitRun(ctx: Ctx, runId: string) {
@@ -124,6 +127,7 @@ export function mergeRunResult(view: ReturnType<typeof runView>, tasks: RunTaskR
 }
 async function finishRun(ctx: Ctx, run: any, _since: string) {
   const done = await waitRun(ctx, run.id);
+  if (done.status === 'paused' && done.visionConsentRequired) return { data: runView(done), exit: EXIT.NEEDS_APPROVAL };
   const { tasks, snap } = await waitRunTasks(ctx, done.projectId, done.taskRefs ?? []);
   const merged = mergeRunResult(runView(done), tasks, snap.project?.outputs ?? []);
   if (!merged.ok) throw Object.assign(new CliError('RUN_FAILED', merged.error.message), { details: { run: merged.error.run, task: merged.error.task, tasks: merged.error.tasks } });
@@ -157,7 +161,8 @@ export const HELP = `yingliu — 映流智能体 headless CLI（详见 docs/CLI.
   doctor
   project create --title <t> [--topic <t>] | list [--include-archived] | get <id> | export-zip <id> --out <file> | import <file>
   agent run --project <id> --goal <g> [--auto-approve read,write,plan] [--allow-paid --max-cost <n> [--auto-approve ...,cost,export]] [--max-steps n] [--max-review-rounds n]
-  agent status <runId> [--trace] | resume <runId> | approve <runId> --call <callId> --exec <execId> [--args-hash h] | reject <runId> --call <callId> --exec <execId> [--reason r]
+  agent status <runId> [--trace] | resume <runId> [--upload-consent <id> | --skip-upload]
+  agent approve <runId> --call <callId> --exec <execId> [--args-hash h] | reject <runId> --call <callId> --exec <execId> [--reason r]
   story show <projectId> | qc show <projectId> [--run] | ledger show <projectId>
   render <projectId> | export mp4 <projectId> [--out <file>]
   models list | models add --name <n> --base-url <url> --model <m> [--protocol chat-completions|images|video-gateway|speech|async-task] [--role <按协议默认>|none] [--output-modality text|image|video|audio] [--api-key-env ENV_NAME]`;
@@ -185,7 +190,16 @@ async function dispatch(ctx: Ctx, pos: string[]): Promise<{ data: unknown; exit?
         return finishRun(ctx, run, since);
       }
       case 'status': { if (!arg) throw new CliError('USAGE', '用法：agent status <runId>'); const run = await call(ctx, 'agent.get', { runId: arg }); const data: Record<string, unknown> = runView(run); if (f.trace) data.trace = (await call(ctx, 'agent.trace', { runId: arg })).events; return { data, exit: EXIT.OK }; }
-      case 'resume': { if (!arg) throw new CliError('USAGE', '用法：agent resume <runId>'); const since = new Date().toISOString(); return finishRun(ctx, await call(ctx, 'agent.resume', { runId: arg }), since); }
+      case 'resume': {
+        if (!arg) throw new CliError('USAGE', '用法：agent resume <runId> [--upload-consent <id> | --skip-upload]');
+        const visionConsentId = f['upload-consent'] === undefined ? undefined : str(f, 'upload-consent', true);
+        const skipUpload = f['skip-upload'] === true;
+        const run = await call<PublicRun>(ctx, 'agent.get', { runId: arg });
+        if (run.status === 'paused' && run.visionConsentRequired && !visionConsentId && !skipUpload) return { data: runView(run), exit: EXIT.NEEDS_APPROVAL };
+        if (skipUpload && (run.status !== 'paused' || !run.visionConsentRequired)) throw new CliError('USAGE', '此运行没有待处理的上传授权');
+        const since = new Date().toISOString();
+        return finishRun(ctx, await call(ctx, 'agent.resume', { runId: arg, ...(visionConsentId ? { visionConsentId } : {}), ...(skipUpload ? { disableVision: true } : {}) }), since);
+      }
       case 'approve': case 'reject': {
         if (!arg) throw new CliError('USAGE', `用法：agent ${sub} <runId> --call <callId> --exec <execId>`);
         const payload = { runId: arg, callId: str(f, 'call', true), execId: str(f, 'exec', true), ...(sub === 'approve' && str(f, 'args-hash') ? { argsHash: str(f, 'args-hash') } : {}), ...(sub === 'reject' ? { reason: str(f, 'reason') ?? '' } : {}) };
@@ -280,6 +294,12 @@ export async function runCli(argv: string[], io: { out: (s: string) => void; err
   if (positional[0] === 'doctor') { const r = doctor(); return emit(true, r.data, r.exit); }
   // C03: the CLI process is the only owner of a run (no resident service), so a run cannot outlive it; refuse instead of abandoning it.
   if (flags['no-wait'] !== undefined) return emit(false, { code: 'USAGE', message: '不支持 --no-wait：CLI 没有常驻进程，命令退出后运行会被中断。请去掉 --no-wait 并用 --timeout <秒> 控制等待；超时后运行会暂停，可用 agent resume 继续' }, EXIT.USAGE);
+  if (flags['upload-consent'] !== undefined || flags['skip-upload'] !== undefined) {
+    if (positional[0] !== 'agent' || positional[1] !== 'resume' || !positional[2] || positional.length !== 3) return emit(false, { code: 'USAGE', message: '上传授权选项仅适用于 agent resume <runId>' }, EXIT.USAGE);
+    if (flags['upload-consent'] !== undefined && flags['skip-upload'] !== undefined) return emit(false, { code: 'USAGE', message: '--upload-consent 与 --skip-upload 只能选择一个' }, EXIT.USAGE);
+    if (flags['skip-upload'] !== undefined && flags['skip-upload'] !== true) return emit(false, { code: 'USAGE', message: '--skip-upload 不接受参数' }, EXIT.USAGE);
+    if (flags['upload-consent'] !== undefined && (typeof flags['upload-consent'] !== 'string' || !flags['upload-consent'].trim())) return emit(false, { code: 'USAGE', message: '--upload-consent 需要 agent status 返回的授权 ID' }, EXIT.USAGE);
+  }
   const dir = dataDirectory();
   const secrets = new EnvSecrets(join(dir, 'cli-key-env.json')), mock = flags.mock === true;
   // C07: every startup failure becomes a single ok:false line with code STARTUP (BUSY/CONFIG/USAGE keep their own codes).

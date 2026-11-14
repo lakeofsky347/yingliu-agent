@@ -40,6 +40,10 @@ CLI、桌面、浏览器服务和默认 `createApplication` 共用同机所有�
 
 ## 模型中心与创作入口
 
+新配置默认使用 OpenAI 的 `https://api.openai.com/v1` 和 `gpt-4.1-mini`。快速设置中的文本和视觉连接各自保存凭据；视觉连接可以暂停并保留原配置。已有注册表继续决定角色、连接启用状态与凭据引用。Chat Completions 发送拒绝 HTTP 重定向，连接应填写最终 API 地址。
+
+截图和图生视频参考图的发送授权绑定实际模型和接口，并按用途独立保存。连接换绑后，待发送步骤会暂停并显示新的目标；智能体的图生视频同时校验工具调用、所选素材和独立的费用审批。已成功的步骤可以复用回执。
+
 应用数据目录的 `model-registry.json` 保存 version 1 的 `ProviderConnection`、`ModelDefinition` 和 `RoleBinding`。连接记录协议、地址、认证方式、凭据引用、超时与并发设置；模型以本地稳定 ID 关联连接，另保存供应商模型名、输入/输出模态及参数；角色为 director、scene、vision、image、video、speech。一个连接可以配置多个模型，角色可以分配给不同连接。
 
 首批协议为 Chat Completions、Images Generations、异步媒体网关 v1 与 Speech 兼容接口；供应商必须实现对应契约。目录探测失败时仍可手动配置模型，连接检查不触发生成。文本 JSON/SSE 仍由 `ProviderManager` 处理，媒体协议由 `src/models/adapters/media.ts` 处理。语音角色存在时使用其 Speech 连接；未配置时沿用现有本地语音/兼容 TTS 设置。
