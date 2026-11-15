@@ -44,9 +44,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t hits < <(find artifacts -type f \( -name '.env' -o -name '.env.*' -o -name 'provider.json' -o -name 'model-registry.json' -o -name 'ui-preferences.json' -o -name '*.yingliu' \) -print)
-          if ((${#hits[@]})); then
-            printf '安装包含有不该发布的本地文件：\n%s\n' "${hits[@]}"
+          hits=$(find artifacts -type f \( -name '.env' -o -name '.env.*' -o -name 'provider.json' -o -name 'model-registry.json' -o -name 'ui-preferences.json' -o -name '*.yingliu' \) -print)
+          if [ -n "$hits" ]; then
+            printf '安装包含有不该发布的本地文件：\n%s\n' "$hits"
             exit 1
           fi
       - name: Archive the portable app
