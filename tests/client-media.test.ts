@@ -42,7 +42,10 @@ test('image-to-video selection requires an enabled video connection and explicit
   const connection={id:'video',name:'Video',protocol:'video-gateway' as const,baseUrl:'http://localhost',auth:'none' as const,credentialRef:'unused',enabled:true,revision:1,requestTimeoutMs:90000,concurrency:1,hasKey:false};
   const model={id:'text-video',connectionId:'video',model:'v',name:'Video',enabled:true,inputModalities:['text'] as ['text'],outputModalities:['video'] as ['video'],parameters:{}};
   const catalog:RegistrySnapshot={version:1,connections:[connection,{...connection,id:'disabled',enabled:false}],models:[model,{...model,id:'reference-video',inputModalities:['text','image']},{...model,id:'disabled-video',connectionId:'disabled',inputModalities:['text','image']}],roles:[]};
+  const official={...connection,id:'ailxp',name:'ailxp',protocol:'openai-videos' as const};const seedance={...model,id:'seedance',connectionId:'ailxp',model:'seedance-2-0',name:'seedance-2-0',inputModalities:['text','image'] as ['text','image']};
+  const withOfficial:RegistrySnapshot={...catalog,connections:[...catalog.connections,official],models:[...catalog.models,seedance]};
   assert.deepEqual(mediaModels(catalog,'image-to-video').map(value=>value.id),['reference-video']);assert.deepEqual(mediaModels(catalog,'text-to-image'),[]);
+  assert.deepEqual(mediaModels(withOfficial,'text-to-video').map(value=>value.id),['text-video','reference-video','seedance']);
   assert.equal(mediaUsageLabel({}), '费用未知');assert.match(mediaUsageLabel({usage:{cost:0,currency:'USD'}}),/0\.0000 USD/);
 });
 

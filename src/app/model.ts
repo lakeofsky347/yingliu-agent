@@ -10,6 +10,7 @@ import { checkTemplate } from '../models/adapters/template.ts';
 import { ModelRegistry } from '../models/registry.ts';
 import { imageMetadata } from '../models/image-input.ts';
 import type { ModelDefinition, ModelSelection, ResolvedModel, RoleBinding } from '../models/contracts.ts';
+import { openaiCompatibleRoot } from '../models/openai-root.ts';
 
 export const DEMO_PROVIDER = 'demo';
 export const DEMO_MODEL = 'offline-director';
@@ -147,7 +148,7 @@ export class ProviderManager {
     const state=await this.registry.list(),connection=connectionId?state.connections.find(c=>c.id===connectionId):(await this.registry.resolve('director')).connection;
     if(!connection)return {ok:false,message:'模型连接不存在'};let key:string|undefined;
     try{key=await this.registry.credential(connection);
-      if(connection.protocol==='async-task'){const result=await checkTemplate({connection,key,signal:AbortSignal.timeout(15000),fetch:this.options.fetch},state.models.find(m=>m.connectionId===connection.id));return {ok:result.ok,message:key?result.message.split(key).join('[redacted]'):result.message};}const response=await (this.options.fetch??fetch)(connection.baseUrl+'/models',{headers:key?{Authorization:`Bearer ${key}`}:{},signal:AbortSignal.timeout(15000)});
+      if(connection.protocol==='async-task'){const result=await checkTemplate({connection,key,signal:AbortSignal.timeout(15000),fetch:this.options.fetch},state.models.find(m=>m.connectionId===connection.id));return {ok:result.ok,message:key?result.message.split(key).join('[redacted]'):result.message};}const response=await (this.options.fetch??fetch)(openaiCompatibleRoot(connection.baseUrl)+'/models',{headers:key?{Authorization:`Bearer ${key}`}:{},signal:AbortSignal.timeout(15000)});
       if(!response.ok)return {ok:false,message:`模型目录检查失败（HTTP ${response.status}）；真实创作仍为 NOT_CHECKED。`};
       const value=object(await response.json()),models=Array.isArray(value.data)?value.data.map(x=>object(x).id):[],configured=state.models.filter(m=>m.connectionId===connection.id);
       return configured.every(model=>models.includes(model.model))?{ok:true,message:'服务可访问，所选模型在目录中；此检查未执行真实创作，真实创作为 NOT_CHECKED。'}:{ok:true,message:'服务可访问；模型目录未确认所选名称，真实创作为 NOT_CHECKED。'};
@@ -193,7 +194,7 @@ export class ProviderManager {
     if(textSize>config.contextCharLimit!)throw new Error('模型文本上下文超过配置上限');
     if(images>config.maxVisionImages!||imageBytes>config.maxVisionBytes!)throw new Error('模型图片数量或总字节超过配置上限');
     for(const input of imageInputs){const metadata=imageMetadata(input.buffer);if(metadata.mime!==input.mime||metadata.width<1||metadata.height<1||Math.max(metadata.width,metadata.height)>config.maxVisionDimension!||metadata.width*metadata.height>16_777_216)throw new Error('模型图片实际格式或像素尺寸超出配置上限');}
-    const response=await (this.options.fetch??fetch)(config.baseUrl+'/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',...(key?{Authorization:`Bearer ${key}`}:{})},signal,
+    const response=await (this.options.fetch??fetch)(openaiCompatibleRoot(config.baseUrl)+'/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',...(key?{Authorization:`Bearer ${key}`}:{})},signal,
       body:JSON.stringify({model:config.model,messages:[{role:'system',content:options.system},...normalized],max_tokens:Math.max(256,Math.min(config.maxTokens!,options.maxTokens)),temperature:config.temperature,stream:true})});
     if(!response.ok)throw new Error(`模型请求失败（HTTP ${response.status}）：${redact((await response.text()).slice(0,400))}`);
     if(!response.headers.get('content-type')?.includes('text/event-stream')){

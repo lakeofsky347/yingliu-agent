@@ -1,4 +1,5 @@
 import { fetch } from '../host/http.ts';
+import { openaiCompatibleRoot } from '../models/openai-root.ts';
 import { randomUUID } from 'node:crypto';
 import type { AgentMessage, AgentTool, ModelTurn, ToolCall } from './contracts.ts';
 
@@ -52,7 +53,7 @@ export async function chatTurn(config: ChatConfig, system: string, messages: Age
     messages: [{ role: 'system', content: mode === 'tools' ? system : system + '\n\n' + planJsonSystem(tools) }, ...(mode === 'tools' ? messages : flattenForPlan(messages))],
   };
   if (mode === 'tools' && tools.length) { body.tools = toolSchemas(tools); body.tool_choice = 'auto'; }
-  const response = await fetchImpl(config.baseUrl.replace(/\/$/, '') + '/chat/completions', {
+  const response = await fetchImpl(openaiCompatibleRoot(config.baseUrl) + '/chat/completions', {
     method: 'POST', signal: AbortSignal.any([signal, AbortSignal.timeout(config.timeoutMs)]),
     headers: { 'Content-Type': 'application/json', ...(config.key ? { Authorization: `Bearer ${config.key}` } : {}) }, body: JSON.stringify(body),
   });
