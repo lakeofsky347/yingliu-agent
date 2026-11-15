@@ -1,5 +1,5 @@
 /** Portable model contracts; credentials and running jobs never belong in projects. */
-export type ModelProtocol = 'chat-completions' | 'images' | 'video-gateway' | 'speech' | 'async-task';
+export type ModelProtocol = 'chat-completions' | 'images' | 'gemini-image' | 'video-gateway' | 'openai-videos' | 'kling-video' | 'minimax-video' | 'volc-video' | 'dashscope-video' | 'gemini-video' | 'speech' | 'async-task';
 export type ModelRole = 'director' | 'scene' | 'vision' | 'image' | 'video' | 'speech' | 'music' | 'sfx';
 export type Modality = 'text' | 'image' | 'video' | 'audio';
 export interface CredentialStatus { available:boolean; backend:string; hasStoredKey?:boolean; error?:string }
@@ -31,7 +31,8 @@ export type ConnectionInput = Partial<Omit<ProviderConnection,'revision'|'creden
 export type ModelInput = Partial<ModelDefinition> & { connectionId:string; model:string };
 export type RegistrySeed = Omit<RegistryState,'version'>;
 export const MODEL_ROLES:readonly ModelRole[]=['director','scene','vision','image','video','speech','music','sfx'];
-export const MODEL_PROTOCOLS:readonly ModelProtocol[]=['chat-completions','images','video-gateway','speech','async-task'];
-/** Protocols that may serve each role. async-task is the configurable template adapter. */
-export const ROLE_PROTOCOLS:Record<ModelRole,readonly ModelProtocol[]>={director:['chat-completions'],scene:['chat-completions'],vision:['chat-completions'],image:['images','async-task'],video:['video-gateway','async-task'],speech:['speech','async-task'],music:['async-task'],sfx:['async-task']};
+export const MODEL_PROTOCOLS:readonly ModelProtocol[]=['chat-completions','images','gemini-image','video-gateway','openai-videos','kling-video','minimax-video','volc-video','dashscope-video','gemini-video','speech','async-task'];
+/** Protocols that may serve each role. async-task is the configurable template adapter. Official video protocols stay beside it. */
+export const OFFICIAL_MEDIA_PROTOCOLS:readonly ModelProtocol[]=['gemini-image','openai-videos','kling-video','minimax-video','volc-video','dashscope-video','gemini-video'];
+export const ROLE_PROTOCOLS:Record<ModelRole,readonly ModelProtocol[]>={director:['chat-completions'],scene:['chat-completions'],vision:['chat-completions'],image:['images','gemini-image','async-task'],video:['video-gateway','openai-videos','kling-video','minimax-video','volc-video','dashscope-video','gemini-video','async-task'],speech:['speech','async-task'],music:['async-task'],sfx:['async-task']};
 export const ROLE_OUTPUT:Record<ModelRole,Modality>={director:'text',scene:'text',vision:'text',image:'image',video:'video',speech:'audio',music:'audio',sfx:'audio'};

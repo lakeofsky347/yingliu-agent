@@ -6,19 +6,23 @@ import {cancelVideo as gatewayCancel,generateImage as openaiImage,getVideo as ga
 import {cancelTemplate,pollTemplate,resolveTemplate,submitTemplate} from '../models/adapters/template.ts';
 import type {RemoteJob as Job} from './contracts.ts';
 import {assertCanGenerateMedia} from '../core/production-policy.ts';
+import {assertOfficialCapability} from '../models/capabilities.ts';
+import {officialCancel,officialPoll,officialSubmit} from '../models/adapters/official.ts';
+import {OFFICIAL_MEDIA_PROTOCOLS} from '../models/contracts.ts';
 // Protocol dispatch: images / video-gateway keep their native adapters; async-task uses the configurable template adapter.
 const outputOf=(operation:string):'image'|'video'=>operation==='text-to-image'?'image':'video';
-async function generateImage(context:AdapterContext,input:AdapterInput):Promise<Job>{return context.connection.protocol==='async-task'?submitAsync(context,input):openaiImage(context,input);}
-async function submitVideo(context:AdapterContext,input:AdapterInput):Promise<Job>{return context.connection.protocol==='async-task'?submitAsync(context,input):gatewaySubmit(context,input);}
+const official=(protocol:string)=>OFFICIAL_MEDIA_PROTOCOLS.includes(protocol as typeof OFFICIAL_MEDIA_PROTOCOLS[number]);
+async function generateImage(context:AdapterContext,input:AdapterInput):Promise<Job>{return context.connection.protocol==='async-task'?submitAsync(context,input):context.connection.protocol==='gemini-image'?officialSubmit(context,input):openaiImage(context,input);}
+async function submitVideo(context:AdapterContext,input:AdapterInput):Promise<Job>{return context.connection.protocol==='async-task'?submitAsync(context,input):official(context.connection.protocol)?officialSubmit(context,input):gatewaySubmit(context,input);}
 async function submitAsync(context:AdapterContext,input:AdapterInput):Promise<Job>{
   const result=await submitTemplate(context,{clientRequestId:input.clientRequestId,model:input.model,prompt:input.prompt,image:input.inputs[0]?.dataUrl,duration:typeof input.parameters.durationSeconds==='number'?input.parameters.durationSeconds:typeof input.parameters.duration==='number'?input.parameters.duration:undefined,parameters:input.parameters},outputOf(input.operation));
   if('kind' in result)return {jobId:input.clientRequestId,status:'succeeded',artifacts:[{base64:Buffer.from(result.bytes).toString('base64'),mimeType:result.mimeType}]};
   return result;
 }
 type TaskContext=AdapterContext&{model?:import('../models/contracts.ts').ModelDefinition;operation?:string};
-async function getVideo(context:AdapterContext,jobId:string):Promise<Job>{return context.connection.protocol==='async-task'?pollTemplate(context,(context as TaskContext).model!,jobId,outputOf((context as TaskContext).operation??'text-to-video')):gatewayGet(context,jobId);}
-async function lookupVideo(context:AdapterContext,clientRequestId:string):Promise<Job|null>{return context.connection.protocol==='async-task'?null:gatewayLookup(context,clientRequestId);}
-async function cancelVideo(context:AdapterContext,jobId:string):Promise<Job>{return context.connection.protocol==='async-task'?cancelTemplate(context,(context as TaskContext).model!,jobId):gatewayCancel(context,jobId);}
+async function getVideo(context:AdapterContext,jobId:string):Promise<Job>{return context.connection.protocol==='async-task'?pollTemplate(context,(context as TaskContext).model!,jobId,outputOf((context as TaskContext).operation??'text-to-video')):official(context.connection.protocol)?officialPoll(context,jobId):gatewayGet(context,jobId);}
+async function lookupVideo(context:AdapterContext,clientRequestId:string):Promise<Job|null>{return context.connection.protocol==='async-task'||official(context.connection.protocol)?null:gatewayLookup(context,clientRequestId);}
+async function cancelVideo(context:AdapterContext,jobId:string):Promise<Job>{return context.connection.protocol==='async-task'?cancelTemplate(context,(context as TaskContext).model!,jobId):official(context.connection.protocol)?officialCancel(context,jobId):gatewayCancel(context,jobId);}
 import {downloadArtifact,mediaSignature} from './download.ts';
 import type {MediaTask,MediaRequest,MediaRegistryPort,MediaProjectPort,MediaTaskOptions,RemoteJob} from './contracts.ts';
 
@@ -74,7 +78,8 @@ export class MediaTaskService {
     if(input.shotId&&!project.shotIds.includes(input.shotId))throw new Error('生成目标镜头不存在');
     const resolved=await this.registry.resolve({role:input.operation==='text-to-image'?'image':'video',...(input.modelId?{modelId:input.modelId}:{}),...(input.connectionId?{connectionId:input.connectionId}:{})});
     const release=this.registry.acquire?.(resolved.connection.id,resolved.model.id);try {
-    const output=input.operation==='text-to-image'?'image':'video';if(![output==='image'?'images':'video-gateway','async-task'].includes(resolved.connection.protocol)||!resolved.model.outputModalities.includes(output))throw new Error('所选模型不支持此生成操作');
+    const output=input.operation==='text-to-image'?'image':'video';const protocols=output==='image'?['images','gemini-image','async-task']:['video-gateway','openai-videos','kling-video','minimax-video','volc-video','dashscope-video','gemini-video','async-task'];if(!protocols.includes(resolved.connection.protocol)||!resolved.model.outputModalities.includes(output))throw new Error('所选模型不支持此生成操作');
+    assertOfficialCapability(resolved,input);
     if(!resolved.model.inputModalities.includes('text'))throw new Error('所选模型不支持文字提示输入');
     if(input.operation==='image-to-video'&&!resolved.model.inputModalities.includes('image'))throw new Error('所选模型不支持图片输入');
     // Resolve now to reject unavailable credentials before registering work. Resolve again per HTTP operation.

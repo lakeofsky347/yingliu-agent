@@ -12,7 +12,7 @@ export interface MediaRequest {
   /** Stable workflow step request ID; repeated requests return the original task. */
   clientRequestId?:string;
   modelId?:string;connectionId?:string;imageAssetIds?:string[];allowImageUpload?:boolean;
-  parameters?:Record<string,string|number|boolean>;ownerSessionId?:string;
+  parameters?:Record<string,string|number|boolean>;ownerSessionId?:string;requiresAudio?:boolean;
 }
 export interface MediaTask {
   version:1;id:string;clientRequestId:string;projectId:string;shotId?:string;startRevision:number;

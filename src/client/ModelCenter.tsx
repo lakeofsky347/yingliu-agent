@@ -5,7 +5,7 @@ import { ROLE_OUTPUT, ROLE_PROTOCOLS } from '../models/contracts.ts';
 import { TEMPLATE_PRESETS } from '../models/template-presets.ts';
 import { ModelCostEstimate } from './ModelCostEstimate.tsx';
 
-const protocolNames:Record<ModelProtocol,string>={'chat-completions':'文本／视觉理解（Chat Completions）',images:'生图（Images Generations）','video-gateway':'生视频（映流网关 v1）',speech:'配音（Speech）','async-task':'异步任务模板（通义万相／可灵／即梦／Runway／Replicate／音频）'};
+const protocolNames:Record<ModelProtocol,string>={'chat-completions':'文本／视觉理解（Chat Completions）',images:'生图（Images Generations）','gemini-image':'生图（Gemini）','video-gateway':'生视频（映流网关 v1）','openai-videos':'生视频（OpenAI Videos）','kling-video':'生视频（可灵）','minimax-video':'生视频（MiniMax）','volc-video':'生视频（火山方舟）','dashscope-video':'生视频（百炼万相）','gemini-video':'生视频（Gemini Veo）',speech:'配音（Speech）','async-task':'异步任务模板（通义万相／可灵／即梦／Runway／Replicate／音频）'};
 const roleNames:Record<ModelRole,string>={director:'导演与讨论',scene:'场景代码',vision:'关键帧视觉检查',image:'图片生成',video:'视频生成',speech:'配音',music:'音乐',sfx:'音效'};
 const roleProtocols=ROLE_PROTOCOLS;
 const emptyCatalog:RegistrySnapshot={version:1,connections:[],models:[],roles:[]};
