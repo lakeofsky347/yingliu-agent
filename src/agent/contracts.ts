@@ -99,6 +99,8 @@ export interface AgentRun {
   uncertainSubmissions?: { execId: string; tool: string; at: string; error: string; attempts: number; jobId?: string }[]; final?: string; error?: string;
   /** Capabilities and tool names active at the latest model step. */
   active?: { roles: GenRole[]; tools: string[]; selfMade: string[] };
+  /** Identical tool failures in a row. Reads do not clear it; a different error or a successful write does. */
+  repeatError?: { signature: string; count: number };
 }
 
 export interface AgentStartInput {

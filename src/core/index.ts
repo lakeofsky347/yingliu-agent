@@ -203,7 +203,7 @@ function validateEdges(edges:StoryEdge[],ids:string[],order:string[],errors:stri
   for(let i=0;i<order.length-1;i++)if(!seen.has(`${order[i]}\0${order[i+1]}`))errors.push(`主链断开：${order[i]} → ${order[i+1]}`);
   const expected=new Set(order.slice(0,-1).map((s,i)=>`${s}\0${order[i+1]}`));
   if(order.length)expected.add(`${order.at(-1)}\0${output}`);
-  if(order.length&&!seen.has(`${order.at(-1)}\0${output}`))errors.push('末镜头必须连接到视频输出节点');
+  if(order.length&&!seen.has(`${order.at(-1)}\0${output}`))errors.push('末镜头必须连接到视频输出节点。请把末镜头连到 film-output');
   for(const key of seen)if(!expected.has(key))errors.push('主链连线与镜头顺序不一致，可能存在循环或逆序');
 }
 
@@ -260,6 +260,15 @@ export function specMarkdown(spec:VideoSpec):string {
   return lines.join('\n');
 }
 function formatSeconds(seconds:number):string{return Number(seconds.toFixed(3)).toString();}
+
+/** Tool commits must be playable: every shot stays in order and the last one reaches the film output. */
+export function ensureFilmOutput(project:VideoProject):void {
+  if(!project.shotOrder.length)return;
+  project.extensions.graphEdges=[
+    ...project.shotOrder.slice(0,-1).map((from,index)=>({from,to:project.shotOrder[index+1]!})),
+    {from:project.shotOrder.at(-1)!,to:'film-output'},
+  ];
+}
 
 /** Rewrite sequence edges after an explicit reorder. Asset bindings stay in their fields. */
 function syncEdges(project:VideoProject):void {

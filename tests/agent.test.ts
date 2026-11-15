@@ -10,7 +10,7 @@ import type { StudioSnapshot, VideoProject } from '../src/shared/types.ts';
 import { toolGateway, type GatewayReply } from './model-gateway.ts';
 import { compressMessages, untrusted } from '../src/agent/context.ts';
 import { parsePlanJson } from '../src/agent/model-client.ts';
-import { classify, needsApproval, budgetFrom, emptyUsage, tokenCost } from '../src/agent/budget.ts';
+import { classify, needsApproval, budgetFrom, emptyUsage, repeatedToolError, tokenCost } from '../src/agent/budget.ts';
 import { parseSse } from '../src/client/AgentPanel.tsx';
 
 import { deflateSync } from 'node:zlib';
@@ -251,6 +251,11 @@ test('pure helpers: compression, plan parsing, approval policy, error classes, p
   assert.equal(classify(Object.assign(new Error('x'), { code: 'REVISION_CONFLICT' })), 'conflict');
   assert.equal(classify(Object.assign(new Error('x'), { status: 503 })), 'retry');
   assert.equal(classify(new Error('bad')), 'model');
+  const first = repeatedToolError(undefined, 'video_update', '无法编译视频要求: 末镜头必须连接到视频输出节点');
+  assert.equal(first.stop, false);
+  const second = repeatedToolError(first, 'video_update', '无法编译视频要求: 末镜头必须连接到视频输出节点');
+  assert.equal(second.stop, true);
+  assert.equal(repeatedToolError(first, 'video_update', '另一条错误').stop, false);
   assert.equal(tokenCost({}, 1, 1), null);
   const sse = parseSse('event: run\ndata: {"type":"delta","runId":"r","text":"a"}\n\ndata: {"type"');
   assert.equal(sse.events.length, 1); assert.equal(sse.rest, 'data: {"type"');

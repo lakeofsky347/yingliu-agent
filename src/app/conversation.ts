@@ -2,7 +2,7 @@ import { imageMetadata } from '../models/image-input.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { addShot, bindAsset, compileSpec, createProject, deleteShot, reorderShots, unbindAsset, updateShot, updateTarget, validateProject } from '../core/index.ts';
+import { addShot, bindAsset, compileSpec, createProject, deleteShot, ensureFilmOutput, reorderShots, unbindAsset, updateShot, updateTarget, validateProject } from '../core/index.ts';
 import { normalizeStoryboard, parseModelJson, parseSceneSource } from '../host/generator.ts';
 import { projectPath } from '../host/store.ts';
 import type { AudioClip, SceneSource, Shot, StudioSnapshot, VideoProject } from '../shared/types.ts';
@@ -98,7 +98,7 @@ export function compileDirectorPlan(plan:Obj,snapshot:StudioSnapshot,input:ChatI
     }else throw new Error('导演计划包含未知工具：'+tool);
   }
   if((intent==='chat'||intent==='discuss')&&(mutated||preview))throw new Error('聊天/讨论不能修改或启动渲染');
-  if(mutated){const project=ensure();if(!project.shots.length||project.shots.length>12)throw new Error('提交后镜头须为1–12个');const check=validateProject(project);if(!check.ok)throw new Error(check.errors.join('\n'));compileSpec(project);
+  if(mutated){const project=ensure();if(!project.shots.length||project.shots.length>12)throw new Error('提交后镜头须为1–12个');ensureFilmOutput(project);const check=validateProject(project);if(!check.ok)throw new Error(check.errors.join('\n'));compileSpec(project);
     const previous=new Set(snapshot.project?.shots.map(s=>s.id)??[]);for(const shot of project.shots)if(!previous.has(shot.id)&&!sourceMap.has(shot.id))throw new Error('新增镜头缺少源码');
     if(creating||!snapshot.project?.shots.length){const positions=project.shots.map(shot=>project.graph.positions[shot.id]??[0,160]);const rightmost=positions.reduce((right,position)=>position[0]>right[0]?position:right,[0,160]);project.graph.positions['film-output']=[rightmost[0]+370,rightmost[1]];}
     project.revision=creating?0:snapshot.project!.revision;}

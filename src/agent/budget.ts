@@ -58,3 +58,11 @@ export function classify(error: unknown): ErrorClass {
   return 'model';
 }
 export function backoff(attempt: number, base = 500): number { return Math.min(8000, base * 2 ** attempt) + Math.floor(Math.random() * base / 2); }
+
+export interface RepeatedToolError { signature: string; count: number }
+/** The second identical tool failure stops the run. A different error starts the count over. */
+export function repeatedToolError(previous: RepeatedToolError | undefined, tool: string, message: string): RepeatedToolError & { stop: boolean } {
+  const signature = tool + '\n' + message.replace(/\s+/g, ' ').trim().slice(0, 500);
+  const count = previous?.signature === signature ? previous.count + 1 : 1;
+  return { signature, count, stop: count >= 2 };
+}

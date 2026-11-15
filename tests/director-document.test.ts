@@ -39,8 +39,24 @@ test('director document is approved only by a human, keeps its hash, and does no
     const stale = await call('director.document.save', { projectId: project.id, expectedRevision: after.revision, baseHash: 'old-hash', story });
     assert.equal(stale.ok, false);
     if (!stale.ok) assert.equal(stale.error.code, 'DIRECTOR_BASE_CONFLICT');
+    const renamed = structuredClone(after);
+    renamed.title = after.title + '·改';
+    const moved = await call('save', { projectId: project.id, expectedRevision: after.revision, project: renamed });
+    assert.equal(moved.ok, true);
+    if (!moved.ok) return;
+    const current = (moved.value as StudioSnapshot).project!;
+    assert.ok(current.revision > after.revision);
+    const followed = await call('director.document.save', { projectId: project.id, expectedRevision: after.revision, baseHash: signed!.hash, story: { ...story, title: '海边更新' } });
+    assert.equal(followed.ok, true);
+    if (!followed.ok) return;
+    const followedProject = (followed.value as StudioSnapshot).project!;
+    const followedDoc = readDirectorDocument(followedProject);
+    assert.equal(followedDoc?.status, 'draft');
+    assert.equal(followedDoc?.plan.story.title, '海边更新');
+    assert.equal(followedProject.productionPolicy?.mode, after.productionPolicy?.mode);
+    assert.ok(followedProject.revision > current.revision);
     assert.equal(rejectUnattendedProduction('director.document.approve')?.error.code, 'DIRECTOR_APPROVAL_REQUIRED');
-    const generated = await call('media.generate', { projectId: project.id, expectedRevision: after.revision, operation: 'text-to-video', prompt: '不应开始' });
+    const generated = await call('media.generate', { projectId: project.id, expectedRevision: followedProject.revision, operation: 'text-to-video', prompt: '不应开始' });
     assert.equal(generated.ok, false);
     if (!generated.ok) assert.equal(generated.error.code, 'PRODUCTION_POLICY_VIOLATION');
   } finally { await app.dispose(); await rm(directory, { recursive: true, force: true }); }

@@ -13,6 +13,7 @@ export function DirectorDocumentPanel({ controller, project }: { controller: Stu
   const [document, setDocument] = useState<DirectorView | null>(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [canRetry, setCanRetry] = useState(false);
   async function load() {
     const value = await controller.api.call<{ document: DirectorView | null }>('director.document.get', { projectId: project.id });
     setDocument(value.document);
@@ -27,10 +28,24 @@ export function DirectorDocumentPanel({ controller, project }: { controller: Stu
   function story(): Story {
     return { version: 0, projectId: project.id, status: 'empty', title: title.trim(), logline: logline.trim(), targetSeconds: project.targetDuration, style: { look: '', palette: '', typography: '', motion: '', negative: '' }, characters: [], shots: shots.split('\n').map(line => line.trim()).filter(Boolean).map((summary, index) => ({ id: 's' + (index + 1), summary, shotType: 'wide', camera: 'fixed', durationSeconds: 2, dialogue: '', characters: [], continueFromPrevious: false })), updatedAt: new Date(0).toISOString(), consistency: {} } satisfies Story;
   }
-  async function save() {
+  function staleRevision(text: string) { return /版本冲突|期望 v|REVISION_CONFLICT|过期|重新读取/.test(text); }
+  async function save(refresh = false) {
     setError(''); setNotice('');
-    await controller.action('director.document.save', { story: story(), ...(document ? { baseHash: document.hash } : {}) }, '导演文档已保存为草稿。批准前智能体不能代签。');
-    if (controller.getSnapshot().error) { setError(controller.getSnapshot().error); return; }
+    const payload = { story: story(), ...(document ? { baseHash: document.hash } : {}) };
+    if (refresh) await controller.load(true);
+    await controller.action('director.document.save', payload, '导演文档已保存为草稿。批准前智能体不能代签。');
+    let failure = controller.getSnapshot().error;
+    if (failure && staleRevision(failure) && !refresh) {
+      await controller.load(true);
+      await controller.action('director.document.save', payload, '导演文档已保存为草稿。批准前智能体不能代签。');
+      failure = controller.getSnapshot().error;
+    }
+    if (failure) {
+      setCanRetry(staleRevision(failure));
+      setError(staleRevision(failure) ? `${failure} 已刷新到最新工程，请再点「刷新并重试保存」。` : failure);
+      return;
+    }
+    setCanRetry(false);
     setNotice('已保存为草稿。内容变了就要重新批准。');
     await load();
   }
@@ -53,6 +68,7 @@ export function DirectorDocumentPanel({ controller, project }: { controller: Stu
     {notice && <p className="vs-media-success" role="status">{notice}</p>}
     <div className="vs-media-actions">
       <button type="button" onClick={() => void save().catch(cause => setError(cause instanceof Error ? cause.message : '保存失败'))}>保存导演文档</button>
+      {canRetry && <button type="button" onClick={() => void save(true).catch(cause => setError(cause instanceof Error ? cause.message : '保存失败'))}>刷新并重试保存</button>}
       <button type="button" className="vs-primary" disabled={!document} onClick={() => void approve().catch(cause => setError(cause instanceof Error ? cause.message : '批准失败'))}>批准导演文档</button>
     </div>
   </section>;

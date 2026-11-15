@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createProject, defaultSceneSource, updateShot } from '../src/core/index.ts';
+import { compileSpec, createProject, defaultSceneSource, updateShot } from '../src/core/index.ts';
 import type { StudioSnapshot, RpcResult, VideoProject } from '../src/shared/types.ts';
 import type { BackendPort, ChatInput, SecretStore } from '../src/app/contracts.ts';
 import { authorizedImages, compileDirectorPlan, ConversationService } from '../src/app/conversation.ts';
@@ -119,6 +119,28 @@ test('vision requires explicit per-turn authorization and enforces selected asse
   assert.equal((await authorizedImages(backend.state,input,config,signal)).content.length,0);const sent=await authorizedImages(backend.state,{...input,allowImageUpload:true},config,signal);assert.equal(sent.ids[0],'image-a');assert.ok(sent.content.some(block=>block.type==='image_url'));
   await assert.rejects(authorizedImages(backend.state,{...input,allowImageUpload:true,shotId:backend.state.project.shots[1]!.id},config,signal),/未绑定/);png.writeUInt32BE(5000,16);await writeFile(join(backend.state.root,'assets','small.png'),png);await assert.rejects(authorizedImages(backend.state,{...input,allowImageUpload:true},config,signal),/像素尺寸/);
 }));
+
+test('adding shots on a blank film connects the last shot to the output', () => {
+  const project = createProject('空白');
+  project.shots = [];
+  project.shotOrder = [];
+  project.graph = { positions: { 'film-output': [375, 140] }, groups: [] };
+  project.extensions.graphEdges = [];
+  project.revision = 1;
+  const snapshot = { project, root: '/fixture', task: null, previewUrl: null, previewRevision: null, providers: [], recent: [], environment: { browserPath: 'fixture', ffmpegPath: 'fixture', ffprobePath: 'fixture', browserAvailable: true, ffmpegAvailable: true, ffprobeAvailable: true } };
+  const source = defaultSceneSource();
+  const plan = { intent: 'modify', message: '两镜头', actions: [{ tool: 'video_update', arguments: { expectedRevision: 1, update: { addShots: [
+    { tempId: 'a', title: '走向海边', intent: '走路', composition: '远景', action: '前行', durationSeconds: 2, source },
+    { tempId: 'b', afterId: 'a', title: '回头', intent: '回头', composition: '近景', action: '转身', durationSeconds: 2, source },
+  ] } } }] };
+  const prepared = compileDirectorPlan(plan, snapshot, chat('添加两个镜头', project.id), 'modify');
+  const candidate = prepared.candidate!;
+  const last = candidate.shotOrder.at(-1)!;
+  const edges = candidate.extensions.graphEdges as { from: string; to: string }[];
+  assert.equal(candidate.shots.length, 2);
+  assert.ok(edges.some(edge => edge.from === last && edge.to === 'film-output'));
+  assert.equal(compileSpec(candidate).shots.length, 2);
+});
 
 test('vision refuses project-local file symlinks before reading image pixels',context=>withDirectory(async directory=>{
   const backend=new FixtureBackend();backend.state.project=createProject('symlink image','topic');backend.state.root=join(directory,'project');await mkdir(join(backend.state.root,'assets'),{recursive:true});

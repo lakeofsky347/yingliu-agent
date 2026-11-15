@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentEvent, AgentMessage, AgentPort, AgentRun, AgentStartInput, AgentTool, PublicRun, RunStep, ToolCall, ToolResult, ToolRisk, ToolSuccessReceipt } from './contracts.ts';
 import { chatTurn, looksLikeNoToolSupport, type ChatConfig } from './model-client.ts';
-import { backoff, budgetFrom, chargeModel, chargeTool, classify, emptyUsage, needsApproval, overBudget, tokenCost } from './budget.ts';
+import { backoff, budgetFrom, chargeModel, chargeTool, classify, emptyUsage, needsApproval, overBudget, repeatedToolError, tokenCost } from './budget.ts';
 import { bound, capabilityPrompt, compressMessages, summarizeProject, systemPrompt } from './context.ts';
 import { RunStore } from './run-store.ts';
 import { activeTools, createTools } from './tools.ts';
@@ -553,9 +553,21 @@ export class AgentService {
         await this.save(run); return 'suspend';
       }
       const kind = classify(error), message = errorText(error);
+      const repeated = repeatedToolError(run.repeatError, tool.name, message);
+      run.repeatError = { signature: repeated.signature, count: repeated.count };
       await this.finishStep(run, step, { status: 'failed', error: message });
       chargeTool(run.usage, 0, 'read');
-      respond(JSON.stringify({ error: message, hint: kind === 'conflict' ? '工程版本已变化：先调用 project_get 获取最新 revision 再重试' : kind === 'retry' ? '临时故障，已重试多次' : '请修正参数或换一种方法' }));
+      if (repeated.stop) {
+        respond(JSON.stringify({ error: message, stopped: true, hint: '同一错误已连续出现，已停止，没有继续重试。请根据错误修改后再继续。' }));
+        run.queue = [];
+        run.status = 'failed';
+        run.error = message;
+        run.message = `${tool.name} 连续 ${repeated.count} 次出现同一错误，已停止，没有继续重试。${message}`;
+        await this.save(run);
+        return 'suspend';
+      }
+      const fix = /末镜头必须连接到视频输出节点/.test(message) ? '重新提交 video_update，工具会把末镜头连到 film-output。' : '';
+      respond(JSON.stringify({ error: message, hint: (kind === 'conflict' ? '工程版本已变化：先调用 project_get 获取最新 revision 再重试' : kind === 'retry' ? '临时故障，已重试多次' : '请修正参数或换一种方法') + (fix ? ' ' + fix : '') }));
       await this.save(run); return 'next';
     }
     const receipt: ToolSuccessReceipt = { execId: call.execId!, tool: tool.name, argsHash: hash, risk: tool.risk, stepIndex: step.index, at: now(), result };
@@ -590,6 +602,7 @@ export class AgentService {
     }
     if (receipt.risk === 'cost') await this.spend(run.projectId, receipt.tool, result.waitFor ? null : result.cost, false, key);
     if (receipt.risk === 'write') meta.dirty = true;
+    if (receipt.risk !== 'read') delete run.repeatError;
     if (result.images?.length) {
       const note = meta.allowImages && model?.vision
         ? '（画面已截取。像素只发给单独配置的多模态模型，请用 visual_review 检查，不会附在文本模型请求上）'
