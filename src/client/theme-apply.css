@@ -1,0 +1,62 @@
+/* Theme is data-theme. Existing yl- / vs- skins read the same tokens. */
+
+.yl-app {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.yl-header,
+.yl-chat,
+.yl-modal,
+.yl-project-card {
+  background-color: var(--panel);
+  color: var(--text);
+  border-color: var(--line);
+}
+
+.yl-body,
+.yl-editor-shell,
+.yl-home {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.yl-theme {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-btn);
+  background: var(--bg);
+}
+
+.yl-theme-option {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  height: 32px;
+  padding: 0 12px;
+  border-radius: var(--r-btn);
+}
+
+.yl-theme-option[aria-checked="true"] {
+  background: var(--text);
+  color: var(--bg);
+}
+
+.vs-studio,
+.vs-studio[data-scheme="light"],
+.vs-studio[data-scheme="dark"] {
+  --vs-bg: var(--bg);
+  --vs-panel: var(--panel);
+  --vs-panel-alt: var(--bg);
+  --vs-field: var(--panel);
+  --vs-text: var(--text);
+  --vs-muted: var(--muted);
+  --vs-border: var(--line);
+  --vs-accent: var(--accent);
+  --vs-accent-text: var(--bg);
+  --vs-hover: var(--panel);
+  color: var(--text);
+  background: var(--bg);
+}

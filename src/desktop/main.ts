@@ -43,7 +43,7 @@ if(ownsApplication)void (startup=app.whenReady().then(async()=>{
   const editorSession=session.fromPartition('persist:yingliu-editor');
   editorSession.setPermissionRequestHandler((_webContents,_permission,callback)=>callback(false));
   editorSession.setPermissionCheckHandler(()=>false);
-  const window=new BrowserWindow({width:1600,height:1000,minWidth:1100,minHeight:700,title:'映流智能体',backgroundColor:'#0e1117',
+  const window=new BrowserWindow({width:1600,height:1000,minWidth:1100,minHeight:700,title:'映流智能体',backgroundColor:'#faf9f5',
     webPreferences:editorWebPreferences(join(__dirname,'preload.cjs'),editorSession)});
   window.webContents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
   const trusted=(event:Electron.IpcMainInvokeEvent)=>event.sender===window.webContents&&event.senderFrame!==null&&event.senderFrame.parent===null&&event.senderFrame.frameTreeNodeId===window.webContents.mainFrame.frameTreeNodeId&&new URL(event.senderFrame.url).origin===server.origin;

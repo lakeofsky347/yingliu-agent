@@ -20,3 +20,8 @@ earlier licensing history; the current project license is GPL-3.0-only.
 Third-party components retain their own licenses and copyright notices. See
 THIRD_PARTY_NOTICES.md, licenses/ and the notices distributed with those
 components.
+
+The paper and darkroom theme tokens and shell treatment are adapted from
+yingliu-agent2 main commit 07ed7c5c7acdb303ab3187065a16f6731b95336d, which is
+also GPL-3.0-only:
+https://github.com/lakeofsky347/yingliu-agent2

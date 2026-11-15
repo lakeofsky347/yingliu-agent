@@ -1,12 +1,16 @@
 import { createRoot } from 'react-dom/client';
 import { App } from './App.tsx';
 import { StandaloneStudioApi, StudioController } from './controller.ts';
+import './tokens.css';
 import './styles.css';
 import './app.css';
+import './theme-apply.css';
 
 const api=new StandaloneStudioApi();
 const controller=new StudioController(api);
-controller.setScheme('dark');
+const initialTheme=document.documentElement.dataset.theme==='darkroom'?'darkroom':'paper';
+document.documentElement.dataset.theme=initialTheme;
+controller.setScheme(initialTheme==='darkroom'?'dark':'light');
 const mount=document.getElementById('root');
 if(!mount)throw new Error('缺少应用挂载节点 #root');
 createRoot(mount).render(<App controller={controller} api={api}/>);

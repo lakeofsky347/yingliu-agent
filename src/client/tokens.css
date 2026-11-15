@@ -1,0 +1,52 @@
+/*
+ * 纸感（paper）与暗房（darkroom）共用这一份令牌。
+ * 移植自 yingliu-agent2 main 07ed7c5（GPL-3.0-only）。
+ * 组件只读 --bg、--panel、--text、--muted、--line、--accent、--danger。
+ * 字体只用系统字体栈，不内嵌、不外链。
+ */
+
+:root {
+  --font-sans: "Inter", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", sans-serif;
+  --font-serif: "Songti SC", "STSong", "Noto Serif CJK SC", "Noto Serif SC", "Source Han Serif SC", "SimSun", Georgia, serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur-1: 120ms;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --r-btn: 8px;
+}
+
+:root,
+:root[data-theme="paper"] {
+  color-scheme: light;
+  --bg: #faf9f5;
+  --panel: #ffffff;
+  --text: #141413;
+  --muted: #5e5d59;
+  --line: #e8e6dc;
+  --accent: #1f8f78;
+  --danger: #c4452c;
+}
+
+:root[data-theme="darkroom"] {
+  color-scheme: dark;
+  --bg: #08090a;
+  --panel: #141516;
+  --text: #f7f8f8;
+  --muted: #c2c7cf;
+  --line: rgba(255, 255, 255, 0.07);
+  --accent: #96d4c0;
+  --danger: #ff7b6b;
+  --r-btn: 999px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

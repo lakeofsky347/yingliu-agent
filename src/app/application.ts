@@ -25,11 +25,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import { writeDurableFile } from '../agent/durable-file.ts';
 import { acquireApplicationOwner, applicationDirectories, drainOwned, type OwnerLease } from './ownership.ts';
+import { PreferencesStore, type ThemeId } from './preferences.ts';
 
 export const ENDPOINTS=new Set(['catalog','current','create','open','save','import','source','saveSource','restoreSource','preview','generate','export','cancel','environment','reveal','apply','inspect','list','focus','audio','tts','history','undo','redo','rename','duplicate','archive','tasks','retry','packs.list','app.health','app.exportProject','app.importProject','providers.get','providers.save','providers.check','chat.history','chat.send','chat.cancel']);
 for(const endpoint of ['models.list','models.connection.save','models.connection.remove','models.model.save','models.model.remove','models.role.bind','models.check','media.generate','media.list','media.get','media.retry','media.pause','media.cancel','media.apply','video.clip.save','video.clip.remove','video.clip.extract'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['workflows.run','workflows.list','workflows.get','workflows.retry','workflows.pause','workflows.apply'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['agent.start','agent.list','agent.get','agent.trace','agent.approve','agent.reject','agent.resume','agent.pause','agent.cancel','agent.tools','agent.capabilities','story.get','story.save','agent.qc','agent.qc.last','agent.ledger','agent.budget.set'])ENDPOINTS.add(endpoint);
+for(const endpoint of ['ui.preferences.get','ui.preferences.set'])ENDPOINTS.add(endpoint);
 export class MemorySecrets implements SecretStore {
   private values=new Map<string,string>();
   async get(ref:string){return this.values.get(ref);}
@@ -190,6 +192,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
   });
   cleanups.push(()=>agent.dispose());
   await agent.initialize();
+  const preferences=new PreferencesStore(dataDirectory);
   const requests=new Set<Promise<RpcResult>>();let stopping=false,disposal:Promise<void>|undefined;
   async function dispatch(endpoint:string,payload:unknown={}):Promise<RpcResult>{
     try{
@@ -252,6 +255,12 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         case 'chat.history':value=await conversation.history(typeof data.projectId==='string'?data.projectId:undefined);break;
         case 'chat.send':value=await conversation.send(data as unknown as ChatInput);break;
         case 'chat.cancel':value=await conversation.cancel();break;
+        case 'ui.preferences.get':value=await preferences.get();break;
+        case 'ui.preferences.set':{
+          if(data.theme!=='paper'&&data.theme!=='darkroom')throw new Error('未知外观');
+          if(Object.keys(data).some(key=>key!=='theme'))throw new Error('外观偏好只接受 theme');
+          value=await preferences.set(data.theme as ThemeId);break;
+        }
         default:return backend.route(endpoint,payload);
       }
       return {ok:true,value};
