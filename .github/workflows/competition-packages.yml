@@ -1,0 +1,77 @@
+name: Competition packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - cursor/refactor-plan-293f
+
+permissions:
+  contents: read
+
+concurrency:
+  group: competition-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Enable and verify real Windows file symlinks
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
+          New-Item -Path $key -Force | Out-Null
+          New-ItemProperty -Path $key -Name AllowDevelopmentWithoutDevLicense -Value 1 -PropertyType DWord -Force | Out-Null
+          node --input-type=module -e "import {mkdtemp,writeFile,symlink,realpath,rm} from 'node:fs/promises'; import {tmpdir} from 'node:os'; import {join} from 'node:path'; const root=await mkdtemp(join(tmpdir(),'yingliu-symlink-')); try { const target=join(root,'target.txt'); const link=join(root,'link.txt'); await writeFile(target,'fixture'); await symlink(target,link,'file'); if(await realpath(link)!==await realpath(target)) throw new Error('File symlink did not resolve to fixture'); } finally { await rm(root,{recursive:true,force:true}); }"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - run: npm ci
+      - name: Prepare pinned Electron runtime
+        run: node node_modules/electron/install.js
+      - run: npm run package:app
+      - run: node scripts/verify-package.mjs --layout-only
+      - name: Reject secrets and local data inside the bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t hits < <(find artifacts -type f \( -name '.env' -o -name '.env.*' -o -name 'provider.json' -o -name 'model-registry.json' -o -name 'ui-preferences.json' -o -name '*.yingliu' \) -print)
+          if ((${#hits[@]})); then
+            printf '安装包含有不该发布的本地文件：\n%s\n' "${hits[@]}"
+            exit 1
+          fi
+      - name: Archive the portable app
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'EOF'
+          import { readdir, readFile, stat } from 'node:fs/promises';
+          import { spawnSync } from 'node:child_process';
+          import { join } from 'node:path';
+          const entries = (await readdir('artifacts')).filter(name => name.startsWith('yingliu-agent-') || name.endsWith('.app'));
+          if (entries.length !== 1) throw new Error('期望恰好一个应用目录，实际：' + entries.join(', '));
+          const name = entries[0];
+          const info = await stat(join('artifacts', name));
+          if (!info.isDirectory()) throw new Error('应用产物不是目录：' + name);
+          const manifestPath = join('artifacts', name, name.endsWith('.app') ? 'Contents/Resources/yingliu-package.json' : 'yingliu-package.json');
+          const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+          const archive = `yingliu-agent-${manifest.platform}-${manifest.arch}.tar.gz`;
+          const result = spawnSync('tar', ['-czf', archive, '-C', 'artifacts', name], { stdio: 'inherit' });
+          if (result.status !== 0) process.exit(result.status ?? 1);
+          console.log(archive);
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: competition-${{ runner.os }}-${{ runner.arch }}
+          path: yingliu-agent-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
