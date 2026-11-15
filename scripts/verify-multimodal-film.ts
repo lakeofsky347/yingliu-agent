@@ -88,6 +88,7 @@ try{
   project.target={width:320,height:180,fps:{num:12,den:1},audioMode:'mixed',quality:'small'};project.targetDuration=6;
   project.shots.forEach((shot,index)=>{shot.durationFrames=24;shot.title=['代码镜头','生成图片镜头','生成视频镜头'][index]!;shot.params.text=shot.title;shot.params.subtitle='本地协议与真实媒体验收';shot.params.fontSize=108;shot.params.motion='none';});
   snapshot=await call('save',{projectId:id,expectedRevision:project.revision,project});await call('environment',{projectId:id,browserPath:environment.browserPath,ffmpegPath:environment.ffmpegPath,ffprobePath:environment.ffprobePath});
+  snapshot=await call('production.set',{projectId:id,expectedRevision:snapshot.project!.revision,mode:'hybrid',allowGeneratedImages:true,allowImportedVideo:true,baseMode:'code_animation'});
   passed('六类模型角色通过应用配置接口分别绑定');
   for(const [index,visual]of (['code','image','video'] as const).entries()){
     project=(await call('current',{projectId:id})).project!;const before=project.revision;
