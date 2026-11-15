@@ -80,7 +80,7 @@ test('v2 path archives stream video-sized assets above legacy and browser limits
     await assert.rejects(exportProjectArchive(f.backend,{projectId:original.project!.id}),/64 MiB.*桌面/);
     const archivePath=join(f.directory,'large.yingliu'),saved=await exportProjectArchive(f.backend,{projectId:original.project!.id,path:archivePath});
     assert.equal(saved.dataBase64,undefined);assert.ok(saved.size>size);assert.equal((await stat(archivePath)).size,saved.size);
-    const restored=await importProjectArchive(f.backend,{path:archivePath});assert.equal(restored.project!.schemaVersion,2);assert.notEqual(restored.project!.id,original.project!.id);
+    const restored=await importProjectArchive(f.backend,{path:archivePath});assert.equal(restored.project!.schemaVersion,3);assert.notEqual(restored.project!.id,original.project!.id);
     assert.deepEqual(restored.project!.videoClips,project.videoClips);assert.equal(restored.project!.shots[0]!.id,project.shots[0]!.id);
     assert.equal(await fileHash(join(restored.root!,project.assets[0]!.path!)),await fileHash(source));
     assert.equal(restored.project!.assets[0]!.originalPath,project.assets[0]!.originalPath);assert.deepEqual(await readFile(join(restored.root!,project.assets[0]!.originalPath!)),originalBytes);
@@ -94,7 +94,7 @@ test('v1 archives still migrate and preserve stable content IDs; truncated ZIP d
     const files=unzipSync(bytes),project=JSON.parse(Buffer.from(files['project.json']!).toString('utf8'));project.schemaVersion=1;delete project.videoClips;
     files['project.json']=Buffer.from(JSON.stringify(project));const manifest=JSON.parse(Buffer.from(files['manifest.json']!).toString('utf8'));manifest.schemaVersion=1;
     manifest.files=Object.entries(files).filter(([name])=>name!=='manifest.json').map(([name,data])=>({name,bytes:data.length,sha256:createHash('sha256').update(data).digest('hex')}));files['manifest.json']=Buffer.from(JSON.stringify(manifest));
-    const restored=await importProjectArchive(f.backend,{dataBase64:Buffer.from(zipSync(files)).toString('base64')});assert.equal(restored.project!.schemaVersion,2);assert.deepEqual(restored.project!.shotOrder,project.shotOrder);
+    const restored=await importProjectArchive(f.backend,{dataBase64:Buffer.from(zipSync(files)).toString('base64')});assert.equal(restored.project!.schemaVersion,3);assert.equal(restored.project!.productionPolicy?.mode,'unresolved');assert.deepEqual(restored.project!.shotOrder,project.shotOrder);
     await assert.rejects(importProjectArchive(f.backend,{dataBase64:bytes.subarray(0,-22).toString('base64')}),/截断|目录损坏/);
     assert.equal((await f.backend.call<{projects:unknown[]}>('list')).projects.length,2);
   }finally{await f.close();}

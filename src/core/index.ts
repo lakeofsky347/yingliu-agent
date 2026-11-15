@@ -1,5 +1,6 @@
 import type { Asset, Shot, VideoProject, VideoSpec, VideoTarget } from '../shared/types.js';
 import {inspectProjectPaths,safeRelativeProjectPath as safeRelativePath} from './project-paths.js';
+import { defaultProductionPolicy, normalizeProductionPolicy } from './production-policy.js';
 export { defaultSceneSource } from './default-source.js';
 
 export interface ValidationResult { ok:boolean; errors:string[]; warnings:string[] }
@@ -29,15 +30,19 @@ function plainObject(value:unknown):value is Record<string,unknown> {
 
 /** Migrate in memory: stable IDs, revision and historical snapshots are not rewritten. */
 export function migrateProject(project:VideoProject):VideoProject {
-  if(!project||![1,2].includes(project.schemaVersion))throw new Error('不支持的项目版本');
-  const migrated=copy(project);migrated.schemaVersion=2;migrated.videoClips??=[];return migrated;
+  if(!project||![1,2,3].includes(project.schemaVersion))throw new Error('不支持的项目版本');
+  const migrated=copy(project);migrated.schemaVersion=3;migrated.videoClips??=[];
+  migrated.productionPolicy=normalizeProductionPolicy(migrated);
+  return migrated;
 }
 
 /** New projects have three editable ten-second scenes; media is never invented. */
 export function createProject(title:string,topic=''):VideoProject {
   const now=new Date().toISOString();
   const shots=Array.from({length:3},(_,i)=>defaultShot(i));
-  return {schemaVersion:2,id:id('film'),title:title.trim()||'未命名视频',topic,
+  const projectId=id('film');
+  return {schemaVersion:3,id:projectId,title:title.trim()||'未命名视频',topic,
+    productionPolicy:defaultProductionPolicy(projectId),
     targetDuration:30,createdAt:now,updatedAt:now,revision:0,
     target:{width:1920,height:1080,fps:{num:30,den:1},audioMode:'none'},
     assets:[],shots,shotOrder:shots.map(s=>s.id),
@@ -61,7 +66,11 @@ export function defaultShot(index=0,fps={num:30,den:1}):Shot {
 export function validateProject(project:VideoProject,options:{portablePaths?:boolean}={}):ValidationResult {
   const errors:string[]=[],warnings:string[]=[];
   if(!plainObject(project))return {ok:false,errors:['项目必须是对象'],warnings};
-  if(project.schemaVersion!==1&&project.schemaVersion!==2)errors.push('不支持的项目版本');
+  if(![1,2,3].includes(project.schemaVersion))errors.push('不支持的项目版本');
+  if(project.schemaVersion===3){
+    const policy=project.productionPolicy;
+    if(!policy||policy.version!==1||typeof policy.decisionId!=='string'||!/^[a-zA-Z0-9_-]{1,128}$/.test(policy.decisionId)||!['unresolved','code_animation','model_video','hybrid'].includes(policy.mode)||typeof policy.allowGeneratedImages!=='boolean'||typeof policy.allowImportedVideo!=='boolean')errors.push('制作策略缺失或无效');
+  }
   if(typeof project.id!=='string'||!project.id.trim())errors.push('项目 ID 不能为空');
   if(typeof project.title!=='string'||!project.title.trim())errors.push('项目标题不能为空');
   if(typeof project.topic!=='string')errors.push('主题必须是文字');

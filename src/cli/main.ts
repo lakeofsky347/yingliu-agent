@@ -29,7 +29,7 @@ export function parseArgs(argv: string[]): { positional: string[]; flags: Flags 
   }
   return { positional, flags };
 }
-const BOOL = new Set(['json', 'mock', 'no-wait', 'allow-paid', 'trace', 'force', 'help', 'include-archived', 'run', 'yes']);
+const BOOL = new Set(['json', 'mock', 'no-wait', 'allow-paid', 'trace', 'force', 'help', 'include-archived', 'run', 'yes', 'allow-images', 'allow-imported-video']);
 /** C01: commands that only read. They open the profile with recovery disabled, so they never settle, resume or rewrite state. */
 export function isReadOnly(pos: string[], f: Flags): boolean {
   const [g, s] = pos;
@@ -155,7 +155,7 @@ export async function waitTask(ctx: Ctx, projectId: string, kind: string, taskId
 export const HELP = `yingliu — 映流智能体 headless CLI（详见 docs/CLI.md）
 全局：--json  --mock  --timeout <秒>  --lock-timeout <秒，默认 30>   数据目录：YINGLIU_DATA_DIR，工程目录：YINGLIU_PROJECTS
   doctor
-  project create --title <t> [--topic <t>] | list [--include-archived] | get <id> | export-zip <id> --out <file> | import <file>
+  project create --title <t> [--topic <t>] | list [--include-archived] | get <id> | policy <id> --mode code_animation|model_video|hybrid [--allow-images] [--allow-imported-video] | export-zip <id> --out <file> | import <file>
   agent run --project <id> --goal <g> [--auto-approve read,write,plan] [--allow-paid --max-cost <n> [--auto-approve ...,cost,export]] [--max-steps n] [--max-review-rounds n]
   agent status <runId> [--trace] | resume <runId> | approve <runId> --call <callId> --exec <execId> [--args-hash h] | reject <runId> --call <callId> --exec <execId> [--reason r]
   story show <projectId> | qc show <projectId> [--run] | ledger show <projectId>
@@ -169,6 +169,15 @@ async function dispatch(ctx: Ctx, pos: string[]): Promise<{ data: unknown; exit?
       case 'create': { const s = await call(ctx, 'create', { blank: true, title: str(f, 'title', true), ...(str(f, 'topic') ? { topic: str(f, 'topic') } : {}) }); return { data: { id: s.project.id, title: s.project.title, root: s.root, revision: s.project.revision } }; }
       case 'list': return { data: (await call(ctx, 'list', { includeArchived: f['include-archived'] === true })).projects };
       case 'get': { if (!arg) throw new CliError('USAGE', '用法：project get <id>'); const s = await call(ctx, 'current', { projectId: arg }); if (!s.project || s.project.id !== arg) throw new CliError('NOT_FOUND', '未找到视频工程 ' + arg); return { data: { project: s.project, root: s.root, task: s.task } }; }
+      case 'policy': {
+        if (!arg) throw new CliError('USAGE', '用法：project policy <id> --mode code_animation|model_video|hybrid');
+        const mode = str(f, 'mode', true);
+        if (mode !== 'code_animation' && mode !== 'model_video' && mode !== 'hybrid') throw new CliError('USAGE', '制作模式必须是 code_animation、model_video 或 hybrid');
+        const current = await call(ctx, 'current', { projectId: arg });
+        if (!current.project || current.project.id !== arg) throw new CliError('NOT_FOUND', '未找到视频工程 ' + arg);
+        const saved = await call(ctx, 'production.set', { projectId: arg, expectedRevision: current.project.revision, mode, allowGeneratedImages: f['allow-images'] === true, allowImportedVideo: f['allow-imported-video'] === true, ...(mode === 'hybrid' ? { baseMode: str(f, 'base') === 'model_video' ? 'model_video' : 'code_animation' } : {}) });
+        return { data: { id: saved.project.id, revision: saved.project.revision, productionPolicy: saved.project.productionPolicy } };
+      }
       case 'export-zip': { if (!arg) throw new CliError('USAGE', '用法：project export-zip <id> --out <file>'); const out = resolve(str(f, 'out', true)!); return { data: await call(ctx, 'app.exportProject', { projectId: arg, path: out }) }; }
       case 'import': { if (!arg) throw new CliError('USAGE', '用法：project import <file>'); const s = await call(ctx, 'app.importProject', { path: resolve(arg) }); return { data: { id: s.project.id, title: s.project.title, root: s.root } }; }
     } break;

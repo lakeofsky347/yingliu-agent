@@ -15,6 +15,7 @@ import {inspectGeneratedMedia,readProjectImage} from '../media/inspect.ts';
 import type { GeneratedFile, MediaTask } from '../jobs/contracts.ts';
 import {inspectCredential,isCredentialError,updateCredential} from '../app/secrets.ts';
 import {defaultTtsSettings,validateTtsSettings} from '../shared/tts-capability.ts';
+import {assertCanExport,assertOrdinaryProjectSave,PROTECTED_EXTENSIONS} from '../core/production-policy.ts';
 
 interface TaskRequest { endpoint:'preview'|'export'|'generate'; payload:Record<string,string> }
 interface RecordedTask extends TaskState { appRecordVersion?:1; revision?:number; request?:TaskRequest; retryOf?:string; outputId?:string }
@@ -62,7 +63,7 @@ export class StudioService {
     return structuredClone({project,root,task,previewUrl,previewRevision,assetBaseUrl,currentExportIds:ids,audioUrl,tts:{...tts,apiKey:undefined},ttsConfigured:credentials.hasKey,credentialStatus:credentials.credentialStatus,providers,environment,recent});
   }
   /** Trusted host port: generated paths never cross the public RPC or model tool surface. */
-  async inspectMediaProject(){await this.initialized;const {project}=this.required();return {revision:project.revision,shotIds:project.shots.map(shot=>shot.id)};}
+  async inspectMediaProject(){await this.initialized;const {project}=this.required();return {revision:project.revision,shotIds:project.shots.map(shot=>shot.id),productionMode:project.productionPolicy?.mode??'unresolved',allowGeneratedImages:project.productionPolicy?.allowGeneratedImages===true};}
   async readMediaImage(assetId:string,shotId?:string){await this.initialized;const {root,project}=this.required();return readProjectImage(root,project,assetId,shotId);}
   async validateMediaArtifact(path:string,mimeType:string,signal?:AbortSignal){await this.initialized;return inspectGeneratedMedia(path,mimeType,this.settings,signal);}
   async stageWorkflowMedia(task:MediaTask,files:GeneratedFile[],signal:AbortSignal):Promise<Asset[]>{
@@ -145,6 +146,14 @@ export class StudioService {
     if(metadata.videoClips!==undefined)project.videoClips=structuredClone(metadata.videoClips);
     if(metadata.sessionIds)project.sessionIds=[...new Set<string>(metadata.sessionIds)];
     if(metadata.extensions)project.extensions={...project.extensions,...metadata.extensions};
+    project.productionPolicy=structuredClone(current.productionPolicy);
+    project.schemaVersion=3;
+    for(const key of PROTECTED_EXTENSIONS){
+      const before=current.extensions?.[key],after=project.extensions?.[key];
+      if(before&&typeof before==='object'&&after&&typeof after==='object'&&!Array.isArray(before)&&!Array.isArray(after)){
+        for(const [id,value] of Object.entries(before as Record<string,unknown>))if(JSON.stringify((after as Record<string,unknown>)[id])!==JSON.stringify(value))throw Object.assign(new Error('不能改写已有的媒体或协作回执'),{code:'PROTECTED_EXTENSION'});
+      }else if(JSON.stringify(before??null)!==JSON.stringify(after??null)&&before!==undefined)throw Object.assign(new Error('不能改写受保护的工程记录'),{code:'PROTECTED_EXTENSION'});
+    }
     this.fitAudio(project);
     const sources=(metadata.sources??[]).map((item:any)=>{const shot=project.shots.find(s=>s.id===item.shotId);if(!shot)throw new Error('源码引用的镜头不存在');return {shot,source:parseSceneSource(JSON.stringify(item.source))};});
     await this.persist(project,Object.fromEntries(sources.map(({shot,source}:any)=>[shot.id,source])),String(data.label??'应用分镜与源码变更'));
@@ -286,7 +295,7 @@ export class StudioService {
   private async performRpc(endpoint:string,payload:unknown):Promise<RpcResult>{
     try{
       await this.initialized;if(this.disposed)throw new Error('应用服务已停止');const data=(payload??{}) as any;
-      if(['save','apply','saveSource','restoreSource','undo','redo','rename','retry','job.retry','import','audio','video.clip.save','video.clip.remove','video.clip.extract'].includes(endpoint))this.assertRevision(data,true);
+      if(['save','apply','saveSource','restoreSource','undo','redo','rename','retry','job.retry','import','audio','video.clip.save','video.clip.remove','video.clip.extract','production.set'].includes(endpoint))this.assertRevision(data,true);
       else if(['generate','export','preview'].includes(endpoint)&&data.expectedRevision!==undefined)this.assertRevision(data);
       switch(endpoint){
         case 'catalog':this.providers=await Promise.all(this.ctx.llm.listProviders().map(async p=>{try{return {...p,models:await this.ctx.llm.listModels(p.id)};}catch(error){return {...p,models:[],error:error instanceof Error?error.message:'模型目录读取失败'};}}));break;
@@ -303,7 +312,8 @@ export class StudioService {
           if(!data.project)for(const shot of this.project.shots)await this.store.markSourceGood(this.root,shot).catch(()=>{});await this.refreshAfterCommit();break;
         }
         case 'open':this.assertIdle();this.root=resolve(String(data.path));this.project=await this.store.open(this.root);this.task=null;await this.recoverTask();await this.refreshAfterCommit();break;
-        case 'save':{if(this.task?.status==='running'&&this.task.kind!=='export')this.assertIdle();const {project}=this.required();if(!data.project||data.project.id!==project.id)throw new Error('项目已切换，请刷新后重试');const next=structuredClone(data.project) as VideoProject;this.fitAudio(next);await this.persist({...next,outputs:project.outputs}, {},'保存工程');break;}
+        case 'save':{if(this.task?.status==='running'&&this.task.kind!=='export')this.assertIdle();const {project}=this.required();if(!data.project||data.project.id!==project.id)throw new Error('项目已切换，请刷新后重试');const next=structuredClone(data.project) as VideoProject;assertOrdinaryProjectSave(project,next);next.productionPolicy=structuredClone(project.productionPolicy);next.schemaVersion=3;for(const key of PROTECTED_EXTENSIONS)if(project.extensions&&Object.prototype.hasOwnProperty.call(project.extensions,key))next.extensions[key]=project.extensions[key];this.fitAudio(next);await this.persist({...next,outputs:project.outputs}, {},'保存工程');break;}
+        case 'production.set':{this.assertIdle();const mode=data.mode;if(mode!=='code_animation'&&mode!=='model_video'&&mode!=='hybrid')throw new Error('请选择代码动画、模型视频或混合制作');const next=structuredClone(this.required().project);next.schemaVersion=3;next.productionPolicy={version:1,decisionId:randomUUID(),mode,allowGeneratedImages:data.allowGeneratedImages===true,allowImportedVideo:data.allowImportedVideo===true,...(mode==='hybrid'?{baseMode:data.baseMode==='model_video'?'model_video':'code_animation'}:{})};await this.persist(next,{},'确认制作模式');break;}
         case 'apply':await this.apply(data);break;
         case 'import':{this.assertIdle();const {root,project}=this.required();const asset=await this.store.importAsset(root,data,this.settings);const next=structuredClone(project);next.assets.push(asset);next.graph.positions[asset.id]=[60,80+(next.assets.length-1)*180];await this.persist(next,{},'导入素材');break;}
         case 'video.clip.save':{
@@ -367,7 +377,7 @@ export class StudioService {
             }
           },data.shotId,this.recordedRequest('generate',data),data._retryOf);break;
         }
-        case 'export':{const {root,project}=this.required();compileSpec(project);const snapshot=structuredClone(project);await this.start('export',async(signal,task)=>{const result=await this.renderer.export(root,snapshot,this.settings,signal,(p,m)=>this.progress(p,m));signal.throwIfAborted();await this.enqueue(async()=>{signal.throwIfAborted();const current=structuredClone(this.required().project);current.outputs.push(result);await this.persist(current,{},'导出成片记录');task.outputId=result.id;if(!result.url&&this.previewUrl)result.url=new URL(relative(root,result.path).split('/').map(encodeURIComponent).join('/'),this.previewUrl).href;});},undefined,this.recordedRequest('export',data),data._retryOf);break;}
+        case 'export':{const {root,project}=this.required();assertCanExport(project);compileSpec(project);const snapshot=structuredClone(project);await this.start('export',async(signal,task)=>{const result=await this.renderer.export(root,snapshot,this.settings,signal,(p,m)=>this.progress(p,m));signal.throwIfAborted();await this.enqueue(async()=>{signal.throwIfAborted();const current=structuredClone(this.required().project);current.outputs.push(result);await this.persist(current,{},'导出成片记录');task.outputId=result.id;if(!result.url&&this.previewUrl)result.url=new URL(relative(root,result.path).split('/').map(encodeURIComponent).join('/'),this.previewUrl).href;});},undefined,this.recordedRequest('export',data),data._retryOf);break;}
         case 'history':return {ok:true,value:await this.store.history(this.required().root)};
         case 'undo':case 'redo':{this.assertIdle();this.project=await this.store.moveHistory(this.required().root,endpoint,data.expectedRevision);await this.refreshAfterCommit();break;}
         case 'rename':{this.assertIdle();if(typeof data.title!=='string'||!data.title.trim())throw new Error('工程名称不能为空');const next=structuredClone(this.required().project);next.title=data.title.trim();await this.persist(next,{},'重命名工程');break;}

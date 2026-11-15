@@ -31,12 +31,16 @@ export const ENDPOINTS=new Set(['catalog','current','create','open','save','impo
 for(const endpoint of ['models.list','models.connection.save','models.connection.remove','models.model.save','models.model.remove','models.role.bind','models.check','media.generate','media.list','media.get','media.retry','media.pause','media.cancel','media.apply','video.clip.save','video.clip.remove','video.clip.extract'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['workflows.run','workflows.list','workflows.get','workflows.retry','workflows.pause','workflows.apply'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['agent.start','agent.list','agent.get','agent.trace','agent.approve','agent.reject','agent.resume','agent.pause','agent.cancel','agent.tools','agent.capabilities','story.get','story.save','agent.qc','agent.qc.last','agent.ledger','agent.budget.set'])ENDPOINTS.add(endpoint);
-for(const endpoint of ['ui.preferences.get','ui.preferences.set'])ENDPOINTS.add(endpoint);
+for(const endpoint of ['ui.preferences.get','ui.preferences.set','production.set'])ENDPOINTS.add(endpoint);
 export class MemorySecrets implements SecretStore {
   private values=new Map<string,string>();
   async get(ref:string){return this.values.get(ref);}
   async set(ref:string,value:string){this.values.set(ref,value);}
   async delete(ref:string){this.values.delete(ref);}
+}
+export function rejectUnattendedProduction(endpoint:string):{ok:false;error:{code:string;message:string}}|undefined {
+  if(endpoint!=='production.set')return;
+  return {ok:false,error:{code:'PRODUCTION_CONFIRMATION_REQUIRED',message:'制作模式须由用户在工作台确认，智能体不能自行授权'}};
 }
 export async function createApplication(options:{dataDirectory:string;projectsDirectory?:string;credentials:SecretStore;reveal?:(path:string)=>Promise<void>;fetch?:typeof fetch;recover?:boolean;resumeRemoteTasks?:boolean;ownership?:OwnerLease;projectRootWaitMs?:number}){
   const projectRootWaitMs=options.projectRootWaitMs===undefined?0:options.projectRootWaitMs;
@@ -106,7 +110,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
     readSource:(id,shotId)=>backend.call('source',{projectId:id,shotId}),
     saveSource:(id,shotId,expectedRevision,source)=>backend.call('saveSource',{projectId:id,shotId,expectedRevision,source}),
     commit:(id,expectedRevision,project,sources,label)=>workflowPort.commit(id,expectedRevision,project,sources,label),
-    route:(endpoint,payload)=>route(endpoint,payload) as ReturnType<AgentPort['route']>,
+    route:(endpoint,payload)=>{const denied=rejectUnattendedProduction(endpoint);return denied?Promise.resolve(denied):route(endpoint,payload) as ReturnType<AgentPort['route']>;},
     capture:async(id,frame,signal)=>{const shot=await backend.workflowCapture(id,frame,signal) as unknown as {bytes?:Uint8Array;buffer?:Uint8Array;mime?:string;frame?:number;shotId:string};return {bytes:shot.bytes??shot.buffer??new Uint8Array(),mime:shot.mime??'image/png',frame:shot.frame??frame,shotId:shot.shotId??''};},
     voice:(id,shotId,text,signal,options)=>agentVoice(id,shotId,text,signal,options),
     capabilities:async()=>{
@@ -256,6 +260,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         case 'chat.send':value=await conversation.send(data as unknown as ChatInput);break;
         case 'chat.cancel':value=await conversation.cancel();break;
         case 'ui.preferences.get':value=await preferences.get();break;
+        case 'production.set':return backend.route(endpoint,payload);
         case 'ui.preferences.set':{
           if(data.theme!=='paper'&&data.theme!=='darkroom')throw new Error('未知外观');
           if(Object.keys(data).some(key=>key!=='theme'))throw new Error('外观偏好只接受 theme');

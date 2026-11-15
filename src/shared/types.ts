@@ -37,11 +37,15 @@ export interface ExportResult {
   id:string; path:string; url?:string; createdAt:string; revision:number;
   width:number; height:number; frameCount:number; duration:number; qa?:Record<string,unknown>;
 }
+export interface ProductionPolicy {
+  version:1; decisionId:string; mode:'unresolved'|'code_animation'|'model_video'|'hybrid';
+  allowGeneratedImages:boolean; allowImportedVideo:boolean; baseMode?:'code_animation'|'model_video';
+}
 export interface VideoProject {
-  schemaVersion:1|2; id:string; title:string; topic:string; targetDuration:number;
+  schemaVersion:1|2|3; id:string; title:string; topic:string; targetDuration:number;
   createdAt:string; updatedAt:string; revision:number; target:VideoTarget;
   assets:Asset[]; shots:Shot[]; shotOrder:string[]; graph:GraphLayout;
-  outputs:ExportResult[]; extensions:Record<string,unknown>;
+  outputs:ExportResult[]; extensions:Record<string,unknown>; productionPolicy?:ProductionPolicy;
   sessionIds?:string[];audioClips?:AudioClip[];videoClips?:VideoClip[];
 }
 export interface SpecShot extends Shot { startFrame:number; endFrame:number; assets:Asset[]; videoClip?:VideoClip }

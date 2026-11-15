@@ -31,7 +31,7 @@ export interface MediaRegistryPort {
   setUsageGuard?(guard:(connectionId:string,modelId?:string)=>boolean|Promise<boolean>):void;
 }
 export interface MediaProjectPort {
-  inspect(projectId:string):Promise<{revision:number;shotIds:string[]}>;
+  inspect(projectId:string):Promise<{revision:number;shotIds:string[];productionMode?:string;allowGeneratedImages?:boolean}>;
   /** Must enforce current project/shot asset membership and filesystem boundaries. */
   readImage(projectId:string,assetId:string,shotId?:string):Promise<{bytes:Uint8Array;mime:string}>;
   /** Must inspect actual media, not merely trust extension or provider content type. */

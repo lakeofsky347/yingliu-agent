@@ -56,6 +56,7 @@ async function scenario(firstFails: boolean, retry: boolean) {
   return withCliEnv(async () => {
     const created = await cli(['project', 'create', '--title', 'task association fixture']);
     assert.equal(created.code, EXIT.OK, created.out); const { id: projectId, root } = created.json.data;
+    assert.equal((await cli(['project', 'policy', projectId, '--mode', 'code_animation'])).code, EXIT.OK);
     let exportCalls = 0;
     VideoRenderer.prototype.export = async (root, project) => {
       exportCalls++; if (firstFails && exportCalls === 1) throw new Error('fixture: encoder failed');

@@ -13,7 +13,7 @@ const exec=promisify(execFile),env=detectEnvironment();
 
 test('video clips validate source ranges, one layer per shot and v1 migration preserves stable content',()=>{
   const project=createProject('迁移');project.schemaVersion=1;delete project.videoClips;
-  const migrated=migrateProject(project);assert.equal(migrated.schemaVersion,2);assert.equal(project.schemaVersion,1);assert.deepEqual(migrated.shots,project.shots);assert.equal(migrated.revision,project.revision);
+  const migrated=migrateProject(project);assert.equal(migrated.schemaVersion,3);assert.equal(migrated.productionPolicy?.mode,'unresolved');assert.equal(project.schemaVersion,1);assert.deepEqual(migrated.shots,project.shots);assert.equal(migrated.revision,project.revision);
   migrated.assets=[{id:'film',kind:'video',name:'片段',description:'',path:'assets/film.mp4',duration:2,width:160,height:90,fps:{num:24,den:1},hasAudio:false}];
   migrated.videoClips=[{id:'clip',shotId:migrated.shots[0]!.id,assetId:'film',trimStart:.25,trimEnd:1.5,speed:2,fit:'cover',audio:'mute'}];
   assert.equal(validateProject(migrated).ok,true);const spec=compileSpec(migrated);assert.equal(spec.shots[0]!.assets[0]!.id,'film');assert.equal(spec.shots[0]!.videoClip?.speed,2);
@@ -46,7 +46,7 @@ test('real video imports, random seeks, code overlays, mixed-shot export and mig
     const before=await readdir(join(created.root,'assets'));await assert.rejects(store.importAsset(created.root,{dataBase64:Buffer.from('not a video').toString('base64'),mime:'video/mp4'},env));assert.deepEqual(await readdir(join(created.root,'assets')),before);
     // Opening an old immutable snapshot migrates only its in-memory data and preserves history IDs.
     const state=JSON.parse(await readFile(join(created.root,'.studio/state.json'),'utf8')),file=join(created.root,'.studio/versions',state.current+'.json');const record=JSON.parse(await readFile(file,'utf8'));record.project.schemaVersion=1;delete record.project.videoClips;record.project.assets=[];await writeFile(file,JSON.stringify(record));
-    const migrated=await new ProjectStore({baseDirectory:directory}).open(created.root);assert.equal(migrated.schemaVersion,2);assert.equal(migrated.id,next.id);assert.equal(migrated.revision,redone.revision);assert.equal(JSON.parse(await readFile(file,'utf8')).project.schemaVersion,1);
+    const migrated=await new ProjectStore({baseDirectory:directory}).open(created.root);assert.equal(migrated.schemaVersion,3);assert.equal(migrated.productionPolicy?.mode,'unresolved');assert.equal(migrated.id,next.id);assert.equal(migrated.revision,redone.revision);assert.equal(JSON.parse(await readFile(file,'utf8')).project.schemaVersion,1);
   }finally{await renderer.close();await rm(directory,{recursive:true,force:true});}
 });
 

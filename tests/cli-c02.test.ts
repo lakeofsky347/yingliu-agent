@@ -25,7 +25,8 @@ test('C02: --mock never contacts real providers on any channel (existing non-moc
     const model = await call('models.model.save', { connectionId: conn.id, model: 'video-test', inputModalities: ['text'], outputModalities: ['video'] });
     await call('models.role.bind', { role: 'video', modelId: model.id });
     const created = await call('create', { blank: true, title: 'real' });
-    await call('media.generate', { projectId: created.project.id, expectedRevision: created.project.revision, operation: 'text-to-video', prompt: 'x' });
+    const decided = await call('production.set', { projectId: created.project.id, expectedRevision: created.project.revision, mode: 'model_video' });
+    await call('media.generate', { projectId: created.project.id, expectedRevision: decided.project.revision, operation: 'text-to-video', prompt: 'x' });
     for (let i = 0; i < 100 && !gateway.requests.some((r: { method: string }) => r.method === 'POST'); i++) await new Promise(r => setTimeout(r, 20));
     await app.dispose();
     const before = gateway.requests.length; assert.ok(before > 0, 'seeded task reached the provider');

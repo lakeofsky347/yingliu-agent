@@ -274,9 +274,10 @@ test('failed export retries only its recorded request and records current input 
   VideoRenderer.prototype.export=async(root,project)=>{calls++;if(calls===1)throw new Error('fixture: export worker failed');return {id:'fixture-export-'+calls,path:join(root,'exports','fixture-export-'+calls,'video.mp4'),revision:project.revision,createdAt:new Date().toISOString(),duration:30} as any;};
   try{
     const created=await f.backend.call<StudioSnapshot>('create',{title:'导出重试'}),id=created.project!.id;
-    await f.backend.call('export',{projectId:id,expectedRevision:0,apiKey:'must-not-be-journaled'});const failed=await finished(f.backend,id);assert.equal(failed.task!.status,'failed');assert.equal(failed.project!.outputs.length,0);
-    await f.backend.call('apply',{projectId:id,expectedRevision:0,title:'重试时的工程'});
-    await f.backend.call('retry',{projectId:id,taskId:failed.task!.id,expectedRevision:1});const retried=await finished(f.backend,id);assert.equal(retried.task!.status,'complete');assert.equal(retried.project!.revision,2);assert.equal(retried.project!.outputs.length,1);assert.equal(retried.project!.outputs[0]!.revision,1);assert.ok(retried.project!.outputs[0]!.url);
+    await f.backend.call('production.set',{projectId:id,expectedRevision:0,mode:'code_animation'});
+    await f.backend.call('export',{projectId:id,expectedRevision:1,apiKey:'must-not-be-journaled'});const failed=await finished(f.backend,id);assert.equal(failed.task!.status,'failed');assert.equal(failed.project!.outputs.length,0);
+    await f.backend.call('apply',{projectId:id,expectedRevision:1,title:'重试时的工程'});
+    await f.backend.call('retry',{projectId:id,taskId:failed.task!.id,expectedRevision:2});const retried=await finished(f.backend,id);assert.equal(retried.task!.status,'complete');assert.equal(retried.project!.revision,3);assert.equal(retried.project!.outputs.length,1);assert.equal(retried.project!.outputs[0]!.revision,2);assert.ok(retried.project!.outputs[0]!.url);
     const tasks=await f.backend.call<{tasks:any[]}>('tasks',{projectId:id});assert.ok(tasks.tasks.every(task=>task.request.endpoint==='export'&&Object.keys(task.request.payload).length===0));const retryTask=tasks.tasks.find(task=>task.retryOf===failed.task!.id);assert.equal(retryTask.outputId,retried.project!.outputs[0]!.id);assert.equal(JSON.parse(await readFile(retried.task!.logPath!,'utf8')).outputId,retryTask.outputId);assert.ok(!(await readFile(failed.task!.logPath!,'utf8')).includes('must-not-be-journaled'));
   }finally{VideoRenderer.prototype.export=previousExport;await f.close();}
 });
@@ -292,14 +293,15 @@ test('export registration keeps the input version current until editable content
   };
   try{
     const created=await f.backend.call<StudioSnapshot>('create',{title:'成片版本'}),id=created.project!.id;
-    await f.backend.call('export',{projectId:id,expectedRevision:0});
-    const first=await finished(f.backend,id);
-    assert.equal(first.project!.revision,1);
-    assert.deepEqual(first.currentExportIds,['fixture-export-1']);
+    await f.backend.call('production.set',{projectId:id,expectedRevision:0,mode:'code_animation'});
     await f.backend.call('export',{projectId:id,expectedRevision:1});
+    const first=await finished(f.backend,id);
+    assert.equal(first.project!.revision,2);
+    assert.deepEqual(first.currentExportIds,['fixture-export-1']);
+    await f.backend.call('export',{projectId:id,expectedRevision:2});
     const second=await finished(f.backend,id);
-    assert.equal(second.project!.revision,2);
-    assert.deepEqual(second.project!.outputs.map(output=>output.revision),[0,1]);
+    assert.equal(second.project!.revision,3);
+    assert.deepEqual(second.project!.outputs.map(output=>output.revision),[1,2]);
     assert.deepEqual(second.currentExportIds,['fixture-export-1','fixture-export-2']);
 
     await f.backend.dispose();
@@ -307,18 +309,18 @@ test('export registration keeps the input version current until editable content
     try{
       const reopened=await restarted.call<StudioSnapshot>('current',{projectId:id});
       assert.deepEqual(reopened.currentExportIds,second.currentExportIds);
-      await restarted.call('export',{projectId:id,expectedRevision:2});
-      const edited=await restarted.call<StudioSnapshot>('save',{projectId:id,expectedRevision:2,project:{...reopened.project!,title:'渲染中编辑'}});
+      await restarted.call('export',{projectId:id,expectedRevision:3});
+      const edited=await restarted.call<StudioSnapshot>('save',{projectId:id,expectedRevision:3,project:{...reopened.project!,title:'渲染中编辑'}});
       assert.deepEqual(edited.currentExportIds,[]);
       releaseExport();
       const third=await finished(restarted,id);
-      assert.equal(third.project!.outputs.at(-1)?.revision,2);
+      assert.equal(third.project!.outputs.at(-1)?.revision,3);
       assert.deepEqual(third.currentExportIds,[]);
 
-      await restarted.call('export',{projectId:id,expectedRevision:4});
+      await restarted.call('export',{projectId:id,expectedRevision:5});
       const fourth=await finished(restarted,id);
       assert.deepEqual(fourth.currentExportIds,['fixture-export-4']);
-      const withSource=await restarted.call<StudioSnapshot>('saveSource',{projectId:id,expectedRevision:5,shotId:created.project!.shots[0]!.id,source:{...defaultSceneSource(),html:'<div>只修改源码</div>'}});
+      const withSource=await restarted.call<StudioSnapshot>('saveSource',{projectId:id,expectedRevision:6,shotId:created.project!.shots[0]!.id,source:{...defaultSceneSource(),html:'<div>只修改源码</div>'}});
       assert.deepEqual(withSource.currentExportIds,[]);
     }finally{releaseExport();await restarted.dispose();}
   }finally{VideoRenderer.prototype.export=previousExport;await f.close();}

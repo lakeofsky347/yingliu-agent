@@ -45,9 +45,10 @@ test('application model routes return editable entities; generated media uses CA
     const model=await f.call<ModelDefinition>('models.model.save',{connectionId:connection.id,model:'image-test',name:'图片',inputModalities:['text'],outputModalities:['image'],parameters:{}});assert.ok(model.id);
     await f.call('models.role.bind',{role:'image',modelId:model.id});
     const created=await f.call<StudioSnapshot>('create',{title:'媒体事务'}),project=created.project!;
-    const task=await f.call<MediaTask>('media.generate',{projectId:project.id,shotId:project.shots[0]!.id,expectedRevision:project.revision,operation:'text-to-image',prompt:'蓝色背景'});
+    const decided=await f.call<StudioSnapshot>('production.set',{projectId:project.id,expectedRevision:project.revision,mode:'code_animation',allowGeneratedImages:true});
+    const task=await f.call<MediaTask>('media.generate',{projectId:project.id,shotId:project.shots[0]!.id,expectedRevision:decided.project!.revision,operation:'text-to-image',prompt:'蓝色背景'});
     const ready=await until(()=>f.call<MediaTask>('media.get',{taskId:task.id}),value=>['ready','failed'].includes(value.phase));assert.equal(ready.phase,'ready',ready.error);
-    const saved=await f.call<StudioSnapshot>('save',{projectId:project.id,expectedRevision:project.revision,project:{...project,title:'用户最新标题'}});
+    const saved=await f.call<StudioSnapshot>('save',{projectId:project.id,expectedRevision:decided.project!.revision,project:{...decided.project!,title:'用户最新标题'}});
     await assert.rejects(f.call('media.apply',{taskId:task.id,expectedRevision:project.revision}),/版本/);
     const applied=await f.call<MediaTask>('media.apply',{taskId:task.id,expectedRevision:saved.project!.revision});assert.equal(applied.phase,'complete');
     const current=await f.call<StudioSnapshot>('current',{projectId:project.id});assert.equal(current.project!.title,'用户最新标题');assert.equal(current.project!.assets.length,1);assert.ok(current.project!.shots[0]!.assetIds.includes(applied.applied!.assetIds[0]!));

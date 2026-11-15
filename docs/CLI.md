@@ -56,6 +56,7 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 | `project create --title T [--topic T]` | `{id, title, root, revision}` |
 | `project list [--include-archived]` | `[{id, path, title, createdAt, updatedAt, archived?}]` |
 | `project get <id>` | `{project:VideoProject, root, task}` |
+| `project policy <id> --mode code_animation\|model_video\|hybrid [--allow-images] [--allow-imported-video]` | `{id, revision, productionPolicy}`。只由人确认制作模式，不读取密钥 |
 | `project export-zip <id> --out F` | `{name, path, size}`（.yingliu 包，含 agent/story、ledger、qc） |
 | `project import <F>` | `{id, title, root}`（新 ID；校验不通过时不会注册工程） |
 | `agent run --project ID --goal G [选项]` | Run（见下） |

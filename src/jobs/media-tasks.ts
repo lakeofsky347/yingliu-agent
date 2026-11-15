@@ -5,6 +5,7 @@ import {join,resolve,sep} from 'node:path';
 import {cancelVideo as gatewayCancel,generateImage as openaiImage,getVideo as gatewayGet,lookupVideo as gatewayLookup,submitVideo as gatewaySubmit,type AdapterContext,type AdapterInput} from '../models/adapters/media.ts';
 import {cancelTemplate,pollTemplate,resolveTemplate,submitTemplate} from '../models/adapters/template.ts';
 import type {RemoteJob as Job} from './contracts.ts';
+import {assertCanGenerateMedia} from '../core/production-policy.ts';
 // Protocol dispatch: images / video-gateway keep their native adapters; async-task uses the configurable template adapter.
 const outputOf=(operation:string):'image'|'video'=>operation==='text-to-image'?'image':'video';
 async function generateImage(context:AdapterContext,input:AdapterInput):Promise<Job>{return context.connection.protocol==='async-task'?submitAsync(context,input):openaiImage(context,input);}
@@ -69,6 +70,7 @@ export class MediaTaskService {
       }
     }
     const project=await this.projects.inspect(input.projectId);if(!Number.isSafeInteger(input.expectedRevision)||input.expectedRevision!==project.revision)throw Object.assign(new Error('工程版本已变化，请刷新后生成'),{code:'REVISION_CONFLICT'});
+    if(project.productionMode)assertCanGenerateMedia({productionPolicy:{version:1,decisionId:'checked',mode:project.productionMode as 'unresolved'|'code_animation'|'model_video'|'hybrid',allowGeneratedImages:project.allowGeneratedImages===true,allowImportedVideo:false}},input.operation);
     if(input.shotId&&!project.shotIds.includes(input.shotId))throw new Error('生成目标镜头不存在');
     const resolved=await this.registry.resolve({role:input.operation==='text-to-image'?'image':'video',...(input.modelId?{modelId:input.modelId}:{}),...(input.connectionId?{connectionId:input.connectionId}:{})});
     const release=this.registry.acquire?.(resolved.connection.id,resolved.model.id);try {
