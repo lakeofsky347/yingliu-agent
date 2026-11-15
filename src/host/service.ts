@@ -18,6 +18,7 @@ import {defaultTtsSettings,validateTtsSettings} from '../shared/tts-capability.t
 import {assertCanExport,assertOrdinaryProjectSave,PROTECTED_EXTENSIONS} from '../core/production-policy.ts';
 import {approveDirectorDocument,assertDraftBase,draftFromStory,readDirectorDocument} from '../director/document.ts';
 import {localExportQuality} from '../workflows/local-quality.ts';
+import {replaceFile} from '../agent/durable-file.ts';
 import {synthesize} from '../agent/synth.ts';
 import type {Story} from '../agent/story.ts';
 
@@ -216,10 +217,10 @@ export class StudioService {
   }
   private async writeTaskJournal(root:string,task:RecordedTask):Promise<void>{
     const folder=await projectPath(root,'.studio/tasks');await mkdir(folder,{recursive:true});
-    const file=await projectPath(root,`.studio/tasks/${task.id}.json`),temporary=file+'.tmp';
+    const file=await projectPath(root,`.studio/tasks/${task.id}.json`);
     task.logPath=file;task.message=await this.redact(task.message);if(task.error)task.error=await this.redact(task.error);
     if(task.request){task.request=this.recordedRequest(task.request.endpoint,task.request.payload);if(task.request)for(const key of Object.keys(task.request.payload))task.request.payload[key]=await this.redact(task.request.payload[key]!);}
-    await writeFile(temporary,JSON.stringify(task,null,2)+'\n');await rename(temporary,file);
+    await replaceFile(file,JSON.stringify(task,null,2)+'\n');
   }
   private recordedRequest(endpoint:string,data:any):TaskRequest|undefined{
     if(!data||typeof data!=='object'||Array.isArray(data))return;
