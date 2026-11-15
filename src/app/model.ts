@@ -60,6 +60,18 @@ function turns(messages:unknown[],allowImages=false):ModelMessage[]{
   });
 }
 function finishReason(reason:unknown){return reason==='stop'?{kind:'stop'}:reason==='length'?{kind:'max-tokens'}:{kind:'failure',failure:{message:`模型未正常结束：${String(reason??'缺少完成原因')}`}};}
+const SCENE_OUTPUT_TOKENS=16384;
+/** Model parameters omit maxTokens until the user sets one. Scene code may then use up to 32768; an explicit setting stays the ceiling. */
+export function outputTokenBudget(configured:unknown,requested:number):number {
+  const ceiling=typeof configured==='number'&&Number.isFinite(configured)?Math.max(256,Math.min(32768,Math.floor(configured))):32768;
+  return Math.max(256,Math.min(ceiling,Math.floor(requested)));
+}
+function modelText(record:Record<string,unknown>):string {
+  const content=typeof record.content==='string'?record.content:'';
+  const reasoning=typeof record.reasoning_content==='string'?record.reasoning_content:'';
+  return content||reasoning;
+}
+function lengthError(limit:number){return new Error(`模型输出因长度截断而不完整（输出上限 ${limit}）。请缩小修改范围后重试。`);}
 
 /** Configuration is local to this app; only the injected SecretStore handles keys. */
 export class ProviderManager {
@@ -162,12 +174,24 @@ export class ProviderManager {
   };}
   /** Resolve a role or explicit route once per request; no credentials enter returned metadata. */
   async complete(messages:ModelMessage[],system:string,signal:AbortSignal,maxTokens?:number,selection:ModelSelection='director'):Promise<string>{
-    await this.initialize();const resolved=await this.registry.resolve(selection);let result='',stopped=false;
-    for await(const chunk of this.stream({provider:resolved.connection.id,model:resolved.model.model,messages,system,maxTokens:maxTokens??Number(resolved.model.parameters.maxTokens??DEFAULT.maxTokens),sessionId:'app-director',signal})){
-      if(chunk.type==='text-delta')result+=chunk.text??'';
-      if(chunk.type==='finish'){if(chunk.reason?.kind!=='stop')throw new Error(chunk.reason?.failure?.message??'模型输出不完整，请缩小修改范围');stopped=true;}
+    await this.initialize();const resolved=await this.registry.resolve(selection);
+    const configured=resolved.model.parameters.maxTokens;
+    const scene=selection==='scene'||typeof selection==='object'&&selection.role==='scene';
+    let limit=outputTokenBudget(configured,maxTokens??(typeof configured==='number'?configured:scene?SCENE_OUTPUT_TOKENS:DEFAULT.maxTokens??7000));
+    let raised=false;
+    const key=await this.registry.credential(resolved.connection);
+    for(;;){
+      let result='',stopped=false,truncated=false;
+      for await(const chunk of this.stream({provider:resolved.connection.id,model:resolved.model.model,messages,system,maxTokens:limit,sessionId:'app-director',signal})){
+        if(chunk.type==='text-delta')result+=chunk.text??'';
+        if(chunk.type==='finish'){if(chunk.reason?.kind==='max-tokens')truncated=true;else if(chunk.reason?.kind!=='stop')throw new Error(chunk.reason?.failure?.message??'模型输出不完整，请缩小修改范围');else stopped=true;}
+      }
+      const ceiling=outputTokenBudget(configured,32768);
+      if(truncated&&scene&&!raised&&limit<ceiling){raised=true;limit=Math.min(ceiling,Math.max(limit*2,SCENE_OUTPUT_TOKENS));continue;}
+      if(truncated)throw lengthError(limit);
+      if(!stopped||!result.trim())throw new Error('模型没有返回完整文本');
+      return key?result.split(key).join('[redacted]'):result;
     }
-    if(!stopped||!result.trim())throw new Error('模型没有返回完整文本');const key=await this.registry.credential(resolved.connection);return key?result.split(key).join('[redacted]'):result;
   }
   fixtureEnabled():boolean{return !!this.options.allowFixtures;}
   private async *stream(options:StreamOptions):ReturnType<ProviderHost['stream']>{
@@ -195,21 +219,22 @@ export class ProviderManager {
     if(images>config.maxVisionImages!||imageBytes>config.maxVisionBytes!)throw new Error('模型图片数量或总字节超过配置上限');
     for(const input of imageInputs){const metadata=imageMetadata(input.buffer);if(metadata.mime!==input.mime||metadata.width<1||metadata.height<1||Math.max(metadata.width,metadata.height)>config.maxVisionDimension!||metadata.width*metadata.height>16_777_216)throw new Error('模型图片实际格式或像素尺寸超出配置上限');}
     const response=await (this.options.fetch??fetch)(openaiCompatibleRoot(config.baseUrl)+'/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',...(key?{Authorization:`Bearer ${key}`}:{})},signal,
-      body:JSON.stringify({model:config.model,messages:[{role:'system',content:options.system},...normalized],max_tokens:Math.max(256,Math.min(config.maxTokens!,options.maxTokens)),temperature:config.temperature,stream:true})});
+      body:JSON.stringify({model:config.model,messages:[{role:'system',content:options.system},...normalized],max_tokens:outputTokenBudget(resolved.model.parameters.maxTokens,options.maxTokens),temperature:config.temperature,stream:true})});
     if(!response.ok)throw new Error(`模型请求失败（HTTP ${response.status}）：${redact((await response.text()).slice(0,400))}`);
     if(!response.headers.get('content-type')?.includes('text/event-stream')){
-      const data=object(await response.json()),choice=object(Array.isArray(data.choices)?data.choices[0]:undefined),message=object(choice.message);
-      if(typeof message.content==='string')yield {type:'text-delta',text:redact(message.content)};yield {type:'finish',reason:finishReason(choice.finish_reason)};return;
+      const data=object(await response.json()),choice=object(Array.isArray(data.choices)?data.choices[0]:undefined),message=object(choice.message),text=modelText(message);
+      if(text)yield {type:'text-delta',text:redact(text)};yield {type:'finish',reason:finishReason(choice.finish_reason)};return;
     }
     if(!response.body)throw new Error('模型流式响应缺少内容');
-    const reader=response.body.getReader(),decoder=new TextDecoder();let pending='',finished=false,characters=0;
+    const reader=response.body.getReader(),decoder=new TextDecoder();let pending='',finished=false,characters=0,reasoning='';
     try{while(true){signal.throwIfAborted();const next=await reader.read();pending+=decoder.decode(next.value,{stream:!next.done});
       const lines=pending.split('\n');pending=next.done?'':lines.pop()??'';if(next.done&&pending)lines.push(pending);
       for(const line of lines){if(!line.startsWith('data:'))continue;const raw=line.slice(5).trim();if(!raw||raw==='[DONE]')continue;
         const data=object(JSON.parse(raw));if(data.error)throw new Error(String(object(data.error).message??'供应商流式错误'));
         const choice=object(Array.isArray(data.choices)?data.choices[0]:undefined),delta=object(choice.delta);
+        if(typeof delta.reasoning_content==='string')reasoning+=delta.reasoning_content;
         if(typeof delta.content==='string'){characters+=delta.content.length;if(characters>400000)throw new Error('模型响应超出应用上限');yield {type:'text-delta',text:delta.content};}
-        if(choice.finish_reason!==null&&choice.finish_reason!==undefined){finished=true;yield {type:'finish',reason:finishReason(choice.finish_reason)};}
+        if(choice.finish_reason!==null&&choice.finish_reason!==undefined){if(!characters&&reasoning){characters+=reasoning.length;if(characters>400000)throw new Error('模型响应超出应用上限');yield {type:'text-delta',text:reasoning};}finished=true;yield {type:'finish',reason:finishReason(choice.finish_reason)};}
       }
       if(next.done)break;
     }}finally{await reader.cancel().catch(()=>{});reader.releaseLock();}

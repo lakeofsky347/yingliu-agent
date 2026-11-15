@@ -91,7 +91,8 @@ export class AppSceneGenerator implements SceneGenerator {
       if(chunk.type==='text-delta'){output+=chunk.text??'';this.onText(output);}
       if(chunk.type==='finish'){
         if(chunk.reason?.kind==='stop')stopped=true;
-        else throw new Error(chunk.reason?.failure?.message??(chunk.reason?.kind==='max-tokens'?'模型输出达到上限，请缩小修改范围后重试':'模型生成未完成'));
+        else if(chunk.reason?.kind==='max-tokens')throw new Error(`模型输出因长度截断而不完整（输出上限 ${maxTokens}）。请缩小修改范围后重试。`);
+        else throw new Error(chunk.reason?.failure?.message??'模型生成未完成');
       }
     }
     signal.throwIfAborted();if(!stopped||!output.trim())throw new Error('模型没有返回完整结果');return output;
@@ -106,11 +107,14 @@ export class AppSceneGenerator implements SceneGenerator {
   }
   async scene(project:VideoProject,shot:Shot,route:ModelRoute,signal:AbortSignal,current?:SceneSource,instruction?:string):Promise<SceneSource>{
     const spec=compileSpec(project);
-    const raw=await this.ask(project,route,signal,{task:current?'modify-scene':'generate-scene',video:{title:spec.title,topic:spec.topic,target:spec.target,durationSeconds:spec.durationSeconds},shot,
+    const input={task:current?'modify-scene':'generate-scene',video:{title:spec.title,topic:spec.topic,target:spec.target,durationSeconds:spec.durationSeconds},shot,
       assets:project.assets.filter(a=>shot.assetIds.includes(a.id)||shot.referenceIds.includes(a.id)),current,instruction,
       runtime:`html 是放入 ctx.root 的静态初始 HTML；css 为本镜头 CSS，使用局部 class。js 是ES模块，导出 async function ready(ctx)（可省略）和 function render(ctx)。ctx={root,canvas,ctx2d,params,assets:[{id,name,kind,text,url,image}],frame,localFrame,progress(0..1),time(镜头局部秒),duration(秒),width,height,seed,helpers}。canvas大小为目标尺寸，root覆盖画布。render必须每次按给定时间重设画面，支持重复和倒序，不能靠Date.now/setInterval/动画自播放积累状态。读取ctx.params.text/subtitle/颜色/图片位置缩放/fontSize/motion等；图片用ctx.assets里image或url；参考素材可用于构思。params的位置为百分比。可写DOM或Canvas2D的新布局与动作；画面中文字清晰，边距合理。不要 import 外部包、访问网络、写文件。最终JSON有html/css/js三个字符串，可额外带shotPatch对象。`,
       editRules:'若修改涉及屏幕文字、颜色、位置、时长、标题或素材，额外返回 shotPatch（只写需要改变的 Shot 字段：title,intent,composition,action,durationFrames,assetIds,referenceIds,transition,params）；时长用当前fps换算整数帧。源码读取修改后的参数，不把用户文字或图片位置写死。不要改变镜头id或sourcePath。全片修改会逐镜头调用。',
-      output:{html:'<div class="scene-title"></div>',css:'.scene-title { position:absolute; }',js:'export function render(ctx) { /* 按帧更新画面 */ }',shotPatch:{}}});
+      output:{html:'<div class="scene-title"></div>',css:'.scene-title { position:absolute; }',js:'export function render(ctx) { /* 按帧更新画面 */ }',shotPatch:{}}};
+    let raw:string;
+    try{raw=await this.ask(project,route,signal,input,16384);}
+    catch(error){if(!/长度截断/.test(error instanceof Error?error.message:String(error)))throw error;raw=await this.ask(project,route,signal,input,32768);}
     return parseSceneSource(raw);
   }
 }

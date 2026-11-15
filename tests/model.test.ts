@@ -46,7 +46,7 @@ test('provider rejects truncated responses and never fetches without an app key'
   const directory=await mkdtemp(join(tmpdir(),'yingliu-truncated-'));const originalFetch=globalThis.fetch;let calls=0;
   try{const providers=new ProviderManager(directory,new MemorySecrets());globalThis.fetch=async()=>{calls++;return Response.json({choices:[{message:{content:'unfinished'},finish_reason:'length'}]});};
     await assert.rejects(providers.complete([{role:'user',content:'x'}],'system',new AbortController().signal),/API Key/);assert.equal(calls,0);
-    await providers.save({apiKey:'fixture-only'});await assert.rejects(providers.complete([{role:'user',content:'x'}],'system',new AbortController().signal),/不完整/);assert.equal(calls,1);
+    await providers.save({apiKey:'fixture-only'});await assert.rejects(providers.complete([{role:'user',content:'x'}],'system',new AbortController().signal),/长度截断/);assert.equal(calls,1);
   }finally{globalThis.fetch=originalFetch;await rm(directory,{recursive:true,force:true});}
 });
 
@@ -67,4 +67,21 @@ test('the transport validates real image dimensions for workflow and direct visi
     await assert.rejects(providers.complete([{role:'user',content:[{type:'image_url',image_url:{url:'data:image/png;base64,'+png.toString('base64')}}]}],'检查关键帧',new AbortController().signal,undefined,'vision'),/像素尺寸/);assert.equal(requests,0);
     await assert.rejects(providers.complete([{role:'user',content:[{type:'image_url',image_url:{url:'data:image/png;base64,AA=='}}]}],'检查关键帧',new AbortController().signal,undefined,'vision'),/格式|尺寸/);assert.equal(requests,0);
   }finally{await rm(directory,{recursive:true,force:true});}
+});
+
+test('scene completions without maxTokens start at 16384, retry once at 32768, and accept reasoning_content',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'yingliu-scene-tokens-'));const originalFetch=globalThis.fetch;const bodies:{max_tokens:number}[]=[];
+  try{const providers=new ProviderManager(directory,new MemorySecrets());await providers.save({apiKey:'fixture-only',baseUrl:'https://provider.example/v1',model:'other-model'});
+    const saved=await providers.registry.saveModel({connectionId:'custom',model:'deepseek-flash',name:'flash',parameters:{}});await providers.registry.bindRole('scene',saved.id);
+    let step=0;
+    globalThis.fetch=async(_url,options)=>{const body=JSON.parse(String(options?.body));bodies.push(body);step++;
+      if(step===1)return Response.json({choices:[{message:{content:'{"html":"'},finish_reason:'length'}]});
+      if(step===2)return Response.json({choices:[{message:{content:null,reasoning_content:'{"html":"<a></a>","css":"a{}","js":"export function render(ctx){}"}'},finish_reason:'stop'}]});
+      return Response.json({choices:[{message:{content:'should-not-run'},finish_reason:'stop'}]});
+    };
+    const result=await providers.complete([{role:'user',content:'写镜头'}],'system',new AbortController().signal,undefined,'scene');
+    assert.equal(result,'{"html":"<a></a>","css":"a{}","js":"export function render(ctx){}"}');
+    assert.deepEqual(bodies.map(body=>body.max_tokens),[16384,32768]);
+    assert.equal(step,2);
+  }finally{globalThis.fetch=originalFetch;await rm(directory,{recursive:true,force:true});}
 });

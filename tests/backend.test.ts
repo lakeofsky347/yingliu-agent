@@ -142,6 +142,17 @@ test('scene generator sends text metadata and an explicit no-image-pixels bounda
   assert.ok(!content[0]!.text.includes('data:image'));
 });
 
+test('scene generation retries once at a higher limit after length truncation',async()=>{
+  const limits:number[]=[];let calls=0;
+  const textProvider:ProviderHost={
+    listProviders:()=>[],listModels:async()=>[{id:'deepseek-flash',name:'flash',inputModalities:['text']}],
+    async *stream(options){limits.push(options.maxTokens);calls++;if(calls===1){yield {type:'text-delta',text:'{'};yield {type:'finish',reason:{kind:'max-tokens'}};return;}yield {type:'text-delta',text:JSON.stringify({html:'<a></a>',css:'a{}',js:'export function render(ctx){}'})};yield {type:'finish',reason:{kind:'stop'}};},
+  };
+  const project=createProject('镜头');
+  const source=await new AppSceneGenerator({llm:textProvider,credentials:memoryCredentials()}).scene(project,project.shots[0]!,{provider:'fixture',model:'deepseek-flash'},new AbortController().signal);
+  assert.equal(source.html,'<a></a>');assert.deepEqual(limits,[16384,32768]);
+});
+
 
 async function finished(backend:AppBackend,projectId:string):Promise<StudioSnapshot>{
   const deadline=performance.now()+10_000;

@@ -131,12 +131,13 @@ export class MediaTaskService {
   }
   private async run(task:MediaTask,signal:AbortSignal):Promise<void>{try{
     signal.throwIfAborted();let remote:RemoteJob|null=null;
+    const savedDownload=task.remoteStatus==='succeeded'&&!!task.artifacts?.length&&(task.phase==='downloading'||task.phase==='validating');
     if(task.phase==='pending'){
       const inputs=await this.inputs(task),context=await this.context(task,signal);task.phase='submitting';task.metrics??={};task.metrics.submittedAt??=new Date().toISOString();task.message='正在提交生成请求';await this.persist(task);signal.throwIfAborted();
       const input:AdapterInput={clientRequestId:task.clientRequestId,model:task.model,operation:task.operation,prompt:task.prompt,inputs,parameters:task.parameters};
       remote=task.operation==='text-to-image'?await generateImage(context,input):await submitVideo(context,input);
       this.applyRemote(task,remote);await this.persist(task);
-    }else if(!this.canReuseSuccessfulResult(task)&&(task.operation!=='text-to-image'||task.connection.protocol==='async-task'&&task.remoteJobId)){
+    }else if(!savedDownload&&!this.canReuseSuccessfulResult(task)&&(task.operation!=='text-to-image'||task.connection.protocol==='async-task'&&task.remoteJobId)){
       remote=task.remoteJobId?await getVideo(await this.context(task,signal),task.remoteJobId):await lookupVideo(await this.context(task,signal),task.clientRequestId);
       if(!remote){task.phase='unknown';task.observation='paused';task.message='未查到提交结果；没有重新发起计费请求';await this.persist(task);return;}this.applyRemote(task,remote);await this.persist(task);
     }else if(!task.artifacts?.length){task.phase='unknown';task.observation='paused';task.message='生图提交结果未确认，兼容接口不支持查单；请核对服务记录';await this.persist(task);return;}
@@ -144,9 +145,9 @@ export class MediaTaskService {
       await wait(this.options.pollIntervalMs??1500,signal);remote=await getVideo(await this.context(task,signal),task.remoteJobId!);this.applyRemote(task,remote);await this.persist(task);
     }
     signal.throwIfAborted();if(task.remoteStatus!=='succeeded')return;
-    let total=0;const files=[];for(let index=0;index<(task.artifacts?.length??0);index++){
+    let total=0;const files=[];const token=task.artifacts?.some(item=>item.url)?await this.registry.credential(task.connection).catch(()=>undefined):undefined;for(let index=0;index<(task.artifacts?.length??0);index++){
       task.phase='downloading';task.message='下载生成素材 '+(index+1);await this.persist(task);
-      const file=await downloadArtifact(task.artifacts![index]!,join(this.directory,task.id),index,{signal,fetch:this.options.fetch,maxBytes:Math.min(this.options.maxArtifactBytes??512*1024*1024,(this.options.maxTaskBytes??1024*1024*1024)-total),expected:task.operation==='text-to-image'?'image':'video'});total+=file.bytes;
+      const file=await downloadArtifact(task.artifacts![index]!,join(this.directory,task.id),index,{signal,fetch:this.options.fetch,maxBytes:Math.min(this.options.maxArtifactBytes??512*1024*1024,(this.options.maxTaskBytes??1024*1024*1024)-total),expected:task.operation==='text-to-image'?'image':'video',...(token?{credential:{baseUrl:task.connection.baseUrl,token}}:{})});total+=file.bytes;
       task.phase='validating';task.message='检查真实媒体格式';await this.persist(task);const metadata=await this.projects.validateArtifact(file.path,file.mimeType,task.projectId,signal);signal.throwIfAborted();files.push({...file,metadata});
     }
     if(!files.length)throw new Error('生成结果没有可采用素材');task.files=files;task.metrics??={};task.metrics.readyAt=new Date().toISOString();task.metrics.downloadBytes=total;if(task.metrics.remoteCompletedAt)task.metrics.downloadMs=Date.parse(task.metrics.readyAt)-Date.parse(task.metrics.remoteCompletedAt);task.phase='ready';task.progress=1;task.message='素材已就绪，等待采用';task.observation='paused';delete task.error;await this.persist(task);

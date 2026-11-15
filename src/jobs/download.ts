@@ -14,14 +14,26 @@ export function mediaSignature(bytes:Uint8Array):string|undefined {
   return undefined;
 }
 function artifactUrl(raw:string):URL {const url=new URL(raw);if(!['http:','https:'].includes(url.protocol)||url.username||url.password)throw new Error('媒体产物地址必须是无内嵌凭据的 HTTP(S) URL');return url;}
-/** Artifact requests deliberately never carry provider credentials, including across redirects. */
-export async function downloadArtifact(artifact:MediaArtifact,directory:string,index:number,options:{signal:AbortSignal;fetch?:typeof fetch;maxBytes:number;expected:'image'|'video'}):Promise<Omit<GeneratedFile,'metadata'>> {
+/** Same origin, and the artifact path stays under the connection base path (for example {base}/videos/{id}/content). */
+export function artifactUsesConnectionAuth(artifactUrlValue:string,baseUrl:string):boolean {
+  let artifact:URL,base:URL;
+  try{artifact=new URL(artifactUrlValue);base=new URL(baseUrl);}catch{return false;}
+  if(artifact.origin!==base.origin||artifact.username||artifact.password)return false;
+  const prefix=base.pathname.replace(/\/+$/,'');
+  return !prefix?artifact.pathname.startsWith('/'):artifact.pathname===prefix||artifact.pathname.startsWith(prefix+'/');
+}
+function withoutToken(error:unknown,token?:string):Error {
+  const message=error instanceof Error?error.message:String(error);
+  return new Error(token?message.split(token).join('[redacted]'):message);
+}
+/** Send the bearer token only while the URL stays on the connection origin and under its path prefix. Redirects are checked again and drop the token when they leave. */
+export async function downloadArtifact(artifact:MediaArtifact,directory:string,index:number,options:{signal:AbortSignal;fetch?:typeof fetch;maxBytes:number;expected:'image'|'video';credential?:{baseUrl:string;token:string}}):Promise<Omit<GeneratedFile,'metadata'>> {
   await mkdir(directory,{recursive:true});const temporary=join(directory,randomUUID()+'.part');const handle=await open(temporary,'wx');const hash=createHash('sha256');let bytes=0,head=Buffer.alloc(0);let destination='';
   const write=async(chunk:Uint8Array)=>{options.signal.throwIfAborted();bytes+=chunk.byteLength;if(bytes>options.maxBytes)throw new Error('媒体产物超过配置的文件大小限制');if(head.length<64)head=Buffer.concat([head,chunk.subarray(0,64-head.length)]);hash.update(chunk);await handle.writeFile(chunk);};
   try {
     if(artifact.base64){if(artifact.base64.length>Math.ceil(options.maxBytes*4/3)+4)throw new Error('媒体产物超过配置的文件大小限制');for(let offset=0;offset<artifact.base64.length;offset+=65536)await write(Buffer.from(artifact.base64.slice(offset,offset+65536),'base64'));}
     else if(artifact.url){let url=artifactUrl(artifact.url),response:Response|undefined;
-      for(let redirects=0;redirects<6;redirects++){response=await (options.fetch??fetch)(url,{signal:options.signal,redirect:'manual'});if(response.status>=300&&response.status<400){const location=response.headers.get('location');await response.body?.cancel();if(!location)throw new Error('媒体下载重定向缺少地址');url=artifactUrl(new URL(location,url).href);continue;}break;}
+      for(let redirects=0;redirects<6;redirects++){const headers:Record<string,string>={};if(options.credential?.token&&artifactUsesConnectionAuth(url.href,options.credential.baseUrl))headers.Authorization='Bearer '+options.credential.token;response=await (options.fetch??fetch)(url,{signal:options.signal,redirect:'manual',headers});if(response.status>=300&&response.status<400){const location=response.headers.get('location');await response.body?.cancel();if(!location)throw new Error('媒体下载重定向缺少地址');url=artifactUrl(new URL(location,url).href);continue;}break;}
       if(!response?.ok||!response.body)throw new Error('媒体下载失败（HTTP '+(response?.status??'unknown')+'）');
       if(Number(response.headers.get('content-length'))>options.maxBytes){await response.body.cancel();throw new Error('媒体产物超过配置的文件大小限制');}
       const reader=response.body.getReader();try{while(true){const next=await reader.read();if(next.done)break;await write(next.value);}}finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
@@ -30,5 +42,5 @@ export async function downloadArtifact(artifact:MediaArtifact,directory:string,i
     const extension=({'image/png':'.png','image/jpeg':'.jpg','image/webp':'.webp','video/mp4':'.mp4','video/webm':'.webm'} as Record<string,string>)[mimeType]!;
     const digest=hash.digest('hex');destination=join(directory,String(index)+'-'+digest+extension);await handle.sync();await handle.close();await rename(temporary,destination);
     return {path:destination,mimeType,name:artifact.name?.slice(0,160)||'生成素材 '+(index+1)+extension,bytes,sha256:digest};
-  }catch(error){await handle.close().catch(()=>{});await rm(temporary,{force:true});throw error;}
+  }catch(error){await handle.close().catch(()=>{});await rm(temporary,{force:true});throw withoutToken(error,options.credential?.token);}
 }
