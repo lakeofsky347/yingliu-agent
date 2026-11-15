@@ -131,13 +131,12 @@ export class MediaTaskService {
   }
   private async run(task:MediaTask,signal:AbortSignal):Promise<void>{try{
     signal.throwIfAborted();let remote:RemoteJob|null=null;
-    const savedDownload=task.remoteStatus==='succeeded'&&!!task.artifacts?.length&&(task.phase==='downloading'||task.phase==='validating');
-    if(task.phase==='pending'){
+    if(task.phase==='pending'&&task.remoteStatus!=='succeeded'){
       const inputs=await this.inputs(task),context=await this.context(task,signal);task.phase='submitting';task.metrics??={};task.metrics.submittedAt??=new Date().toISOString();task.message='正在提交生成请求';await this.persist(task);signal.throwIfAborted();
       const input:AdapterInput={clientRequestId:task.clientRequestId,model:task.model,operation:task.operation,prompt:task.prompt,inputs,parameters:task.parameters};
       remote=task.operation==='text-to-image'?await generateImage(context,input):await submitVideo(context,input);
       this.applyRemote(task,remote);await this.persist(task);
-    }else if(!savedDownload&&!this.canReuseSuccessfulResult(task)&&(task.operation!=='text-to-image'||task.connection.protocol==='async-task'&&task.remoteJobId)){
+    }else if(!this.canReuseSuccessfulResult(task)&&(task.operation!=='text-to-image'||task.connection.protocol==='async-task'&&task.remoteJobId)){
       remote=task.remoteJobId?await getVideo(await this.context(task,signal),task.remoteJobId):await lookupVideo(await this.context(task,signal),task.clientRequestId);
       if(!remote){task.phase='unknown';task.observation='paused';task.message='未查到提交结果；没有重新发起计费请求';await this.persist(task);return;}this.applyRemote(task,remote);await this.persist(task);
     }else if(!task.artifacts?.length){task.phase='unknown';task.observation='paused';task.message='生图提交结果未确认，兼容接口不支持查单；请核对服务记录';await this.persist(task);return;}
@@ -159,7 +158,7 @@ export class MediaTaskService {
   }}
   private async redact(task:MediaTask,value:string):Promise<string>{try{const key=await this.registry.credential(task.connection);return (key?value.split(key).join('[redacted]'):value).slice(0,2000);}catch{return value.slice(0,2000);}}
   async recover():Promise<void>{await this.initialize();for(const task of this.tasks.values())if(!this.frozen.has(task.id)&&task.resumeOnStart!==false&&!terminal.has(task.phase)&&!['ready','applying'].includes(task.phase)){task.observation='active';if(task.phase==='unknown')task.phase='submitting';}this.schedule();}
-  async retry(taskId:string):Promise<MediaTask>{const task=await this.required(taskId);this.assertMutable(task);if(this.stopped)throw new Error('媒体任务服务正在关闭');const finishing=this.running.get(taskId);if(finishing){if(task.observation==='active')return this.public(task);await finishing.promise;}if(terminal.has(task.phase))throw new Error('已结束的生成不能重投；如需新结果请明确新建生成任务');if(task.phase==='ready')return this.public(task);task.observation='active';task.resumeOnStart=true;if(task.phase==='unknown')task.phase='submitting';delete task.error;task.message='恢复查询或素材获取';await this.persist(task);this.schedule();return this.public(task);}
+  async retry(taskId:string):Promise<MediaTask>{const task=await this.required(taskId);this.assertMutable(task);if(this.stopped)throw new Error('媒体任务服务正在关闭');const finishing=this.running.get(taskId);if(finishing){if(task.observation==='active')return this.public(task);await finishing.promise;}if(terminal.has(task.phase))throw new Error('已结束的生成不能重投；如需新结果请明确新建生成任务');if(task.phase==='ready')return this.public(task);task.observation='active';task.resumeOnStart=true;if(task.phase==='unknown'&&task.remoteStatus!=='succeeded')task.phase='submitting';delete task.error;task.message=task.remoteStatus==='succeeded'?'重新获取已生成的素材':'恢复查询或素材获取';await this.persist(task);this.schedule();return this.public(task);}
   async pause(taskId:string):Promise<MediaTask>{const task=await this.required(taskId);this.assertMutable(task);task.observation='paused';task.resumeOnStart=false;const running=this.running.get(taskId);running?.controller.abort(new Error('用户已停止本地等待'));await running?.promise;task.message=terminal.has(task.phase)||task.phase==='ready'?task.message:'已停止本地等待，云端任务可能仍在执行';await this.persist(task);return this.public(task);}
   async cancel(taskId:string):Promise<MediaTask>{const task=await this.required(taskId);this.assertMutable(task);await this.pause(taskId);if(task.remoteStatus==='succeeded'||terminal.has(task.phase)||task.phase==='ready')return this.public(task);
     task.cancelRequested=true;if(task.phase==='pending'&&!task.remoteJobId){task.phase='cancelled';task.message='已取消尚未提交的本地任务';await this.persist(task);return this.public(task);}if(task.operation==='text-to-image'&&task.connection.protocol!=='async-task'||!task.remoteJobId||task.model.parameters.supportsCancel===false){task.message='已停止等待；此任务尚不能确认云端取消';await this.persist(task);return this.public(task);}
