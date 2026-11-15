@@ -129,7 +129,7 @@ export class StudioController {
     if(this.state.pending)return;this.actionEpoch++;this.update({pending:true,error:this.state.conflict?this.state.error:'',notice:''});
     try{
       await this.flush();if(this.panelDrafts.size&&!['reveal','cancel'].includes(endpoint))throw new Error(this.unsavedMessage);if(this.sourceDraftDirty&&!['saveSource','restoreSource','reveal','environment','cancel'].includes(endpoint))throw new Error('前端源码尚未保存，请先在源码面板保存修改。');if(this.dirty)throw new Error(this.state.error||'项目尚未保存，请重试保存。');
-      const guard=['saveSource','restoreSource','apply','rename','undo','redo','retry','audio','import'].includes(endpoint)?{expectedRevision:this.serverRevision}:{};
+      const guard=['saveSource','restoreSource','apply','rename','undo','redo','retry','audio','audio.sfx','import','production.set','director.document.save','director.document.approve'].includes(endpoint)?{expectedRevision:this.serverRevision}:{};
       const request=['create','open','focus'].includes(endpoint)?payload:{projectId:this.state.snapshot?.project?.id,...guard,...payload as object};
       const snapshot=await this.api.call<StudioSnapshot>(endpoint,request);this.accept(snapshot,false);await this.refreshHistory();this.update({notice,conflict:false,error:''});
     }catch(error){this.update({error:message(error)});}finally{this.update({pending:false});}
