@@ -31,7 +31,7 @@ export const ENDPOINTS=new Set(['catalog','current','create','open','save','impo
 for(const endpoint of ['models.list','models.connection.save','models.connection.remove','models.model.save','models.model.remove','models.role.bind','models.check','media.generate','media.list','media.get','media.retry','media.pause','media.cancel','media.apply','video.clip.save','video.clip.remove','video.clip.extract'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['workflows.run','workflows.list','workflows.get','workflows.retry','workflows.pause','workflows.apply'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['agent.start','agent.list','agent.get','agent.trace','agent.approve','agent.reject','agent.resume','agent.pause','agent.cancel','agent.tools','agent.capabilities','story.get','story.save','agent.qc','agent.qc.last','agent.ledger','agent.budget.set'])ENDPOINTS.add(endpoint);
-for(const endpoint of ['ui.preferences.get','ui.preferences.set','production.set','director.document.get','director.document.save','director.document.approve','audio.sfx'])ENDPOINTS.add(endpoint);
+for(const endpoint of ['ui.preferences.get','ui.preferences.set','production.set','director.document.get','director.document.save','director.document.approve','audio.sfx','quality.check'])ENDPOINTS.add(endpoint);
 export class MemorySecrets implements SecretStore {
   private values=new Map<string,string>();
   async get(ref:string){return this.values.get(ref);}

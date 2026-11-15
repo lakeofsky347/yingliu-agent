@@ -46,3 +46,4 @@
 .vs-character{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px}.vs-character input{min-width:0;flex:1 1 90px}.vs-character select{flex:1 1 140px;max-height:56px}
 .vs-qc{padding-left:16px;margin:4px 0}.vs-qc .is-high{color:#dc2626}.vs-qc .is-medium{color:#d97706}
 .vs-muted{opacity:.7;font-size:12px}
+.yl-quality-report{margin:0 0 18px;padding-bottom:12px;border-bottom:1px solid var(--line,#e8e6dc)}.yl-quality-report li.is-fail{color:var(--danger,#c4452c)}.yl-quality-report li.is-pass{color:var(--muted,#5e5d59)}
