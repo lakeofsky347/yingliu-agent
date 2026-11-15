@@ -138,8 +138,8 @@ UI（React，单包）
   ui.preferences | projects | models | agent | jobs | workflows
         │
 编排
-  一个 AgentRuntime（讨论是只读模式；制作是工具循环）
-  WorkflowRunner 仅作为 run_workflow 的实现
+  一个 AgentRuntime（讨论是只读模式；制作默认走八阶段状态机）
+  阶段运行器仅作为 run_stage 的实现，一次一个阶段
         │
 ┌───────┼────────────┬──────────────┐
 文本 Provider   多模态 Provider   工具注册表
@@ -157,7 +157,7 @@ director/scene  vision + 图像块   风险等级 + 显式端口
 - **多模态端口**：`vision`，以及将来明确绑定到该端口的看图调用。未配置时 `visual_review` 降级为不上传像素的 `render_check`（与现在 `docs/AGENT.md` 一致）。
 - **生成端口**（生图 / 生视频 / 语音 / 音乐 / 音效）继续走注册表里的协议适配器，各自的 `credentialRef`，不复用文本或视觉的那两把钥匙。
 
-工具 / 插件层：工具是进程内注册表，不是 DSH 插件。每个工具声明风险、JSON Schema、以及它需要的端口方法。没有 `route(endpoint, payload)` 这种后门。
+工具 / 插件层：工具是进程内注册表，不是 DSH 插件。每个工具声明风险、JSON Schema、以及它需要的端口方法。没有 `route(endpoint, payload)` 这种后门。P3 的具体名单、阶段和批准规则在第 4 节，以调研报告第五节、第六节为草案并已按第 8 节拍板；不注册对话导演和插件的另一套工具名。插件 `video_media` 只留下两种行为：`retry` 不重新下单，`apply` 失败保留候选，分别挂在 `task_status` 和 `media_apply` 上。
 
 ### 2.2 目录草图（新仓库）
 
@@ -178,7 +178,7 @@ src/
     story.ts budget.ts
   projects/               Store、队列、归档、Hub
   jobs/                   媒体任务
-  workflows/              宏流程（仅被工具调用）
+  workflows/              阶段运行器（仅被 run_stage 调用）
   render/                 场景发布、CSP、FFmpeg
   api/                    端点表与 HTTP/IPC 适配
   ui/
@@ -318,6 +318,8 @@ export interface AgentTool {
 }
 ```
 
+P3 注册哪些名字、各属哪一阶段，见第 4 节的工具注册表。对话导演的 `video_project` / `video_update`（对话侧那一份）/ `video_inspect` / `video_render` / `video_audio`，以及插件的 `video_media`，都不在这张表里。
+
 工程提交保持现有语义：`expectedRevision` 不匹配则拒绝；成功后 revision 单调增加；undo 是新 revision，不把版本号拨回去。
 
 偏好文件是数据目录里的 `ui-preferences.json`，模式 `0o600`，原子替换。字段只有 `version` 与 `theme`。它不进工程、不进 `.yingliu`、不进注册表。
@@ -448,16 +450,108 @@ Vite/webpack 的默认产物是带哈希的多文件，会直接打破白名单�
 
 ### P3 — 智能体、生成、导出
 
-搬入：AgentRuntime、工具、工作流工具、媒体任务、FFmpeg 导出、CLI。讨论模式是同一个 runtime 的 `read` 策略，不再保留 `ConversationService` 第二循环。
+搬入：一个 `AgentRuntime`、下面这张工具注册表、`run_stage`、媒体任务、FFmpeg 导出、CLI。讨论模式是同一个 runtime 的只读策略，只加载风险为 `read` 的工具。不保留 `ConversationService` 第二执行器，也不做论文里的多代理互评群聊。
 
-验收：
+工作流和工具名单采纳调研报告第 7 节的 8 条修改建议，并按第 8 节的推荐定稿。报告全文：[AGENT_WORKFLOW_RESEARCH.md](https://github.com/lakeofsky347/yingliu-agent2/blob/cursor/agent-workflow-research-4d46/docs/research/AGENT_WORKFLOW_RESEARCH.md)（2026-11-15）。移植按该报告第三节的处置列，不按 `src/agent/tools.ts` 原样逐项搬。
+
+八条建议在本方案中的落点：
+
+1. 注册表以报告第五节为准；对话导演的五个动作不注册。
+2. 八阶段写进 P3 交付，并增加「计划未批准不能调用 cost」「先关键帧时没有已采纳首帧不能 `generate_video`」两条验收。
+3. 入口是 `run_stage`，一次一个阶段，并且允许 `review`。现有智能体把宏流程的审阅和上传写死关掉，与关键帧检查冲突，不再沿用。
+4. 旧 `agent-data/stories` 只读导入；新的批准写入工程修订。见下方兼容表。
+5. P3 只有一个编排者加阶段工具，不引入第二个对话循环，也不引入 FilmAgent / DreamFactory 式互评。
+6. 费用验收保持「未知报价必须批准」，并禁止用虚构单价填 `estimate()`。
+7. P3 不把参考图送进生图模型。参考图只作视频首帧。参与生图留到 P3 验收之后，且只传工程内素材 ID。
+8. 不移植插件工具名。`video_media` 的「retry 不重新下单」和「apply 失败保留候选」挂到 `task_status` 和 `media_apply`。
+
+#### 八阶段工作流
+
+默认路径是八阶段状态机（决策 1C）。阶段状态记在运行记录里：`empty`、`draft`、`approved`、`rejected`、`done`。拒绝不落盘。后一阶段的收费工具要看到前一阶段为 `approved`，或用户明确跳过。单镜头、无角色的小改可以跳过剧本和分镜（阶段 1–3），沿用现在系统提示里的例外。多镜头或有角色的目标不能跳过。
+
+返工从失败的那一阶段重新进入，不从剧本重跑。新的收费调用仍然要批准。已完成步骤不重做；媒体任务提交结果不确定时不重新下单。
+
+| 阶段 | 谁做 | 产物 | 进入下一阶段的条件 |
+| --- | --- | --- | --- |
+| 1. 创意/剧本 | 文本导演起草，人批准 | `plan_story`：标题、梗概、时长、风格 | `plan` 批准 |
+| 2. 角色与场景 | 文本导演起草，人批准 | 角色，以及 `plan_entities` 的地点和道具。参考图只引用工程素材 ID | 外貌、地点、道具的可见变更再次 `plan` 批准 |
+| 3. 分镜 | 文本导演起草，人批准 | `plan_shots`：景别、运镜、时长、台词、出场角色、是否承接上一镜 | `plan` 批准。单镜头、无角色的小改可以跳过 1–3 |
+| 4. 关键帧 | `image` 角色，或 `scene` 角色写代码画面 | 每镜一张已采纳的静止画面，或一份已检查的场景源码 | 人通过 `media_apply` / `select_take` 采纳，或该镜声明用代码画面 |
+| 5. 视频 | `video` 角色 | 以已采纳关键帧为首帧的片段候选 | 人采纳一条。工程设置可关掉「先关键帧」，此时允许文生视频。没有视频角色时跳过，画面留在代码或静帧 |
+| 6. 声音 | `speech`、`music`、`sfx`，或本地合成 | 旁白、音乐、音效素材，已经放上音轨 | 有台词的镜头要么有配音，要么有字幕。有配音时执行 `align_to_voice` |
+| 7. 剪辑合成 | 导演用 write 工具 | 镜头顺序、时长、音轨位置、转场参数、源码 | `render_check` 通过；有 vision 时再 `visual_review` 和 `consistency_review` |
+| 8. 导出 | 人批准 | MP4 任务 | `quality_check` 无严重问题，或人在已知问题上批了 `force`，并且 export 批准 |
+
+讨论模式停在阶段 1 之前，只回答问题，不写计划草稿。草稿仍要批准才落盘，保持现在 `plan_story` 的语义。
+
+角色就是模型角色，不新增对话代理：`director` 起草阶段 1–3，并在阶段 7 走工具循环；`scene` 写代码画面；`vision` 只在阶段 7 看图；`image` / `video` / `speech` / `music` / `sfx` 只在自己的阶段被对应工具调用。文本端口继续拒绝图片。
+
+视频默认先有关键帧（决策 3B）。工程设置可以关掉这条，改回允许文生视频。参考图在 P3 不参与生图（决策 8A）；要用在视频上时，只作首帧，不上传到 `generate_image`。
+
+创作计划（决策 2C）：数据目录里的 `agent-data/stories/<工程 ID>.json` 只作旧档导入格式。运行中已经批准的计划写入工程修订，和镜头用同一次 `expectedRevision`，可以一起撤销。导入成功后不再往 sidecar 双写。
+
+#### 工具注册表草案
+
+一个工具一个文件。讨论模式只加载 `read`。`estimate()` 在供应商没有报价时返回空；空报价表示需要批准，不能当成 0，也不许编造单价。每个 cost 工具的结果记一条尝试：工具名、镜头 ID、模型角色、候选序号、任务 ID、是否被 `select_take` 选中。供应商没返回种子则该字段为空。
+
+`generate_image`、`generate_video` 增加可选 `candidates`，取值 1–4，默认 1。条数写在批准卡上（决策 5B）。不在同一次批准里自动挑选最高分。
+
+`run_workflow` 不注册。代替它的是 `run_stage`（决策 6B）：一次只跑计划、关键帧、视频或配音中的一段，风险按该步是 `plan` 或 `cost`，并且允许 `review`。没有「从提示词直接到成片」的单次调用。
+
+模型不支持函数调用时，只保留智能体自己的 JSON 降级（决策 7B）：`{"message","done","actions":[{"tool","arguments"}]}`，工具名必须在下表内。对话导演那份 `intent` + 五个 `video_*` 动作的执行器删除。
+
+| 名称 | 阶段 | 风险 | 默认审批 | 角色 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| `project_get` | 任意 | read | 否 | 无 | 保留 |
+| `story_get` | 任意 | read | 否 | 无 | 保留。读的是已写入工程修订的计划；导入前可读 sidecar |
+| `shot_read_source` | 制作 | read | 否 | 无 | 保留 |
+| `task_status` | 任意 | read | 否 | 无 | 保留。恢复查询不重新下单 |
+| `env_check` | 导出前 | read | 否 | 无 | 保留 |
+| `skill_read` | 制作 | read | 否 | 无 | 保留 |
+| `capture_frame` | 审阅 | read | 否 | 无 | 保留。看图另走 vision |
+| `render_check` | 审阅 | read | 否 | 无 | 保留。无 vision 时 runtime 用它代替 `visual_review` |
+| `visual_review` | 审阅 | read | 否 | vision | 保留 |
+| `consistency_review` | 审阅 | read | 否 | vision | 保留。写分数是副作用，要记进计划所在的工程修订，不能按纯读缓存 |
+| `quality_check` | 导出前 | read | 否 | 无 | 保留 |
+| `plan_story` | 剧本 | plan | 是 | 无 | 保留。风格和角色一起批 |
+| `plan_entities` | 角色与场景 | plan | 是 | 无 | 新增。地点和道具与角色同一套批准。字段：`id`、`kind: location \| prop`、`name`、`features[]`、`referenceAssetIds[]` |
+| `plan_shots` | 分镜 | plan | 是 | 无 | 保留。没有剧本时拒绝 |
+| `character_upsert` | 角色与场景 | write 或 plan | 改外貌时是 | 无 | 不改可见特征时可以是 write；改 `features` 或参考图时必须重新 `plan` 批准 |
+| `shot_write_source` | 制作 | write | 否 | 无 | 唯一的源码写入 |
+| `video_update` | 制作 | write | 否 | 无 | 只改结构、时长、参数、绑定和顺序，不收源码 |
+| `audio_edit` | 声音 | write | 否 | 无 | 保留 |
+| `align_to_voice` | 声音 | write | 否 | 无 | 保留。有配音时在阶段 6 执行 |
+| `frame_handoff` | 视频 | write | 否 | 有 video 能力时 | 保留。截上一镜尾帧作下一镜首帧，不调用视频模型 |
+| `undo` | 制作 | write | 否 | 无 | 保留。撤销工程修订时连同已写入的计划一起回到上一版 |
+| `media_apply` | 图像或视频 | write | 否 | image 或 video | 保留。采纳失败保留候选 |
+| `select_take` | 图像或视频 | write | 否 | 无 | 新增。在已生成的候选里指定采用哪一条，不发起新的模型调用 |
+| `generate_image` | 关键帧 | cost | 是 | image | 可选 `candidates`（1–4，默认 1）和 `entityIds`。P3 只加文字锚点，不附参考图 |
+| `generate_video` | 视频 | cost | 是 | video | 可选 `candidates`（1–4，默认 1）。默认没有已采纳首帧就拒绝。参考图若使用，只作首帧 |
+| `generate_voice` | 声音 | cost | 是 | speech | 保留批量 `lines`，一次批准覆盖多句 |
+| `generate_music` | 声音 | cost | 是 | music | 保留 |
+| `generate_sfx` | 声音 | cost | 是 | sfx | 保留 |
+| `synthesize_sfx` | 声音 | write | 否 | 无 sfx 时的后备 | 保留。提示里标明是简单合成，不进入默认成片流程 |
+| `export_mp4` | 导出 | export | 是 | 无 | 保留质检、`force` 和 `retryTaskId` |
+| `run_stage` | 一段宏流程 | plan 或 cost，按步 | 按步 | 该步需要的角色 | 新增，替代 `run_workflow`。一次一个阶段，允许 `review` |
+
+不注册：`video_project`、`video_inspect`、`video_render`、`video_audio`、`video_media`、`run_workflow`，以及插件的会话绑定和 DSH Job。它们的行为落到上表已有工具。布局框、参考图参与生图、为主角训练个人模型，都不在 P3。
+
+#### 验收
 
 - mock 网关下：工具循环、审批拒绝、重启后续跑、成功回执不重复提交、预算上限。
-- `export_mp4` 默认要批准；费用未知的 cost 工具要批准。
+- `export_mp4` 默认要批准。费用未知的 cost 工具要批准。`estimate()` 返回空时不能当成 0 放行；测试拒绝用虚构单价把空报价填成数字。
+- 多镜头或带角色的目标，计划未批准时不能调用任何 cost 工具。单镜头、无角色的小改可以不调用 `plan_story` / `plan_shots`。
+- 默认开启「先关键帧」：没有已采纳首帧时 `generate_video` 被拒绝。工程设置关掉之后，文生视频可以调用。
+- 批准卡写明本次候选条数。`candidates` 缺省为 1，大于 4 或小于 1 被拒绝。`select_take` 不产生新的模型请求。
+- 注册表里没有 `run_workflow`，也没有对话导演的五个动作名。`run_stage` 一次只执行一个阶段，并且可以打开 `review`。
+- 模型不支持函数调用时，降级 JSON 的 `actions[].tool` 只能是上表中的名字。
+- `plan_entities` 与 `plan_story` 一样要人批准后才写入工程修订。旧 sidecar 导入后不再双写。
+- `generate_image` 的请求体不含参考图。参考图只可能出现在视频首帧。
+- `task_status` 的恢复查询不重新下单；`media_apply` 失败时候选还在。
 - `verify` 在隔离数据目录打出可解码的短 MP4；不请求付费供应商。
 - CLI 退出码与 `docs/CLI.md` 一致（0/2/3/4/5/6/7/8），`--allow-paid` 与 `--max-cost` 仍是付费闸门。
 
-P3 之后才考虑：素材垃圾回收、多人编辑、节点市场。这三件现在 `README.md` 已明确不做。
+P3 之后才考虑：素材垃圾回收、多人编辑、节点市场，以及参考图参与生图。前三件现在 `README.md` 已明确不做。参考图参与生图要单独再定，只传工程内素材 ID，不传路径或密钥。
 
 ### 与旧数据的兼容
 
@@ -472,14 +566,14 @@ P3 之后才考虑：素材垃圾回收、多人编辑、节点市场。这三�
 | `credentials.encrypted.json` | 不重加密、不导出明文。新壳用同一 `CredentialPort` 按原引用解密。换了操作系统钥匙环后端时走现有 `src/migration/credential-migration.ts` 的日志与回滚，仍只用引用。 |
 | `tts.json` | 读入时丢弃 `apiKey` 字段。语音密钥只认 `YINGLIU_TTS_API_KEY`。 |
 | 工程目录、`.yingliu` v1/v2 | P1 可读。写回 schema 2。不改镜头 ID、相对路径、素材哈希。 |
-| `agent-runs/`、`agent-data/stories`、`ledger` | P3 按现有 version 1 读取。读不懂则隔离该文件并保留原件，不猜测着改工程。 |
+| `agent-runs/`、`agent-data/stories`、`ledger` | P3 按现有 version 1 读取。读不懂则隔离该文件并保留原件，不猜测着改工程。`stories` 只作导入格式：导入后，已批准的计划写入工程修订并绑定该次 `expectedRevision`，不再双写 sidecar。账本仍留在数据目录。 |
 | 对话记录 | 可选导入。不参与工程包。 |
 
 密钥迁移的验收夹具使用假密钥，与 `tests/p0-credential-migration.test.ts` 一样。
 
 ---
 
-## 5. 风险与待决问题
+## 5. 风险与已定决策
 
 ### 风险
 
@@ -488,13 +582,38 @@ P3 之后才考虑：素材垃圾回收、多人编辑、节点市场。这三�
 | 双源迁移丢角色 | 用户在模型中心绑过的 director 被快速槽覆盖 | version 2 只覆盖 `custom` / `custom-vision` 这两个保留 id；其余连接不动。覆盖前把旧注册表复制到 `model-registry.v1.bak.json`（仍无密钥） |
 | 文本模型被塞进图片 | 类型放宽或工具直接组 HTTP | `TextProvider` 的消息类型没有图片；再加一条测试，请求体序列化结果不含 `image_url` |
 | 主题只换了工作台 | 重演 `app.css` 覆盖 | 验收要求外壳背景来自变量，纸感与暗房的计算样式不同，DOM 层级相同 |
-| 收窄 `AgentPort` 时漏掉工具 | `generate_*`、`export_mp4` 编译失败 | P3 按 `src/agent/tools.ts` 的工具表逐项移植，缺端口就补方法，不恢复通用 `route` |
+| 收窄 `AgentPort` 时漏掉工具 | `generate_*`、`export_mp4` 编译失败 | 按调研报告第三节的处置列移植，注册表以该报告第五节为准，不按 `tools.ts` 原样逐项搬。对话导演的五个动作不注册。缺端口就补方法，不恢复通用 `route` |
 | 场景沙箱在重写时被放松 | 模型生成的页面拿到 Node 或凭据 | P1 把 `tests/p0-scene-isolation.test.ts` 的断言原样搬来：无 preload、CSP、跨源 |
 | CSP 为了字体或主题被放宽 | 引入在线字体或 CSS-in-JS | 字体用系统字体栈（现有 `PingFang SC` / `Microsoft YaHei`）。不加载第三方样式 |
 | 新旧应用同时打开同一工程 | 锁语义不一致 | 新应用沿用数据目录与工程根的所有权锁（`src/app/ownership.ts`）。导入是副本，不是原地共写 |
 | 线数很少但逻辑很密，移植时看漏分支 | `model.ts`、`application.ts` 的单行函数 | 移植以测试为清单，不按「重写一遍看起来一样」手工抄 |
 
-### 需要你拍板的问题
+### 已定决策
+
+两轮都在 2026-11-15 按当时的推荐确认。前一轮是本方案原第 5 节的 8 个问题。这一轮是调研报告第 8 节的 8 个问题，报告见 [AGENT_WORKFLOW_RESEARCH.md](https://github.com/lakeofsky347/yingliu-agent2/blob/cursor/agent-workflow-research-4d46/docs/research/AGENT_WORKFLOW_RESEARCH.md)。
+
+| 轮次 | 编号 | 选定 | 决定 | 状态 |
+| --- | --- | --- | --- | --- |
+| 方案第 5 节 | 1 | A | 新仓库、新 Git 历史；旧仓库只读到 P2 验收完再归档。许可证保持 GPL-3.0-only | 已确认（2026-11-15） |
+| 方案第 5 节 | 2 | A | 首次启动纸感（L1）。暗房是同布局的第二态。跟随系统只做可选项，不作首次默认 | 已确认（2026-11-15） |
+| 方案第 5 节 | 3 | B | P2 结束后用只读讨论打通文本端口。制作、计费、导出留到 P3 | 已确认（2026-11-15） |
+| 方案第 5 节 | 4 | A | 迁移成功后 `provider.json` 写成 version 4 标记，去掉 `config` / `vision`，不再双写 | 已确认（2026-11-15） |
+| 方案第 5 节 | 5 | A | 类名统一为 `yl-` | 已确认（2026-11-15） |
+| 方案第 5 节 | 6 | A | 继续 LiteGraph，颜色改读主题。不在 P1 换成自绘时间线 | 已确认（2026-11-15） |
+| 方案第 5 节 | 7 | A | 新仓库不包含 Tauri。决策记录引用 `docs/p0/REPORT.md` | 已确认（2026-11-15） |
+| 方案第 5 节 | 8 | A | 新应用使用新数据目录，提供一次导入。不复用正在使用的 `yingliu-agent` 目录 | 已确认（2026-11-15） |
+| 调研第 8 节 | 1 | C | 默认走八阶段状态机。单镜头、无角色的小改可以跳过剧本和分镜 | 已确认（2026-11-15） |
+| 调研第 8 节 | 2 | C | 创作计划的 sidecar 只作导入格式。运行中已批准的计划写入工程修订 | 已确认（2026-11-15） |
+| 调研第 8 节 | 3 | B | 视频默认要先有关键帧。工程设置可以关掉，改为允许文生视频 | 已确认（2026-11-15） |
+| 调研第 8 节 | 4 | B | 加 `plan_entities`。地点和道具与角色走同一套批准。P3 不做布局框 | 已确认（2026-11-15） |
+| 调研第 8 节 | 5 | B | 生成工具一次可选 1 到 4 条候选，默认 1 条，条数写在批准卡上。不自动选最高分 | 已确认（2026-11-15） |
+| 调研第 8 节 | 6 | B | 用 `run_stage` 替代 `run_workflow`。一次一个阶段 | 已确认（2026-11-15） |
+| 调研第 8 节 | 7 | B | 只保留智能体的 JSON 降级。删掉对话导演的执行器 | 已确认（2026-11-15） |
+| 调研第 8 节 | 8 | A | P3 里参考图只作视频首帧。参与生图留到 P3 验收之后。不为角色训练个人模型 | 已确认（2026-11-15） |
+
+### 原选项记录
+
+上表已经确认。下面保留当时的选项和推荐理由，避免以后只看见结论、看不到放弃了哪一条。
 
 **1. 新仓库与旧仓库的关系**
 
