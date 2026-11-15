@@ -117,7 +117,22 @@ try{
   assert.equal((await call<{completed:boolean}>('app.onboarding.get')).completed,true);record('onboarding completion persists across native process restart');
   // Exercise actual hostile code in the unprivileged child; the editor remains responsive.
   const good=defaultSceneSource(),bad={...good,js:'export function render(){ while(true){} }'};const watchdogProject=await call('create',{title:'画面失响应恢复'});await call('apply',{projectId:watchdogProject.project!.id,expectedRevision:0,sources:[{shotId:watchdogProject.project!.shots[0]!.id,source:bad}]});await home();await page.getByRole('button',{name:'画面失响应恢复',exact:true}).click();await page.getByText('画面执行未响应，请检查镜头源码或刷新画面。',{exact:true}).waitFor({timeout:20000});assert.ok((await call('current',{projectId:manualId})).project);record('infinite-loop scene times out while editor and native API remain responsive');
-  const stalled=await call('current',{projectId:watchdogProject.project!.id});await call('apply',{projectId:stalled.project!.id,expectedRevision:stalled.project!.revision,sources:[{shotId:stalled.project!.shots[0]!.id,source:good}]});await page.getByRole('button',{name:'重新加载画面',exact:true}).click();await until(async()=>await page.getByText('画面执行未响应，请检查镜头源码或刷新画面。',{exact:true}).count()===0,30000);await page.getByRole('button',{name:'刷新预览',exact:true}).click();await until(async()=> (await call('current',{projectId:stalled.project!.id})).task?.status==='complete',60000);await until(async()=>await page.getByText('画面执行未响应，请检查镜头源码或刷新画面。',{exact:true}).count()===0&&await page.getByRole('button',{name:'播放',exact:true}).isEnabled(),20000);record('owned scene renderer reset and good-source preview recovery',{playerReady:true,watchdogCleared:true});
+  checkpoint('scene recovery: publish repaired source');
+  const stalled=await call('current',{projectId:watchdogProject.project!.id});
+  const repaired=await call('apply',{projectId:stalled.project!.id,expectedRevision:stalled.project!.revision,sources:[{shotId:stalled.project!.shots[0]!.id,source:good}]});
+  assert.ok(repaired.previewUrl&&repaired.previewUrl!==stalled.previewUrl,'修复源码应发布新的预览 URL');
+  checkpoint('scene recovery: reload saved preview');
+  await page.getByRole('button',{name:'重新加载画面',exact:true}).click();
+  const repairedPlayer=page.getByRole('button',{name:'播放',exact:true});
+  const repairedFrame=page.locator('iframe[title="影片画面预览"]');
+  await until(async()=>await repairedFrame.getAttribute('src')===repaired.previewUrl&&await repairedPlayer.isEnabled(),30000);
+  assert.equal(await page.getByText('画面执行未响应，请检查镜头源码或刷新画面。',{exact:true}).count(),0);
+  checkpoint('scene recovery: verify fresh preview task');
+  const beforeRefresh=(await call('current',{projectId:stalled.project!.id})).task?.id;
+  await page.getByRole('button',{name:'刷新预览',exact:true}).click();
+  await until(async()=>{const current=await call('current',{projectId:stalled.project!.id});return current.task?.id!==beforeRefresh&&current.task?.kind==='preview'&&current.task.status==='complete'&&current.previewRevision===repaired.project!.revision;},60000);
+  await until(async()=>await repairedPlayer.isEnabled(),20000);
+  record('owned scene renderer reset and good-source preview recovery',{playerReady:true,watchdogCleared:true});
   await call('providers.save',{apiKey:''});record('synthetic key removed after acceptance');
   nativeAcceptance='PASS';console.log(JSON.stringify({passed:checks.length,report:join(out,'verification.json')}));
 }catch(error){nativeAcceptance='FAIL';checks.push({name:'native acceptance execution at '+location,status:'FAIL',message:error instanceof Error?error.message:String(error),diagnostic:{diagnosticCategory:error instanceof Error&&/timeout|timed out|超时/i.test(error.message)?'WAIT_TIMEOUT':'TASK_FAILED',...await currentFailureDiagnostic()},previewState:await previewFailureState()});throw error;}
