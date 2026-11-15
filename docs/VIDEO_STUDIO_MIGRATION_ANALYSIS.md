@@ -13,7 +13,7 @@
 
 插件 `SOURCE.json` 写明：0.8.0 合并基线是 `0aa5e3c`；2026-11-11 选择性迁移的供体是本仓库 `ef3fc82`（当时 1.1.0），模块 M01–M07。此后两边各自继续。迁回去不是整仓覆盖，而是把插件后来多出来的领域能力接回独立应用，同时保留本仓库在供体之后加上的智能体、双槽模型和安全边界。
 
-`docs/REFACTOR_PLAN.md` 写过「不引入 DSH、cordis」。这次需求会动到这一条。本文第 7 节给出推荐解释，第 10 节交给 chen 拍板。在拍板前，实现仍按该方案：不把 DSH 进程嵌进本应用。
+`docs/REFACTOR_PLAN.md` 原先写「不引入 DSH、cordis」。2026-11-15 已收窄为：不引入运行时，可以移植不依赖宿主的领域模块。代码在本仓库 `cursor/refactor-plan-293f` 原地替换。已定条目见第 10 节。业务代码等 chen 确认本文的分阶段计划后再改。
 
 硬约束贯穿全文：API Key 只进凭据服务；工程、注册表、偏好、日志和本文都不出现密钥。不读取其他应用的凭据文件。CSP 维持 `default-src 'self'`，不放宽。
 
@@ -289,22 +289,20 @@ P0 壳里的「尚未接入」保留到文本端口接通。制作策略、模�
 
 ## 7. 和 REFACTOR_PLAN、yingliu-agent2 的关系
 
-重构方案第 1.4 节和第 6 节写的是：借鉴插件的接法（端点表、单一变量、主题从外部推进、注册表为模型事实），**不引入 DSH、cordis**。决策 1A 是新仓库、新 Git 历史，旧仓库只读到新实现能读旧数据。agent2 的 `docs/DECISIONS.md` 和 NOTICE 写明它按该方案开工，P0 已在 `main`。
-
-这次需求要把插件后端和 DSH 能力弄到独立应用里。推荐把那句「不引入」收窄，而不是整句作废：
+2026-11-15 已定。重构方案里「不引入 DSH、cordis」收窄为下面两句，并已写回 `docs/REFACTOR_PLAN.md`：
 
 - **不引入** cordis 进程、`cordis.patch.yml`、`@deepseek-ai/*` peer、DSH 凭据服务、DSH 会话、dsh-vision 瀑布、插件前端和 `video_*` 工具名。
 - **引入** 不依赖宿主的领域行为：schema 3 制作策略、导演文档、官方协议适配器、能力预检、导出质检、工作台本地音效、更明确的 `expectedRevision` 错误码。
 
-agent2 是这套壳和主题的已实现参考，不是插件后端的目的地说明。本文件放在本仓库，是因为 chen 要求方案落在 `cursor/refactor-plan-293f`。代码落在本仓库还是 agent2，见问题 1。
+重构方案决策 1A 曾定为新仓库、新 Git 历史。同日的问题 1 不按当时的推荐，改为在本仓库 `cursor/refactor-plan-293f` 原地替换。agent2 `main` @ `07ed7c5` 不再作为产品落点。它的 P0 壳和主题可以参考或移植进本仓库。两个仓库都是 GPL-3.0-only。移植时在 NOTICE 写明来源，不把它的数据目录和未完成的后端占位一起当成产品。
 
-无论落点在哪，下面的兼容约定相同。
+下面的兼容约定按这个落点执行。
 
 ### 7.1 数据与工程
 
 | 对象 | 建议 |
 | --- | --- |
-| 本仓库 schema 2 工程 | 继续读。若采纳 schema 3，第一次保存写成 3，镜头 ID、相对路径、素材哈希不变。不自动改制作模式，缺省 `unresolved`，人确认前不能生成 |
+| 本仓库 schema 2 工程 | 继续读。保存时写成 schema 3，镜头 ID、相对路径、素材哈希不变。不自动改制作模式，缺省 `unresolved`，人确认前不能生成 |
 | 插件 schema 3 目录 | 只读打开时保留 `productionPolicy` 和 `directorDocument`。不理解的扩展字段原样留下，不丢弃。写回前必须能完整验证这两块，否则拒绝写，避免用 schema 2 覆盖 |
 | 插件 `sessions.json` | 不自动当成智能体数据目录。用户显式选择工程文件夹来打开。绑定信息没有对应对象，忽略并记一条说明，不删用户原文件 |
 | 插件 `models.json` | 可导入连接的协议、base URL、模型名、角色。`credentialRef` 不导入、不解析。用户为每条连接重新保存密钥。导入结果用本仓库引用 |
@@ -328,81 +326,132 @@ agent2 是这套壳和主题的已实现参考，不是插件后端的目的地�
 
 ---
 
-## 8. 分阶段迁移
+## 8. 分阶段迁移（本仓库原地替换）
 
-阶段按可验收的切片，不按日历。每阶段结束都要：ubuntu、windows、macos 上 `typecheck`、`test`、`build` 通过。Node 保持本仓库的 22。不把插件的 DSH 宿主矩阵（`0.2.1-rc.2` / `latest` / `next`、Node 24）加进独立应用 CI。原生媒体验收仍要求本机 Chrome 与 FFmpeg，缺工具记失败，不把跳过当通过（现有 `native-acceptance.yml`）。
+落点是 `yingliu-agent` 的 `cursor/refactor-plan-293f`。在现有 `src/` 上替换，不另起仓库，不嵌入 DSH。阶段按可验收的切片，不按日历。业务代码等 chen 确认本节后再改。
 
-密钥夹具只用测试里已经在用的假密钥办法。数据目录扫描不到密钥字段。CSP 响应头与 `src/app/ui-server.ts` 基线逐字比较：`default-src` 仍是 `'self'`，不新增来源，不新增 `unsafe-eval`。
+每一阶段都要守住本仓库已经有的六项，不把它们换成插件的会话工具：
 
-### 阶段 A — 拍板与契约冻结
+| 要留下的能力 | 现在的位置 | 阶段里不允许的改法 |
+| --- | --- | --- |
+| 智能体循环 | `src/agent/service.ts`、`src/agent/tools.ts`。审批、回执、预算、八阶段工具名 | 不注册 `video_*`。不恢复 `ConversationService` 作为第二执行器。不把循环改成 `ctx.tools.register` |
+| 文本 / 视觉分槽 | `provider.json` version 3，引用 `yingliu.custom-model.api-key` 与 `yingliu.custom-vision.api-key`。文本请求不能带图片 | 不把 DSH 会话模型当成导演来源。不把视觉钥匙复制到文本连接。官方协议只加在生成角色上 |
+| 媒体任务 | `src/jobs/media-tasks.ts`。对账、不确定则不重投、公开对象清空 `credentialRef` | 新协议走同一任务机。不另起一套 DSH Job |
+| 账本 | `agent.ledger`，数据在 `agent-data` 的 ledger | 导演文档和制作策略不替代账本。费用仍记在账本，未知报价不能写成 0 |
+| 尾帧承接 | 工具 `frame_handoff` | 保持「截上一镜尾帧作下一镜首帧，不调用视频模型」 |
+| 配音对齐 | 工具 `align_to_voice` | 保持一次提交、可撤销。本地六类音效是另一条不调用模型的路径，不取代这个工具 |
 
-范围：只定第 10 节。可以改方案文档，不改业务代码。
+每阶段结束：ubuntu、windows、macos 上 `typecheck`、`test`、`build` 通过。Node 保持本仓库的 22（`.github/workflows/platform-checks.yml`）。不加入插件的 DSH 宿主矩阵（`0.2.1-rc.2` / `latest` / `next`、Node 24）。涉及真实画面或成片的阶段仍跑 `native-acceptance.yml`：本机 Chrome 与 FFmpeg，缺工具记失败，不把跳过当通过。
 
-验收：拍板结果写回文档。未拍板的条目不开始移植。
+密钥夹具只用测试里已经在用的假密钥办法。数据目录扫描不到密钥字段。CSP 响应头与 `src/app/ui-server.ts` 基线逐字比较：`default-src` 仍是 `'self'`，不新增来源，不新增 `unsafe-eval`。现有智能体、分槽、媒体任务、账本、尾帧和配音对齐的测试在每一阶段都要继续通过，不能只跑新增测试。
 
-CI：无新代码则不要求新跑。若只改文档，三平台工作流仍会因推送触发；文档变更不应让 `typecheck` / `test` / `build` 失败。
+### 阶段 A — 决定写入文档
 
-### 阶段 B — 工程格式与制作策略
+范围：只改 `docs/VIDEO_STUDIO_MIGRATION_ANALYSIS.md` 和 `docs/REFACTOR_PLAN.md` 里与本决定相关的句子。不改业务代码。
 
-范围：读 schema 3；制作策略纯函数；人确认端点；普通保存不能改策略。尚不接官方供应商。
+验收：第 10 节九条都标成 2026-11-15 已定。问题 1 写明不按原推荐，改为本仓库原地替换。问题 2–9 写明按原推荐。重构方案里的 DSH 句子已收窄，并指向本文。
+
+CI：无新代码。推送仍会触发三平台工作流；文档变更不应让 `typecheck`、`test`、`build` 失败。
+
+### 阶段 B — 纸感 / 暗房壳进现有构建
+
+范围：把 yingliu-agent2 `07ed7c5` 的 P0 壳和主题移植进本仓库的 UI 构建。包括 `tokens.css`、`yl-` 布局、`data-theme` 为 `paper` | `darkroom`、偏好文件只有 `version` 与 `theme`。默认纸感。旧的 `vs-` 页面可以暂时还在包里，但不再充当主题事实。不在这一阶段改 `src/agent`、注册表、媒体任务或工程 schema。
+
+保留：智能体端点仍可调用；文本槽和视觉槽的保存路径不动；媒体任务、账本、`frame_handoff`、`align_to_voice` 的测试不改断言含义。
 
 验收：
 
-- 新建工程在选定策略前不能调用生图、生视频或当作用代码成片导出。
-- schema 2 工程打开后镜头 ID 不变；保存后若升到 3，策略为待确认。
-- 过期 `expectedRevision` 拒绝写入。
-- 模型调用路径无法提交 `production.set`。
+- `ui.preferences.set` 后刷新，主题仍在。偏好 JSON 只有 `version` 与 `theme`。
+- 两套 `data-theme` 的主布局 DOM 层级一致，背景来自变量，计算值不同。
+- 静态资源仍只有 `/`、`/index.html`、`/app.js`、`/app.css`。无令牌的 `POST /api/*` 为 403，未知路径 404。
+- CSP 与基线逐字一致。
+- NOTICE 写明壳来自 agent2，许可证仍是 GPL-3.0-only。
+- 三平台 `typecheck`、`test`、`build` 通过，含现有智能体与凭据测试。
+
+### 阶段 C — 工程 schema 3 与制作策略
+
+范围：在现有 `src/core`、`src/host/store.ts`、`src/host/service.ts` 上读 schema 1/2/3，保存写成 3。加入制作策略纯函数和只能由人调用的 `production.set`。普通保存不能改策略，也不能改受保护的扩展字段。这一阶段不接官方供应商，不改工具注册表的名字。
+
+保留：写队列和 `expectedRevision` 仍是现在的串行语义。智能体提交工程仍走同一队列。媒体任务对账不因策略字段丢失已有回执。账本不进 `project.json`。`frame_handoff` 与 `align_to_voice` 仍只改工程修订，不改策略。
+
+验收：
+
+- 新建工程在人选定策略前不能生图、生视频，也不能当作用代码成片导出。
+- schema 2 打开后镜头 ID 不变；保存后为 schema 3，策略为 `unresolved`。
+- 过期 `expectedRevision` 在写入前拒绝。
+- 智能体和模型调用路径提交 `production.set` 得到拒绝。
+- 现有存储、智能体回执、媒体任务测试通过。
 - 三平台 `typecheck`、`test`、`build` 通过。
 
-### 阶段 C — 导演文档
+### 阶段 D — 导演文档成为计划真源
 
-范围：文档校验、草稿、人批准。不把 `src/agent/story.ts` 删掉，除非问题 4 选定替换。
+范围：把插件的 `DirectorDocument` 校验、草稿和人批准放进工程扩展。`agent-data/stories` 只作旧档导入。八阶段里写计划的工具改为读写这份文档，批准权留在界面。不删除账本、尾帧承接和配音对齐。插件文档里八阶段用不到的字段保留，允许为空。
+
+保留：`AgentService` 仍是唯一循环。`agent.ledger` 的文件和端点还在。`frame_handoff` 不调用视频模型。`align_to_voice` 仍是一次可撤销的提交。文本端口继续拒绝图片；看图仍只走视觉槽。
 
 验收：
 
-- 批准前后哈希一致才算批准。
-- 模型或工具不能把状态写成 `approved`。
-- 批准不自动开始生成，也不改制作策略。
-- 撤销后旧草稿不能覆盖新的基线哈希。
+- 批准前后哈希一致才算批准。工具和模型不能把状态写成 `approved`。
+- 批准不开始生成，也不改制作策略。
+- 旧 sidecar 导入后不再双写。撤销后旧草稿不能覆盖新的基线哈希。
 - 文档 JSON 无密钥字段。
+- 账本、尾帧、配音对齐的现有测试通过。
+- 三平台 `typecheck`、`test`、`build` 通过。
 
-### 阶段 D — 官方协议与能力预检
+### 阶段 E — 官方协议接进现有注册表和媒体任务
 
-范围：把插件适配器接到 `ModelRegistry`，协议 id 与插件目录一致。预检失败不提交。`async-task` 保留给仍然没有官方适配器的端点。
+范围：在 `src/models` 与 `src/jobs/media-tasks.ts` 增加插件那些协议 id 和适配器。能力预检失败就不提交。`async-task` 留给没有官方适配器的端点。连接引用继续 `yingliu.models.<id>.api-key`。可选导入插件 `models.json` 的 URL、协议、模型名和角色，不导入、不解析 `credentialRef`。
+
+保留：文本槽和视觉槽的两把钥匙、`provider.json` 迁到 version 4 的规则不变。媒体任务仍是不确定则不重投。公开任务对象的 `credentialRef` 仍为空。账本继续记费用尝试。`frame_handoff` 不因为新视频协议而改成模型调用。
 
 验收：
 
-- mock 传输覆盖每个新协议的提交、轮询、失败、取消请求。不访问外网。
-- 能力预检拒绝未知音轨、超额参考图、不支持的角色。
-- 任务公开对象里 `credentialRef` 为空，响应无密钥。
-- 文本槽保存不会把视觉引用复制到文本连接（现有回归保持）。
-- 三平台测试通过。原生媒体验收仍用本地画面，不把官方协议的 mock 算成画质验收。
+- mock 传输覆盖每个新协议的提交、轮询、失败和取消。不访问外网。
+- 预检拒绝未知音轨、超额参考图和不支持的角色。
+- 响应和注册表文件无密钥。文本保存不会把视觉引用复制到文本连接。
+- 现有 `images`、`video-gateway`、`async-task` 任务测试通过。
+- 三平台 `typecheck`、`test`、`build` 通过。原生媒体验收仍用本地画面，不把官方协议的 mock 算成画质验收。
 
-### 阶段 E — 导出质检与本地音效
+### 阶段 F — 导出质检与本地音效
 
-范围：导出前跑本地质检；历史成片留下那次报告；音轨面板能登记六类本地 WAV。
+范围：导出前走本地质检，历史成片留下那次报告。结构硬失败不能用 `force` 绕过。六类本地 WAV 用现有 `src/agent/synth.ts` 接到音轨端点，不另写一份合成器。智能体 `quality_check` 保留为建议，不能放行硬失败。
+
+保留：`export_mp4` 仍要批准。账本不因本地质检改记价规则。`align_to_voice` 不改成本地音效。媒体任务的采用失败仍保留候选。
 
 验收：
 
 - 缺素材或结构硬失败时不产出新的成片文件。
 - 抽样帧有上界，报告写明未覆盖的镜头。
-- 同一 seed 与参数得到同一 WAV 字节。不发起网络请求。
-- 智能体 `quality_check` 若仍保留，不能用它的「建议」绕过硬失败。
+- 同一 seed 与参数得到同一 WAV 字节，且不发起网络请求。
+- 尾帧承接和配音对齐测试通过。
+- 三平台 `typecheck`、`test`、`build` 通过。成片解码走现有原生媒体验收。
 
-### 阶段 F — 界面替换
+### 阶段 G — 旧界面退出默认包
 
-范围：按第 6 节把上述能力放进纸感/暗房同一布局。旧 `vs-` 页退出默认包。
+范围：制作要求、导演计划、模型中心、媒体任务、声音和导出放进阶段 B 的同一套 `yl-` 布局。行为仍走现有控制器和本地 API。`vs-` 页退出默认 `app.js`。不增加 DSH 信封，不加第二个静态样式 URL。
+
+保留：左栏接上的是现有智能体循环，不是插件工具卡片。模型面板只显示 `hasKey`。未确认制作策略时生成控件不可用。账本、尾帧和配音对齐在界面上仍可走已有工具，不换成 `video_audio` 或 `video_render`。
 
 验收：
 
-- 两套 `data-theme` 下主布局 DOM 层级一致，背景色来自变量，计算值不同。
-- 刷新后主题仍在。偏好文件只有 `version` 与 `theme`。
-- 模型面板响应无密钥。未确认制作策略时生成控件不可用。
-- 静态资源仍只有 `/`、`/index.html`、`/app.js`、`/app.css`。无令牌的 `POST /api/*` 为 403，未知路径 404。
-- CSP 与基线一致。
-- 三平台 `typecheck`、`test`、`build` 通过。有界面的验收沿用现有 Playwright 脚本和隔离数据目录，不打付费 API。
+- 两套主题的主布局 DOM 层级一致。刷新后主题仍在。
+- 模型面板和偏好文件无密钥。
+- 静态资源白名单和 CSP 与基线一致。
+- 现有智能体审批、回执、预算、分槽、媒体任务、账本、尾帧、配音对齐测试通过。
+- 三平台 `typecheck`、`test`、`build` 通过。界面验收用现有 Playwright 脚本和隔离数据目录，不打付费 API。
 
-阶段 B–E 可以在界面还是旧皮肤时先用 API 测试验收。阶段 F 再换皮。不要为了换皮推迟制作策略的人确认闸门。
+阶段 C–F 可以用 API 测试先验收，界面仍用阶段 B 的壳包住旧页面。阶段 G 再让旧皮肤退出默认包。不要为了换皮推迟阶段 C 的人确认闸门。
+
+### 原地替换多出来的风险
+
+这些风险来自「改在本仓库」，不是问题 2–9 的推荐项本身。
+
+- 本仓库的 `service.ts`、`store.ts`、`application.ts`、`renderer.ts` 很密。原地改容易漏掉回执、队列或场景隔离分支。每一阶段以现有测试为清单，不按插件文件整段覆盖。
+- `src/host/service.ts` 的 `ctx.llm` 名字像 DSH，类型其实是本应用的 `ProviderHost`。原地替换时禁止把它接回 cordis。
+- 阶段 B 到 G 之间会短期同时存在 `yl-` 和 `vs-`。默认包仍只能有一份 `/app.css`。不能为了过渡再放宽 CSP，也不能学习插件把 CSS 注入 `<style>`。
+- 应用身份仍是 yingliu-agent。schema 3 和 `provider.json` version 4 若直接写进用户正在使用的数据目录，旧构建再打开会失败或抢锁。实现时用隔离数据目录做验收。对用户目录的升级只在显式导入的副本上进行，不在未确认的现场目录里自动改写。这不改变问题 9：仍然不扫描 DSH profile。
+- 从 agent2 移植壳时只取 P0 的界面和偏好。不把 agent2 里尚未实现的后端空模块当成第二套服务。
+- 阶段 D 把计划真源从 sidecar 改到工程扩展。八阶段工具如果只改了一半，会出现 sidecar 与导演文档同时算「已批准」。验收要求导入后不再双写。
 
 ---
 
@@ -412,7 +461,7 @@ CI：无新代码则不要求新跑。若只改文档，三平台工作流仍会
 | --- | --- | --- |
 | yingliu-video-studio `package.json`、`LICENSE`、`NOTICE` | GPL-3.0-only。NOTICE 保留更早的 MIT 与 Apache-2.0 文本路径：`licenses/Legacy-MIT.txt`、`licenses/Legacy-Apache-2.0.txt` | 与本仓库当前许可证相同，源码可以迁入。迁入时带上这些历史声明，以及 LiteGraph、fflate 的 MIT 声明（两边 `THIRD_PARTY_NOTICES.md` 都有） |
 | yingliu-agent | GPL-3.0-only。`NOTICE` 写明含 dsh-video-studio 0.2.0 的历史 MIT | 接收方 |
-| yingliu-agent2 | GPL-3.0-only。NOTICE 写明协议来自 yingliu-agent 与 yingliu-studio | 若代码落在 agent2，同样只接收 GPL-3.0-only 与保留声明的 MIT 片段 |
+| yingliu-agent2 | GPL-3.0-only。NOTICE 写明协议来自 yingliu-agent 与 yingliu-studio | 只移植其 P0 壳和主题到本仓库。两仓库许可证相同。NOTICE 写明该壳来自 agent2 `07ed7c5` |
 | dsh-vision | 仓库 `LICENSE` 为 MIT，版权 2026 lakeofsky347 | 若将来复制其源码，须保留 MIT 声明，发行物仍是 GPL-3.0-only。本次建议不复制运行时 |
 | deepseek-ai/deepseek-harness 仓库根 `LICENSE` | 读到的是 MIT，版权 2026 DeepSeek | 这是该仓库根文件。**不能**据此认定 npm 上的 `@deepseek-ai/cordis` 或其余 `@deepseek-ai/dsh-*` 包许可证相同。那些包没有随插件源码分发，本次没有解包核对 |
 
@@ -422,86 +471,88 @@ CI：无新代码则不要求新跑。若只改文档，三平台工作流仍会
 
 ---
 
-## 10. 需要 chen 拍板的问题
+## 10. 已定决定（2026-11-15）
 
-每一题先写推荐。
+chen 在这一日确认。问题 1 不按当时的推荐。问题 2–9 按当时的推荐。选项留在下面，避免以后只看见结论。
 
 ### 1. 代码落在哪
 
-- A. 维持重构方案决策 1A：产品继续在 yingliu-agent2 里做。本仓库这份文档是能力清单。本分支继续不改业务代码。
-- B. 改在本仓库 `yingliu-agent` 里原地替换。agent2 只当视觉参考。
+已定 **B**（不按推荐 A）。代码写在旧仓库 yingliu-agent 的 `cursor/refactor-plan-293f`，在本仓库原地替换。前端按纸感 / 暗房重做，可以参考或移植 yingliu-agent2 `main` @ `07ed7c5` 的 P0 壳和主题。两个仓库都是 GPL-3.0-only。
+
+- A. 维持重构方案决策 1A：产品继续在 yingliu-agent2 里做。本仓库这份文档是能力清单。
+- B. 改在本仓库 `yingliu-agent` 里原地替换。agent2 的 P0 壳和主题可以移植进来。
 - C. 两边同时写。
 
-推荐 **A**。agent2 已经有符合纸感/暗房和 CSP 的壳，历史干净。本仓库核心文件密度高，原地替换容易把 DSH 形状的 `ctx.llm` 和独立 `ProviderHost` 搅在一起。选 B 也可以完成产品，但会推翻「新仓库」那条已确认决定，应明确写下来。不推荐 C。
+当时推荐 A，是因为 agent2 的历史更干净，本仓库核心文件很密。chen 选择 B。原地替换的额外风险写在第 8 节末尾。不选 C。
 
 ### 2. 是否引入 DSH / cordis 运行时
 
-- A. 不引入运行时。只移植第 5 节标成「直接移植」的领域模块，宿主服务用本应用端口替代。并据此收窄重构方案里「不引入 DSH、cordis」那一句。
+已定 **A**。不引入运行时。只移植第 5 节里不依赖宿主的领域模块，宿主服务用本应用端口替代。`docs/REFACTOR_PLAN.md` 里「不引入 DSH、cordis」已按此收窄。dsh-vision 不作为可选瀑布。
+
+- A. 不引入运行时。只移植领域模块，并收窄重构方案那一句。
 - B. 把 cordis 和 DSH 宿主嵌进独立应用，让插件 `apply(ctx)` 原样跑。
 - C. 独立应用改回 DSH 插件，不再做 Electron 壳。
 
-推荐 **A**。B 让凭据进入 profile 共用服务，CSP 和场景隔离不再由本应用单独成立，还要先核对每个 `@deepseek-ai/*` 包的许可证。C 和「独立 agent 应用」相反。dsh-vision 随 A 一并放弃，不作为可选瀑布。
-
 ### 3. 工程 schema 是否升到 3
+
+已定 **A**。写入 schema 3。读 1/2/3。制作策略待确认前禁止生成和按成片导出。
 
 - A. 独立应用写入 schema 3。读 1/2/3。制作策略待确认前禁止生成和按成片导出。
 - B. 保持写入 schema 2。制作策略放在 sidecar，不进 `project.json`。
 - C. 只读 schema 3，保存时降回 2。
 
-推荐 **A**。策略和导演文档是工程事实，放进 sidecar 会再出现一份可以和画面不一致的副本。C 会丢掉用户已经确认的制作模式。旧的 schema 2 应用打开 3 会失败，这是预期：用仍能写 2 的旧版本覆盖 3 之前，用户应备份整个工程目录（含 `.studio`）。
-
 ### 4. 导演文档和现有 `story` sidecar 的关系
 
-- A. 导演文档成为工程内的计划真源。`agent-data/stories` 只作旧档导入。与重构方案「已批准计划写入工程修订」一致，结构换成插件的 `DirectorDocument`。
+已定 **A**。导演文档成为工程内的计划真源。`agent-data/stories` 只作旧档导入。八阶段工具读写这份文档。插件文档比现有 story 细的字段保留，用不到的留空。
+
+- A. 导演文档成为工程内的计划真源。sidecar 只作导入。
 - B. 两份并存：sidecar 给智能体八阶段，导演文档只给手工工作台。
 - C. 不迁导演文档，八阶段继续用现在的 `story`。
 
-推荐 **A**。B 会做出两个「已批准计划」。C 则放弃插件这批最完整的创作约束（角色引用、批准哈希、不能由工具代签）。若选 A，八阶段工具读写的是这份文档，而不是再定义第三套字段。插件文档比现在的 story 细（表演、世界坐标、验收条件）。迁入时保留字段，八阶段没有用到的字段可以留空，不要删结构。
-
 ### 5. 官方协议怎么进注册表
 
-- A. 增加插件那些协议 id。`async-task` 留给没有官方适配器的端点。能力预检失败就不提交。
+已定 **A**。增加插件那些协议 id。`async-task` 留给没有官方适配器的端点。能力预检失败就不提交。预检未做真实供应商测试，迁移阶段只用 mock。
+
+- A. 增加插件协议 id，保留 `async-task`，预检失败不提交。
 - B. 继续只用 `async-task` 模板描述所有厂商。
 - C. 用官方适配器替换并删除 `async-task`。
 
-推荐 **A**。模板适配器表达不了各厂商已经写好的轮询和取消差异。C 会拆掉本仓库已经验收的可配置模板。预检文档日期是 2026-11-06，且写明未做真实供应商测试；上线前要用 mock 锁契约，真账号验收另算，不在迁移阶段用付费调用代替。
-
 ### 6. 插件工程里的模型连接如何交给用户
 
-- A. 导入 URL、协议、模型名和角色，密钥全部重新填写。不读 DSH 凭据。
-- B. 尝试按 `DSH_VIDEO_STUDIO_*` 从本机 DSH 配置里把密钥拷过来。
-- C. 不提供连接导入，只打开工程文件。
+已定 **A**。导入 URL、协议、模型名和角色。密钥由用户重新保存。不读 DSH 凭据。
 
-推荐 **A**。B 违反「不读其他应用凭据」。C 可用但每条连接都要手打 URL。
+- A. 导入非密钥字段，密钥重新填写。
+- B. 按 `DSH_VIDEO_STUDIO_*` 从本机 DSH 配置拷贝密钥。
+- C. 不提供连接导入，只打开工程文件。
 
 ### 7. 导出闸门以哪份质检为准
 
-- A. 导出只认插件这种本地质检：结构硬失败不能 `force`。智能体 `quality_check` 仍可做建议，不能放行。
+已定 **A**。导出只认本地质检。结构硬失败不能 `force`。智能体 `quality_check` 仍可做建议，不能放行。
+
+- A. 导出只认本地质检。硬失败不能 `force`。`quality_check` 只作建议。
 - B. 保持现在的智能体 `force` 语义，本地质检只展示。
 - C. 两份都只展示，人随时导出。
 
-推荐 **A**。插件已经把「硬失败不能绕过」做成导出条件。若保留 `force`，它只能覆盖启发式条目，不能覆盖缺文件和坏结构。
-
 ### 8. 前端替换的载体
 
-- A. 以 agent2 的 P0 壳为代码起点，在同一套 `yl-` / `data-theme` 上加第 6 节的面板。
+已定 **A**。以 agent2 的 P0 壳为代码起点，移植进本仓库，在同一套 `yl-` / `data-theme` 上加第 6 节的面板。
+
+- A. 移植 agent2 的 P0 壳，在同一套令牌上加面板。
 - B. 在本仓库 `src/client` 上把 `vs-` 涂成纸感。
 - C. 插件 `styles.css` 和 agent2 令牌各留一套，运行时切换。
 
-推荐 **A**。B 会把两套皮的问题再修一遍。C 就是现在的分裂。
-
 ### 9. 旧插件用户的数据目录
 
-- A. 不扫描 DSH profile，也不扫描本应用正在用的数据目录。用户指定工程文件夹，按 7.1 打开。密钥不迁移。
-- B. 启动时扫描常见 DSH 目录并列出工程。
+已定 **A**。不扫描 DSH profile，也不自动扫描本应用正在使用的数据目录。用户指定工程文件夹再按第 7.1 节打开。密钥不迁移。
 
-推荐 **A**。扫描容易读到别的插件配置。即使用户指定目录，也只读工程和 `models.json` 的非密钥字段。
+- A. 不扫描。用户指定工程文件夹。密钥不迁移。
+- B. 启动时扫描常见 DSH 目录并列出工程。
 
 ---
 
 ## 11. 不确定与未核对
 
-- 没有对 `src/workflows/service.ts`、`src/host/store.ts`、`src/host/renderer.ts` 做逐行 diff。插件在供体 `ef3fc82` 之后的耐久、发布和 Windows 重命名修复，可能还有本仓库尚未对齐的分支。阶段 B 开始前应把这三份文件的测试差列成清单，而不是假设「供体在本仓库，所以插件没有更多修复」。
+- 没有对 `src/workflows/service.ts`、`src/host/store.ts`、`src/host/renderer.ts` 做逐行 diff。插件在供体 `ef3fc82` 之后的耐久、发布和 Windows 重命名修复，可能还有本仓库尚未对齐的分支。阶段 C 开始前应把这三份文件的测试差列成清单，而不是假设「供体在本仓库，所以插件没有更多修复」。
 - `src/models/capabilities.ts` 的 `realProviderTested: false` 与 `checkedAt: '2026-11-06'` 是插件自己的边界。本文不声称这些请求形状在 2026-11-15 仍被厂商接受。
 - `@deepseek-ai/cordis` 与其他 DSH npm 包的许可证没有从包内 LICENSE 核对。只核对了 deepseek-harness 仓库根文件，以及 dsh-vision 仓库的 MIT。
 - 本仓库 `src/host/service.ts` 仍有 `ctx.llm.listProviders()` 这种命名。它现在指向 `ProviderHost`，不是 cordis。阅读旧代码时容易看成插件宿主，移植时不要按这个名字去接 DSH。

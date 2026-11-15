@@ -7,7 +7,9 @@
 - 插件版 [yingliu-video-studio](https://github.com/lakeofsky347/yingliu-video-studio) `0.6.1`：DSH / cordis 插件。宿主 `src/host/index.ts` 用 `apply(ctx)` 逐条注册 `/api/video-studio/<endpoint>`；客户端 `src/client/index.tsx` 从宿主 `theme` 同步 `controller.setScheme`，只注入一份 `styles.css`。
 - 独立桌面版 [yingliu-studio](https://github.com/lakeofsky347/yingliu-studio)：本仓库的拆分来源，模块划分与本仓库同源。智能体循环是本仓库相对插件的增量，插件没有 `src/agent/`。
 
-新仓库借鉴插件的**接法**（显式端点表、单一变量表、主题从外部推入控制器、`ModelRegistry` 为模型配置事实），不引入 DSH、cordis，也不读取其他应用的凭据。
+实现借鉴插件的**接法**（显式端点表、单一变量表、主题从外部推入控制器、`ModelRegistry` 为模型配置事实）。不引入 DSH / cordis **运行时**：不嵌入 cordis 进程、`cordis.patch.yml`、`@deepseek-ai/*`、DSH 凭据服务、DSH 会话、dsh-vision 瀑布或 `video_*` 工具名。插件里不依赖宿主的领域模块可以移植。不读取其他应用的凭据。
+
+这句和 2026-11-15 的迁移决定是同一条。全文见 [VIDEO_STUDIO_MIGRATION_ANALYSIS.md](VIDEO_STUDIO_MIGRATION_ANALYSIS.md)。实现落在本仓库分支 `cursor/refactor-plan-293f`，在现有代码上替换。yingliu-agent2 `main` @ `07ed7c5` 的 P0 壳和主题可以参考或移植，两个仓库都是 GPL-3.0-only。上文「新仓库从头实现、本仓库业务代码不在本次改动范围内」和下面决策表第 1 条保留为当时的记录。代码落点、DSH 的范围、工程 schema 3、导演文档和前端壳以迁移分析第 10 节为准。业务代码等该文的分阶段计划确认后再改。
 
 约束贯穿全文：API Key 只进凭据服务；工程、`provider.json`、注册表、偏好、备份、任务参数都不出现密钥明文；CSP 维持 `default-src 'self'`，不放宽。
 
@@ -111,13 +113,13 @@ React（App / Studio / AgentPanel）
 
 | 处置 | 内容 | 理由 |
 | --- | --- | --- |
-| 保留协议，换清晰实现 | 工程 schema v2、稳定 ID、有理数 FPS、整数帧、相对资产路径、`expectedRevision`、不可变版本 + 原子 head、`.yingliu` v1/v2 | 这是已验收的数据契约，重写存储格式没有收益。 |
+| 保留协议，换清晰实现 | 稳定 ID、有理数 FPS、整数帧、相对资产路径、`expectedRevision`、不可变版本 + 原子 head、`.yingliu` v1/v2。工程写入改为 schema 3，仍读 1/2 | 身份和修订号不改。schema 3 与制作策略见迁移分析已定的问题 3 |
 | 保留行为 | 同工程写队列、场景与编辑器分进程/分 origin、场景无 Node/IPC、媒体任务对账与「不确定则不重投」、智能体成功回执、cost/export 默认要审批 | 可靠性工作的核心，测试已覆盖（`tests/storage.test.ts`、`tests/agent-success-receipt.test.ts`、`tests/p0-scene-isolation.test.ts` 等）。 |
 | 保留并收成单一事实 | 文本 / 多模态分离、OpenAI 默认、两个密钥引用、`ModelRegistry` 的协议与角色表 | PR #9 的产品决定。去掉 `provider.json` 双写，引用字符串保持不变以便旧钥匙环继续可用。 |
 | 保留依赖与形态 | Electron 44、esbuild `chrome120` 单包、LiteGraph 只做分镜主链、`node --test`、Playwright verify、三平台 CI | 见第 3 节取舍。 |
 | 重写 | UI 皮肤与信息架构、应用组装、RPC 类型、智能体端口、样式系统、偏好存储 | 当前结构挡着主题和后续功能。 |
 | 重写时参考插件接法 | 端点逐条登记、`setScheme` 由外部驱动、一份 CSS 变量、`ProjectHub` 作为工程边界 | `yingliu-video-studio` `src/host/index.ts`、`src/client/index.tsx`、`src/client/styles.css`。 |
-| 丢弃，不迁入新仓库默认树 | Tauri 壳、sidecar 作为产品入口、DSH/cordis 注入、`demo` 模式进入正常数据目录、把节点图画成通用 Comfy 执行器、对话与智能体两套导演 | Tauri 未过内存线；DSH 与「凭据只属于本应用」冲突；双导演是技术债。P0 报告可作决策记录留档，不带可执行壳。 |
+| 丢弃运行时，不丢领域模块 | Tauri 壳、sidecar 作为产品入口、DSH/cordis 进程与注入、`demo` 模式进入正常数据目录、把节点图画成通用 Comfy 执行器、对话与智能体两套导演 | Tauri 未过内存线；DSH 运行时与「凭据只属于本应用」冲突。不依赖宿主的领域模块按迁移分析移植。双导演是技术债。P0 报告可作决策记录留档，不带可执行壳。实现落在本仓库，不再要求另起仓库 |
 
 ---
 
@@ -594,7 +596,7 @@ P3 之后才考虑：素材垃圾回收、多人编辑、节点市场，以及�
 
 | 轮次 | 编号 | 选定 | 决定 | 状态 |
 | --- | --- | --- | --- | --- |
-| 方案第 5 节 | 1 | A | 新仓库、新 Git 历史；旧仓库只读到 P2 验收完再归档。许可证保持 GPL-3.0-only | 已确认（2026-11-15） |
+| 方案第 5 节 | 1 | A | 新仓库、新 Git 历史；旧仓库只读到 P2 验收完再归档。许可证保持 GPL-3.0-only。同日迁移分析问题 1 改为在本仓库原地替换，见该文第 10 节 | 已确认后被同日决定取代落点（2026-11-15） |
 | 方案第 5 节 | 2 | A | 首次启动纸感（L1）。暗房是同布局的第二态。跟随系统只做可选项，不作首次默认 | 已确认（2026-11-15） |
 | 方案第 5 节 | 3 | B | P2 结束后用只读讨论打通文本端口。制作、计费、导出留到 P3 | 已确认（2026-11-15） |
 | 方案第 5 节 | 4 | A | 迁移成功后 `provider.json` 写成 version 4 标记，去掉 `config` / `vision`，不再双写 | 已确认（2026-11-15） |
@@ -619,7 +621,7 @@ P3 之后才考虑：素材垃圾回收、多人编辑、节点市场，以及�
 
 - A. 新目录新 Git 历史，旧仓库只读到 P2 验收完再归档。
 - B. 在本仓库里大改，保留 git blame。
-- 推荐 **A**。你已经决定新开仓库；本仓库的历史对 blame 帮助有限，因为核心文件是压缩写法。许可证保持 GPL-3.0-only，NOTICE 写明源自 yingliu-agent / yingliu-studio。
+- 当时推荐 **A**。本仓库的历史对 blame 帮助有限，因为核心文件是压缩写法。许可证保持 GPL-3.0-only，NOTICE 写明源自 yingliu-agent / yingliu-studio。2026-11-15 的迁移分析问题 1 改为在本仓库原地替换，不按这条推荐。
 
 **2. 默认主题**
 
@@ -669,6 +671,6 @@ P3 之后才考虑：素材垃圾回收、多人编辑、节点市场，以及�
 ## 6. 不在本次重构里做的事
 
 - 不改 PR #9 的产品决定：默认 OpenAI、文本与多模态两套配置、两把钥匙。
-- 不把 DSH 插件运行时嵌进来。插件只提供接法。
+- 不把 DSH / cordis 运行时嵌进来。可以移植不依赖宿主的领域模块。范围以迁移分析已定的问题 2 为准。
 - 不放宽 CSP，不把密钥写入仓库样例、工程或偏好。
-- 不在本仓库改业务代码、不开 PR、不建远程新仓库。新仓库由你按本方案另建。
+- 本文成文时不在本仓库改业务代码。2026-11-15 的迁移决定改为在 `cursor/refactor-plan-293f` 原地替换；业务代码仍等迁移分析的分阶段计划确认后再改。
