@@ -3,6 +3,7 @@ import type { VideoProject } from '../shared/types.ts';
 import type { PublicRun, RunStep, ToolRisk } from '../agent/contracts.ts';
 import { StudioController } from './controller.ts';
 import { PlanReview, StoryPanel } from './StoryPanel.tsx';
+import { DirectorDocumentPanel } from './DirectorDocumentPanel.tsx';
 import { AgentRunFeed } from './agent-feed.ts';
 export { parseSse } from './agent-feed.ts';
 
@@ -61,6 +62,7 @@ export function AgentPanel({controller,project}:{controller:StudioController;pro
         <button disabled={disabled} onClick={()=>void refreshCaps()}>刷新能力</button>
       </div>}
       <StoryPanel controller={controller} project={project}/>
+      <DirectorDocumentPanel controller={controller} project={project}/>
     </div>
     <div className="vs-agent-runs">
       <ul aria-label="智能体运行">{runs.map(item=><li key={item.id}><button className={item.id===selected?'is-active':''} onClick={()=>setSelected(item.id)}>{runStatusNames[item.status]} · {item.goal.slice(0,40)}</button></li>)}</ul>
