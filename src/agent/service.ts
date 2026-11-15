@@ -9,6 +9,8 @@ import type { AgentDocs, Capabilities, ToolContext } from './contracts.ts';
 import { join } from 'node:path';
 import { submissionOf } from './submission.ts';
 import { emptyLedger, emptyStory, normalizeCharacter, normalizeStyle, ProjectDocs, storyBrief, anchorPrompt, type Ledger, type QcReport, type Story } from './story.ts';
+import { draftFromStory, readDirectorDocument, storyFromDirector } from '../director/document.ts';
+import type { VideoProject } from '../shared/types.ts';
 import { qualityCheck } from './tools.ts';
 
 export interface ResolvedAgentModel { config: ChatConfig; parameters: Record<string, unknown>; connectionId?: string; vision: boolean }
@@ -79,21 +81,51 @@ export class AgentService {
   private listeners = new Set<(event: AgentEvent) => void>();
   private store: RunStore; private tools: AgentTool[]; private initialized?: Promise<void>; private stopped = false;
   private stories: ProjectDocs<Story>; private ledgers: ProjectDocs<Ledger>; private qcs: ProjectDocs<{ version: number; report?: QcReport }>;
+  private planCache = new Map<string, Story>();
   constructor(directory: string, private readonly port: AgentPort, private readonly options: AgentServiceOptions) {
     this.store = new RunStore(directory, options.redact); this.tools = options.tools ?? createTools();
     const base = options.dataDirectory ?? directory;
     this.stories = new ProjectDocs(join(base, 'stories'), emptyStory); this.ledgers = new ProjectDocs(join(base, 'ledger'), emptyLedger); this.qcs = new ProjectDocs(join(base, 'qc'), () => ({ version: 0 }));
   }
   get toolList(): readonly AgentTool[] { return this.tools; }
+  private async openedProject(projectId: string): Promise<VideoProject | null> {
+    try { return (await this.port.snapshot(projectId)).project ?? null; } catch { return null; }
+  }
+  private async readPlan(projectId: string): Promise<{ story: Story; project: VideoProject | null }> {
+    const project = await this.openedProject(projectId);
+    const doc = project ? readDirectorDocument(project) : undefined;
+    if (doc) { this.planCache.set(projectId, storyFromDirector(doc)); return { story: storyFromDirector(doc), project }; }
+    const sidecar = await this.stories.get(projectId);
+    return { story: sidecar, project };
+  }
+  private async writePlan(projectId: string, next: Story, project: VideoProject | null, expectedVersion?: number): Promise<Story> {
+    if (!project) return this.stories.update(projectId, () => next, expectedVersion);
+    const doc = readDirectorDocument(project);
+    const current = doc ? storyFromDirector(doc) : await this.stories.get(projectId);
+    if (expectedVersion !== undefined && expectedVersion !== current.version) throw Object.assign(new Error(`版本已变化（当前 ${current.version}），请重新读取`), { code: 'REVISION_CONFLICT' });
+    const story = { ...next, version: current.version + 1 };
+    const draft = draftFromStory(doc, story);
+    draft.status = 'draft';
+    delete draft.approvedAt;
+    const saved: VideoProject = { ...structuredClone(project), schemaVersion: 3, productionPolicy: project.productionPolicy, extensions: { ...project.extensions, directorDocument: draft } };
+    const committed = await this.port.commit(projectId, project.revision, saved, {}, '保存导演文档草案');
+    const written = readDirectorDocument(committed.project ?? saved);
+    const storyOut = written ? storyFromDirector(written) : story;
+    this.planCache.set(projectId, storyOut);
+    return storyOut;
+  }
   docs(projectId: string): AgentDocs {
     return {
-      story: () => this.stories.get(projectId),
-      updateStory: (change, expected) => this.stories.update(projectId, change, expected),
+      story: () => this.readPlan(projectId).then(value => value.story),
+      updateStory: async (change, expected) => { const { story, project } = await this.readPlan(projectId); return this.writePlan(projectId, change(story), project, expected); },
       ledger: () => this.ledgers.get(projectId),
       saveQc: async report => { await this.qcs.update(projectId, current => ({ ...current, report })); },
     };
   }
-  story(projectId: string) { return this.stories.get(projectId); }
+  story(projectId: string): Promise<Story> { return this.readPlan(projectId).then(value => value.story); }
+  private async promptStory(projectId: string): Promise<Story> {
+    return this.planCache.get(projectId) ?? await this.stories.get(projectId);
+  }
   /** Agent-side project data for backups: story, budget ledger and last QC report. Missing documents are omitted. */
   async exportDocs(projectId: string): Promise<Record<'story' | 'ledger' | 'qc', unknown>> {
     const [story, ledger, qc] = await Promise.all([this.stories.raw(projectId), this.ledgers.raw(projectId), this.qcs.raw(projectId)]);
@@ -122,21 +154,26 @@ export class AgentService {
   /** Restore agent data into a (new) project ID. All documents are validated first (nothing is written if any is invalid); projectId is rewritten. */
   async importDocs(projectId: string, docs: Partial<Record<'story' | 'ledger' | 'qc', unknown>>): Promise<void> {
     this.validateDocs(docs);
-    if (docs.story) await this.stories.put(projectId, { ...migrateStory(docs.story as Record<string, unknown>)!, projectId });
+    if (docs.story) {
+      const story = { ...migrateStory(docs.story as Record<string, unknown>)!, projectId };
+      const project = await this.openedProject(projectId);
+      if (project) await this.writePlan(projectId, story, project);
+      else await this.stories.put(projectId, story);
+    }
     if (docs.ledger) await this.ledgers.put(projectId, { ...emptyLedger(projectId), ...(docs.ledger as Ledger), projectId });
     if (docs.qc) await this.qcs.put(projectId, docs.qc as { version: number; report?: QcReport });
   }
   /** User edits from the UI (style, characters, logline). Shots are changed through the agent's plan_shots or here wholesale. */
   async saveStory(projectId: string, input: Record<string, unknown>, expectedVersion: number): Promise<Story> {
-    return this.stories.update(projectId, current => {
-      const next = { ...current, updatedAt: now() };
-      if (typeof input.title === 'string') next.title = input.title.trim().slice(0, 80);
-      if (typeof input.logline === 'string') next.logline = input.logline.trim().slice(0, 1200);
-      if (input.style !== undefined) next.style = normalizeStyle(input.style);
-      if (Array.isArray(input.characters)) { const list = input.characters.slice(0, 20).map(normalizeCharacter); const used = new Set(next.shots.flatMap(s => s.characters)); const missing = [...used].filter(id => !list.some(c => c.id === id)); if (missing.length) throw new Error('分镜仍在使用这些角色，不能删除：' + missing.join(', ')); next.characters = list; }
-      if (input.status === 'empty') { next.status = 'empty'; delete next.approvedAt; }
-      return next;
-    }, expectedVersion);
+    const { story: current, project } = await this.readPlan(projectId);
+    const next = { ...current, updatedAt: now() };
+    if (typeof input.title === 'string') next.title = input.title.trim().slice(0, 80);
+    if (typeof input.logline === 'string') next.logline = input.logline.trim().slice(0, 1200);
+    if (input.style !== undefined) next.style = normalizeStyle(input.style);
+    if (Array.isArray(input.characters)) { const list = input.characters.slice(0, 20).map(normalizeCharacter); const used = new Set(next.shots.flatMap(s => s.characters)); const missing = [...used].filter(id => !list.some(c => c.id === id)); if (missing.length) throw new Error('分镜仍在使用这些角色，不能删除：' + missing.join(', ')); next.characters = list; }
+    if (input.status === 'empty') { next.status = 'empty'; delete next.approvedAt; }
+    if (input.status === 'approved') next.status = current.status;
+    return this.writePlan(projectId, next, project, expectedVersion);
   }
   ledger(projectId: string) { return this.ledgers.get(projectId); }
   setProjectBudget(projectId: string, maxCost: number | null, currency?: string): Promise<Ledger> {
@@ -398,7 +435,7 @@ export class AgentService {
       const compressed = compressMessages(run.messages, this.options.contextChars ?? 120_000);
       if (compressed.compressed) { run.messages = compressed.messages; const s = await this.step(run, { kind: 'compress', status: 'running' }); await this.finishStep(run, s, { status: 'complete', summary: '已压缩较早的上下文' }); }
       const caps = await this.capabilities(), tools = this.runTools(run, caps.capabilities), roleText = capabilityPrompt(caps.capabilities.roles);
-      const brief = storyBrief(await this.stories.get(run.projectId)), planRule = brief ? brief : '工程还没有已批准的创作计划：多镜头或有角色的目标，先用 plan_story（剧本/风格/角色）和 plan_shots（分镜表）提交计划，等用户批准后再动手；简单的单镜头修改可以直接做。写镜头源码前可用 skill_read 查阅导演技能文档。';
+      const brief = storyBrief(await this.promptStory(run.projectId)), planRule = brief ? brief : '工程还没有已批准的创作计划：多镜头或有角色的目标，先用 plan_story（剧本/风格/角色）和 plan_shots（分镜表）提交计划，等用户批准后再动手；简单的单镜头修改可以直接做。写镜头源码前可用 skill_read 查阅导演技能文档。';
       const promptExtra = roleText.text + '\n' + planRule;
       const changed = JSON.stringify(run.active?.tools) !== JSON.stringify(tools.map(t => t.name));
       if (run.active && changed) { run.messages.push({ role: 'user', content: '（系统通知）可用生成能力已变化：' + roleText.text }); await this.store.trace(run.id, { event: 'capabilities', roles: caps.capabilities.roles, tools: tools.map(t => t.name) }); }
