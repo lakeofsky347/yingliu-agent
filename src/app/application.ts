@@ -33,7 +33,6 @@ for(const endpoint of ['models.list','models.connection.save','models.connection
 for(const endpoint of ['workflows.run','workflows.list','workflows.get','workflows.retry','workflows.pause','workflows.apply'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['agent.start','agent.list','agent.get','agent.trace','agent.approve','agent.reject','agent.resume','agent.pause','agent.cancel','agent.tools','agent.capabilities','story.get','story.save','agent.qc','agent.qc.last','agent.ledger','agent.budget.set'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['app.onboarding.get','app.onboarding.complete'])ENDPOINTS.add(endpoint);
-for(const endpoint of ['app.appearance.get','app.appearance.save'])ENDPOINTS.add(endpoint);
 ENDPOINTS.add('providers.vision.save');
 export class MemorySecrets implements SecretStore {
   private values=new Map<string,string>();
@@ -46,7 +45,6 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
   if(!Number.isFinite(projectRootWaitMs)||projectRootWaitMs<0)throw new RangeError('工程目录锁等待时间必须是非负有限数字');
   const {dataDirectory,projectsDirectory}=applicationDirectories(options);
   const onboardingFile=join(dataDirectory,'onboarding-v1');
-  const appearanceFile=join(dataDirectory,'appearance-v1');
   const ownership=options.ownership??await acquireApplicationOwner({dataDirectory,projectsDirectory},'application');
   const cleanups:(()=>Promise<unknown>)[]=[];
   try{
@@ -268,20 +266,6 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         case 'app.onboarding.complete':{
           await writeDurableFile(onboardingFile,'1\n');
           value={completed:true};
-          break;
-        }
-        case 'app.appearance.get':{
-          let look:string|undefined;
-          try{look=(await readFile(appearanceFile,'utf8')).trim();}
-          catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
-          value={look:look==='graphite'||look==='lightbox'?look:null};
-          break;
-        }
-        case 'app.appearance.save':{
-          const {look}=data;
-          if(look!=='graphite'&&look!=='lightbox')throw new Error('主题无效');
-          await writeDurableFile(appearanceFile,look+'\n');
-          value={look};
           break;
         }
         case 'app.exportProject':value=await exportProjectArchive(backend,data,agentArchive);break;
