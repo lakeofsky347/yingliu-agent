@@ -16,6 +16,7 @@ export function AudioPanel({project,snapshot,controller,assetUrl,selectedShot,bu
   return <div className="vs-audio-panel">
     <div className="vs-audio-heading"><div><h3>配音、音乐与音效</h3><p>导入音频后绑定镜头；全片音乐可循环。刷新预览会生成与成片相同的混音。</p></div><button onClick={()=>setSettingsOpen(!settingsOpen)}>配音模型设置</button></div>
     {settingsOpen&&<TtsConfig snapshot={snapshot} controller={controller} busy={busy}/>}
+    <LocalSfx controller={controller} busy={busy}/>
     <div className="vs-audio-add"><Field label="音频资产"><select aria-label="音频资产" value={assetId} onChange={e=>setAssetId(e.target.value)}><option value="">选择音频</option>{assets.map(a=><option key={a.id} value={a.id}>{a.name} · {(a.duration||0).toFixed(1)}s</option>)}</select></Field><Field label="用途"><select aria-label="音频用途" value={role} onChange={e=>{const next=e.target.value as AudioClip['role'];setRole(next);if(next==='music')setShotId('');}}><option value="voice">配音</option><option value="music">背景音乐</option><option value="sfx">音效</option></select></Field><Field label="绑定范围"><select aria-label="音频绑定范围" value={shotId} onChange={e=>setShotId(e.target.value)}><option value="">整部影片</option>{project.shots.map(s=><option key={s.id} value={s.id}>{s.title}</option>)}</select></Field><button disabled={busy||!assetId} onClick={add}>添加声音片段</button></div>
     {assets.length===0&&<p className="vs-audio-empty">先在资产库导入 WAV、MP3、M4A、AAC、FLAC 或 OGG；也可以填写镜头旁白并生成配音。</p>}
     <label className="vs-audio-duration-lock"><input type="checkbox" checked={project.extensions.lockDuration===true} onChange={e=>controller.edit({...project,extensions:{...project.extensions,lockDuration:e.target.checked},revision:project.revision+1,updatedAt:new Date().toISOString()})}/>锁定镜头时长<small>解除锁定时，较长旁白可自动延长对应镜头。</small></label>
@@ -27,6 +28,17 @@ export function AudioPanel({project,snapshot,controller,assetUrl,selectedShot,bu
       <div className="vs-audio-clip-foot"><label><input type="checkbox" checked={!!c.loop} onChange={e=>patch(c.id,{loop:e.target.checked})}/>循环播放到绑定范围结束</label><small>{c.shotId?'片段起点相对镜头首帧':'片段起点相对全片首帧'} · 裁出留空使用源文件结尾</small></div>
     </article>;})}</div>
     <label className="vs-audio-enabled"><input type="checkbox" checked={project.target.audioMode==='mixed'} onChange={e=>controller.edit({...project,target:{...project.target,audioMode:e.target.checked?'mixed':'none'},revision:project.revision+1,updatedAt:new Date().toISOString()})}/>预览和导出包含声音</label>
+  </div>;
+}
+function LocalSfx({controller,busy}:{controller:StudioController;busy:boolean}){
+  const [kind,setKind]=useState<'tone'|'chime'|'whoosh'|'click'>('chime');
+  const [seconds,setSeconds]=useState('0.4');
+  const [frequency,setFrequency]=useState('440');
+  return <div className="vs-audio-add" aria-label="本地音效">
+    <Field label="本地音效"><select aria-label="本地音效种类" value={kind} onChange={event=>setKind(event.target.value as 'tone'|'chime'|'whoosh'|'click')}><option value="chime">铃声</option><option value="tone">单音</option><option value="whoosh">呼啸</option><option value="click">点击</option></select></Field>
+    <Field label="时长（秒）"><input aria-label="本地音效时长" type="number" min="0.05" max="10" step="0.05" value={seconds} onChange={event=>setSeconds(event.target.value)}/></Field>
+    <Field label="频率"><input aria-label="本地音效频率" type="number" min="20" max="12000" value={frequency} onChange={event=>setFrequency(event.target.value)}/></Field>
+    <button type="button" disabled={busy} onClick={()=>void controller.action('audio.sfx',{name:'本地音效',spec:{kind,durationSeconds:Number(seconds)||0.4,frequency:Number(frequency)||440,seed:7}},'本地音效已登记，没有调用模型。')}>合成本地音效</button>
   </div>;
 }
 export function TtsConfig({snapshot,controller,busy}:{snapshot:StudioSnapshot;controller:StudioController;busy:boolean}){
