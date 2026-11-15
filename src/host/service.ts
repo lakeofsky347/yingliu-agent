@@ -17,6 +17,8 @@ import {inspectCredential,isCredentialError,updateCredential} from '../app/secre
 import {defaultTtsSettings,validateTtsSettings} from '../shared/tts-capability.ts';
 import {assertCanExport,assertOrdinaryProjectSave,PROTECTED_EXTENSIONS} from '../core/production-policy.ts';
 import {approveDirectorDocument,assertDraftBase,draftFromStory,readDirectorDocument} from '../director/document.ts';
+import {localExportQuality} from '../workflows/local-quality.ts';
+import {synthesize} from '../agent/synth.ts';
 import type {Story} from '../agent/story.ts';
 
 interface TaskRequest { endpoint:'preview'|'export'|'generate'; payload:Record<string,string> }
@@ -302,7 +304,7 @@ export class StudioService {
   private async performRpc(endpoint:string,payload:unknown):Promise<RpcResult>{
     try{
       await this.initialized;if(this.disposed)throw new Error('应用服务已停止');const data=(payload??{}) as any;
-      if(['save','apply','saveSource','restoreSource','undo','redo','rename','retry','job.retry','import','audio','video.clip.save','video.clip.remove','video.clip.extract','production.set','director.document.save','director.document.approve'].includes(endpoint))this.assertRevision(data,true);
+      if(['save','apply','saveSource','restoreSource','undo','redo','rename','retry','job.retry','import','audio','audio.sfx','video.clip.save','video.clip.remove','video.clip.extract','production.set','director.document.save','director.document.approve'].includes(endpoint))this.assertRevision(data,true);
       else if(['generate','export','preview'].includes(endpoint)&&data.expectedRevision!==undefined)this.assertRevision(data);
       switch(endpoint){
         case 'catalog':this.providers=await Promise.all(this.ctx.llm.listProviders().map(async p=>{try{return {...p,models:await this.ctx.llm.listModels(p.id)};}catch(error){return {...p,models:[],error:error instanceof Error?error.message:'模型目录读取失败'};}}));break;
@@ -387,7 +389,8 @@ export class StudioService {
             }
           },data.shotId,this.recordedRequest('generate',data),data._retryOf);break;
         }
-        case 'export':{const {root,project}=this.required();assertCanExport(project);compileSpec(project);const snapshot=structuredClone(project);await this.start('export',async(signal,task)=>{const result=await this.renderer.export(root,snapshot,this.settings,signal,(p,m)=>this.progress(p,m));signal.throwIfAborted();await this.enqueue(async()=>{signal.throwIfAborted();const current=structuredClone(this.required().project);current.outputs.push(result);await this.persist(current,{},'导出成片记录');task.outputId=result.id;if(!result.url&&this.previewUrl)result.url=new URL(relative(root,result.path).split('/').map(encodeURIComponent).join('/'),this.previewUrl).href;});},undefined,this.recordedRequest('export',data),data._retryOf);break;}
+        case 'audio.sfx':{this.assertIdle();const {root}=this.required();const bytes=synthesize(data.spec);const asset=await this.store.importAsset(root,{name:String(data.name||'本地音效')+'.wav',mime:'audio/wav',description:'本地确定性音效，不调用模型',dataBase64:Buffer.from(bytes).toString('base64')},this.settings);const next=structuredClone(this.required().project);next.assets.push(asset);await this.persist(next,{},'登记本地音效');break;}
+        case 'export':{const {root,project}=this.required();assertCanExport(project);compileSpec(project);const snapshot=structuredClone(project);const quality=await localExportQuality(root,snapshot);if(quality.decision==='fail')throw Object.assign(new Error('本地质检发现硬失败：'+quality.checks.filter(check=>check.severity==='hard'&&check.status==='fail').map(check=>check.message).join('；')),{code:'LOCAL_QUALITY_FAILED'});await this.start('export',async(signal,task)=>{const result=await this.renderer.export(root,snapshot,this.settings,signal,(p,m)=>this.progress(p,m));signal.throwIfAborted();await mkdir(join(root,'.studio','quality','exports'),{recursive:true});await writeFile(join(root,'.studio','quality','exports',result.id+'.json'),JSON.stringify(quality,null,2)+'\n');await this.enqueue(async()=>{signal.throwIfAborted();const current=structuredClone(this.required().project);current.outputs.push(result);await this.persist(current,{},'导出成片记录');task.outputId=result.id;if(!result.url&&this.previewUrl)result.url=new URL(relative(root,result.path).split('/').map(encodeURIComponent).join('/'),this.previewUrl).href;});},undefined,this.recordedRequest('export',data),data._retryOf);break;}
         case 'history':return {ok:true,value:await this.store.history(this.required().root)};
         case 'undo':case 'redo':{this.assertIdle();this.project=await this.store.moveHistory(this.required().root,endpoint,data.expectedRevision);await this.refreshAfterCommit();break;}
         case 'rename':{this.assertIdle();if(typeof data.title!=='string'||!data.title.trim())throw new Error('工程名称不能为空');const next=structuredClone(this.required().project);next.title=data.title.trim();await this.persist(next,{},'重命名工程');break;}
