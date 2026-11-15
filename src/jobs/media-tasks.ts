@@ -4,6 +4,8 @@ import {createReadStream} from 'node:fs';
 import {join,resolve,sep} from 'node:path';
 import {cancelVideo as gatewayCancel,generateImage as openaiImage,getVideo as gatewayGet,lookupVideo as gatewayLookup,submitVideo as gatewaySubmit,type AdapterContext,type AdapterInput} from '../models/adapters/media.ts';
 import {cancelTemplate,pollTemplate,resolveTemplate,submitTemplate} from '../models/adapters/template.ts';
+import {templateAcceptsImage} from '../models/template-presets.ts';
+import {uploadDestination,type AuthorizeUpload} from '../models/upload-consent.ts';
 import type {RemoteJob as Job} from './contracts.ts';
 // Protocol dispatch: images / video-gateway keep their native adapters; async-task uses the configurable template adapter.
 const outputOf=(operation:string):'image'|'video'=>operation==='text-to-image'?'image':'video';
@@ -57,8 +59,8 @@ export class MediaTaskService {
   async list(projectId?:string):Promise<MediaTask[]>{await this.initialize();return [...this.tasks.values()].filter(task=>!projectId||task.projectId===projectId).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).map(task=>this.public(task));}
   async get(taskId:string):Promise<MediaTask>{return this.public(await this.required(taskId));}
   async hasUnfinished(connectionId:string,modelId?:string):Promise<boolean>{await this.initialize();return [...this.tasks.values()].some(task=>task.connection.id===connectionId&&(!modelId||task.model.id===modelId)&&!terminal.has(task.phase));}
-  generate(input:MediaRequest):Promise<MediaTask>{const captured=structuredClone(input);const next=this.submissions.then(()=>this.create(captured));this.submissions=next.then(()=>undefined,()=>undefined);return next;}
-  private async create(input:MediaRequest):Promise<MediaTask>{
+  generate(input:MediaRequest,authorizeUpload?:AuthorizeUpload):Promise<MediaTask>{const captured=structuredClone(input);const next=this.submissions.then(()=>this.create(captured,authorizeUpload));this.submissions=next.then(()=>undefined,()=>undefined);return next;}
+  private async create(input:MediaRequest,authorizeUpload?:AuthorizeUpload):Promise<MediaTask>{
     await this.initialize();if(this.stopped)throw new Error('媒体任务服务正在关闭');
     if(!input||!['text-to-image','text-to-video','image-to-video'].includes(input.operation)||typeof input.projectId!=='string'||typeof input.prompt!=='string'||!input.prompt.trim()||input.prompt.length>20000)throw new Error('请填写有效的工程、生成类型和提示词');
     if(input.clientRequestId!==undefined){
@@ -75,6 +77,7 @@ export class MediaTaskService {
     const output=input.operation==='text-to-image'?'image':'video';if(![output==='image'?'images':'video-gateway','async-task'].includes(resolved.connection.protocol)||!resolved.model.outputModalities.includes(output))throw new Error('所选模型不支持此生成操作');
     if(!resolved.model.inputModalities.includes('text'))throw new Error('所选模型不支持文字提示输入');
     if(input.operation==='image-to-video'&&!resolved.model.inputModalities.includes('image'))throw new Error('所选模型不支持图片输入');
+    if(input.operation==='image-to-video'&&authorizeUpload)authorizeUpload(uploadDestination(resolved));
     // Resolve now to reject unavailable credentials before registering work. Resolve again per HTTP operation.
     await this.registry.credential(resolved.connection);
     const ids=input.imageAssetIds??[];if(!Array.isArray(ids)||ids.some(id=>typeof id!=='string')||new Set(ids).size!==ids.length||ids.length>3)throw new Error('每次最多选择 3 张不同参考图片');
@@ -82,6 +85,7 @@ export class MediaTaskService {
     if(input.operation!=='image-to-video'&&ids.length)throw new Error('此操作不支持参考图片');
     // F09: the template adapter forwards exactly one image ({{image}}); never upload/bill for references that would be silently dropped.
     if(resolved.connection.protocol==='async-task'&&ids.length>1)throw new Error('此服务模板一次只支持 1 张参考图片');
+    if(resolved.connection.protocol==='async-task'&&ids.length&&!templateAcceptsImage(resolved.model.parameters))throw new Error('此服务模板的请求体没有 {{image}}，无法传送参考图片');
     const allowed=output==='image'?['size','quality','style','response_format','background','output_format','n']:['durationSeconds','width','height','fps','aspectRatio','seed','negativePrompt'];
     if(input.parameters&&Object.keys(input.parameters).some(key=>!allowed.includes(key)))throw new Error('请求包含当前协议不支持的生成参数');
     const parameters:Record<string,string|number|boolean>={};for(const [key,value]of Object.entries({...resolved.model.parameters,...input.parameters})){if(!allowed.includes(key))continue;if(!['string','number','boolean'].includes(typeof value)||typeof value==='number'&&!Number.isFinite(value)||typeof value==='string'&&value.length>4000)throw new Error('生成参数无效：'+key);parameters[key]=value;}

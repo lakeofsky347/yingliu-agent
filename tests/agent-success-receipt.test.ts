@@ -9,7 +9,7 @@ import type { AgentPort, PublicRun } from '../src/agent/contracts.ts';
 import { RunStore } from '../src/agent/run-store.ts';
 import { toolGateway } from './model-gateway.ts';
 
-const model = async () => ({ parameters: {}, vision: false, config: { baseUrl: 'http://gateway.test/v1', model: 'mock', timeoutMs: 1000, maxTokens: 1000, supportsTools: true } });
+const model = async () => ({ parameters: {}, config: { baseUrl: 'http://gateway.test/v1', model: 'mock', timeoutMs: 1000, maxTokens: 1000, supportsTools: true } });
 // Director calls now also have ledger entries. Preserve that prior history and
 // break the path only after the paid tool returns, rather than failing inside the tool fixture.
 async function breakLedger(directory:string){await rename(join(directory,'ledger'),join(directory,'ledger-fixture-backup'));await writeFile(join(directory,'ledger'),'ledger path unavailable');}

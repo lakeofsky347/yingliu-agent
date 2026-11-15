@@ -58,8 +58,13 @@ try{
   await native.evaluate(({dialog})=>{dialog.showMessageBox=async()=>({response:1,checkboxChecked:false});});
   let page=await native.firstWindow();await page.getByRole('heading',{name:'我的影片',exact:false}).waitFor();pass('relocated app starts outside source workspace');sandboxVerified=(await inspectNativeSandbox(native)).sandboxEnabled;assert.equal(sandboxVerified,true);pass('relocated desktop keeps Chromium sandbox enabled');
   const call=async(endpoint,payload={})=>{const response=await page.evaluate(async({endpoint,payload})=>window.yingliu.call(endpoint,payload),{endpoint,payload});if(!response.ok)throw new Error(response.error.message);if(response.value?.root&&response.value?.project)latestSnapshot=response.value;return response.value;};
+  assert.equal((await call('list')).projects.length,0,'desktop onboarding starts with its own empty project library');
+  const guide=page.getByRole('dialog',{name:'开始使用映流智能体'});
+  await guide.getByRole('button',{name:'开始新建影片',exact:true}).click();
+  await guide.waitFor({state:'hidden'});
+  pass('relocated app opens the first film brief from onboarding');
   if(process.env.CHROME_PATH)await call('environment',{browserPath:process.env.CHROME_PATH});
-  await page.getByRole('button',{name:'新建影片',exact:true}).first().click();await page.getByRole('textbox',{name:'影片名称',exact:true}).fill('打包后手动制作');await page.getByRole('textbox',{name:'主题与创作简报',exact:true}).fill('独立目录中继续制作自己的影片');await page.getByRole('button',{name:'创建空白影片',exact:true}).click();await page.getByRole('button',{name:'镜头',exact:true}).waitFor();let snapshot=await call('current');assert.equal(snapshot.project.shots.length,0);pass('blank storyboard graph');
+  await page.getByRole('textbox',{name:'影片名称',exact:true}).fill('打包后手动制作');await page.getByRole('textbox',{name:'主题与创作简报',exact:true}).fill('独立目录中继续制作自己的影片');await page.getByRole('button',{name:'创建空白影片',exact:true}).click();await page.getByRole('button',{name:'镜头',exact:true}).waitFor();let snapshot=await call('current');assert.equal(snapshot.project.shots.length,0);pass('blank storyboard graph');
   const detectedBrowser=snapshot.environment.browserPath;await page.getByRole('tab',{name:'运行环境',exact:true}).click();await page.getByRole('textbox',{name:'Chromium 浏览器路径',exact:true}).fill(join(temp,'missing-browser'));await page.getByRole('button',{name:'保存并检查环境',exact:true}).click();await page.getByText('部分工具无法执行。工程可以继续编辑；请修正路径后重新检查。',{exact:true}).waitFor();assert.equal((await call('app.health')).canRender,false);pass('invalid executable reports actual readiness failure');await page.getByRole('textbox',{name:'Chromium 浏览器路径',exact:true}).fill(detectedBrowser);await page.getByRole('button',{name:'保存并检查环境',exact:true}).click();await page.getByText('本地浏览器、编码器和媒体检查工具已就绪。',{exact:true}).first().waitFor();assert.equal((await call('app.health')).canRender,true);pass('environment form executes and validates real tool versions');await page.getByRole('tab',{name:'影片预览',exact:true}).click();
   for(let i=0;i<3;i++){await page.getByRole('button',{name:'镜头',exact:true}).click();await page.waitForTimeout(650);}snapshot=await call('current');assert.equal(snapshot.project.shots.length,3);const before=[...snapshot.project.shotOrder];pass('manual graph adds three connected shots');
   const chips=page.locator('.vs-shotchip');await chips.nth(2).dragTo(chips.nth(0));await page.waitForTimeout(850);snapshot=await call('current');assert.equal(snapshot.project.shotOrder[0],before[2]);pass('manual storyboard drag updates graph order');
@@ -112,7 +117,8 @@ async function runChild(command,args,environment,cwd){
 }
 
 async function verifyServices(){
-  const child=spawn(executable,[join(appRoot,'dist/web-server.mjs')],{cwd:temp,env:{...env,ELECTRON_RUN_AS_NODE:'1',YINGLIU_PORT:'0'},windowsHide:true,stdio:['ignore','pipe','pipe']});
+  const serviceData=join(temp,'service-data');
+  const child=spawn(executable,[join(appRoot,'dist/web-server.mjs')],{cwd:temp,env:{...env,YINGLIU_DATA_DIR:serviceData,YINGLIU_PROJECTS:join(serviceData,'projects'),ELECTRON_RUN_AS_NODE:'1',YINGLIU_PORT:'0'},windowsHide:true,stdio:['ignore','pipe','pipe']});
   let output='',errors='';
   child.stderr.on('data',chunk=>{errors+=chunk;});
   const stopped=new Promise(accept=>child.once('close',accept));

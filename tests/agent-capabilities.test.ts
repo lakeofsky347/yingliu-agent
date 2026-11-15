@@ -29,7 +29,7 @@ function port(caps: { value: Capabilities }) {
   };
   return { port: value, calls };
 }
-const model = async (): Promise<ResolvedAgentModel> => ({ parameters: {}, vision: false, config: { baseUrl: 'http://gateway.test/v1', model: 'deepseek-chat', timeoutMs: 5000, maxTokens: 1000, supportsTools: true } });
+const model = async (): Promise<ResolvedAgentModel> => ({ parameters: {}, config: { baseUrl: 'http://gateway.test/v1', model: 'deepseek-chat', timeoutMs: 5000, maxTokens: 1000, supportsTools: true } });
 async function settle(service: AgentService, id: string, until: PublicRun['status'][]) { for (let i = 0; i < 500; i++) { const run = await service.get(id); if (until.includes(run.status)) return run; await new Promise(r => setTimeout(r, 10)); } throw new Error('timeout ' + (await service.get(id)).status); }
 const names = (body: any) => (body.tools ?? []).map((t: any) => t.function.name) as string[];
 

@@ -41,8 +41,16 @@ test('adopting a media result refreshes only the same project and preserves a ty
 test('image-to-video selection requires an enabled video connection and explicit image capability',()=>{
   const connection={id:'video',name:'Video',protocol:'video-gateway' as const,baseUrl:'http://localhost',auth:'none' as const,credentialRef:'unused',enabled:true,revision:1,requestTimeoutMs:90000,concurrency:1,hasKey:false};
   const model={id:'text-video',connectionId:'video',model:'v',name:'Video',enabled:true,inputModalities:['text'] as ['text'],outputModalities:['video'] as ['video'],parameters:{}};
-  const catalog:RegistrySnapshot={version:1,connections:[connection,{...connection,id:'disabled',enabled:false}],models:[model,{...model,id:'reference-video',inputModalities:['text','image']},{...model,id:'disabled-video',connectionId:'disabled',inputModalities:['text','image']}],roles:[]};
-  assert.deepEqual(mediaModels(catalog,'image-to-video').map(value=>value.id),['reference-video']);assert.deepEqual(mediaModels(catalog,'text-to-image'),[]);
+  const catalog:RegistrySnapshot={version:1,connections:[connection,{...connection,id:'disabled',enabled:false},{...connection,id:'template',protocol:'async-task'}],models:[
+    model,{...model,id:'reference-video',inputModalities:['text','image']},{...model,id:'disabled-video',connectionId:'disabled',inputModalities:['text','image']},
+    {...model,id:'template-video',connectionId:'template',inputModalities:['text','image'],parameters:{preset:'dashscope-video'}},
+    {...model,id:'template-without-image-field',connectionId:'template',inputModalities:['text','image'],parameters:{preset:'kling-video'}},
+    {...model,id:'template-image',connectionId:'template',outputModalities:['image']},
+    {...model,id:'image-only-input',connectionId:'template',inputModalities:['image']},
+  ],roles:[]};
+  assert.deepEqual(mediaModels(catalog,'image-to-video').map(value=>value.id),['reference-video','template-video']);
+  assert.deepEqual(mediaModels(catalog,'text-to-video').map(value=>value.id),['text-video','reference-video','template-video','template-without-image-field']);
+  assert.deepEqual(mediaModels(catalog,'text-to-image').map(value=>value.id),['template-image']);
   assert.equal(mediaUsageLabel({}), '费用未知');assert.match(mediaUsageLabel({usage:{cost:0,currency:'USD'}}),/0\.0000 USD/);
 });
 

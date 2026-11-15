@@ -40,6 +40,10 @@ CLI、桌面、浏览器服务和默认 `createApplication` 共用同机所有�
 
 ## 模型中心与创作入口
 
+新配置默认使用 OpenAI 的 `https://api.openai.com/v1` 和 `gpt-4.1-mini`。快速设置中的文本和视觉连接各自保存凭据；视觉连接可以暂停并保留原配置。已有注册表继续决定角色、连接启用状态与凭据引用。Chat Completions 发送拒绝 HTTP 重定向，连接应填写最终 API 地址。
+
+截图和图生视频参考图的发送授权绑定实际模型和接口，并按用途独立保存。连接换绑后，待发送步骤会暂停并显示新的目标；智能体的图生视频同时校验工具调用、所选素材和独立的费用审批。已成功的步骤可以复用回执。
+
 应用数据目录的 `model-registry.json` 保存 version 1 的 `ProviderConnection`、`ModelDefinition` 和 `RoleBinding`。连接记录协议、地址、认证方式、凭据引用、超时与并发设置；模型以本地稳定 ID 关联连接，另保存供应商模型名、输入/输出模态及参数；角色为 director、scene、vision、image、video、speech。一个连接可以配置多个模型，角色可以分配给不同连接。
 
 首批协议为 Chat Completions、Images Generations、异步媒体网关 v1 与 Speech 兼容接口；供应商必须实现对应契约。目录探测失败时仍可手动配置模型，连接检查不触发生成。文本 JSON/SSE 仍由 `ProviderManager` 处理，媒体协议由 `src/models/adapters/media.ts` 处理。语音角色存在时使用其 Speech 连接；未配置时沿用现有本地语音/兼容 TTS 设置。
@@ -91,6 +95,8 @@ Workflow 的主记录与独立成功回执使用文件 fsync、原子 rename 和
 编辑器使用随机端口的 `127.0.0.1` origin，HTTP 写 API 要求随机 token 和相同 origin；桌面 IPC 只接受该窗口的主 frame、匹配 frameTreeNodeId 与白名单方法。编辑器 contextIsolation/sandbox 开启，Node 关闭。
 
 画面服务使用 `localhost` origin。Electron 强制 site-per-process，使模型场景与编辑器处于不同系统 renderer 进程；实际验收还检查二者 PID 不同。画面没有 preload bridge、Node 或 IPC，网络由 CSP 限制，资源服务只开放 runtime、媒体素材、检查图与成片，拒绝 project、凭据和日志。子 frame 导航和新窗口受控。
+
+运行时页面和依赖按内容哈希耐久发布。预览、截帧、检查与导出仍通过 `/index.html` 加载，查询参数把页面固定到本次准备的哈希版本，避免 Windows 替换正在读取的文件以及冷重载读到另一版。媒体 Range 响应持有同一文件句柄直至传输结束或取消；小文档在响应之前释放句柄。
 
 主画面与缩略帧以 ready/frame 回执和十秒 watchdog 判断无响应，后续 render 请求不能不断延迟这个界限。原生 resetScene 仅处理当前编辑窗口关联的 localhost child frame，排除 editor PID，再通过限定的 Chrome 调试协议中止对应 iframe target 的 JavaScript，并临时导航到空白页；重载采用最新已保存源码，可恢复无限循环场景，编辑器保留。没有宣称 CPU/内存配额、任意恶意代码完全隔离或通用执行资源沙箱。
 

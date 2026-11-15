@@ -22,6 +22,7 @@ function FrameThumb({url,frame,onSelect,label}:{url:string;frame:number;onSelect
 export function Preview({snapshot,project,selectedShot,controller,focusFrame,focusSerial,busy=false}:{snapshot:StudioSnapshot;project:VideoProject;selectedShot?:Shot;controller:StudioController;focusFrame?:number|null;focusSerial?:number;busy?:boolean}){
   const watchdog=useRef<RenderWatchdog|null>(null);
   const [renderError,setRenderError]=useState(''),[reload,setReload]=useState(0);
+  const [reloading,setReloading]=useState(false);
   const iframe=useRef<HTMLIFrameElement>(null),audio=useRef<HTMLAudioElement>(null),currentFrame=useRef(0);
   const [ready,setReady]=useState(false),[frame,setFrame]=useState(0),[playing,setPlaying]=useState(false),[sceneId,setSceneId]=useState(''),[showOutput,setShowOutput]=useState(false),[expanded,setExpanded]=useState(false),[jump,setJump]=useState('0'),[audioError,setAudioError]=useState(''),[capturing,setCapturing]=useState(false),[capture,setCapture]=useState<{path:string;url:string}|null>(null);
   const duration=project.shots.reduce((n,s)=>n+s.durationFrames,0),fps=project.target.fps.num/project.target.fps.den;
@@ -44,7 +45,20 @@ export function Preview({snapshot,project,selectedShot,controller,focusFrame,foc
   useEffect(()=>{const element=audio.current;if(!element)return;if(playing&&ready&&!showOutput){element.currentTime=Math.min(element.duration||Infinity,frame/fps);void element.play().catch(()=>{setAudioError('声音尚未播放，点击播放后重试。');setPlaying(false);});}else element.pause();return()=>element.pause();},[playing,ready,showOutput,snapshot.audioUrl]);
   useEffect(()=>{const element=audio.current;if(!element)return;const seconds=frame/fps;if(!playing){try{element.currentTime=seconds;}catch{}}},[frame,fps,playing]);
   useEffect(()=>{if(!expanded)return;const key=(event:KeyboardEvent)=>{if(event.key==='Escape')setExpanded(false);};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[expanded]);
-  async function reloadScene(){setPlaying(false);setReady(false);try{await window.yingliu?.resetScene?.();setRenderError('');setReload(value=>value+1);}catch(error){setRenderError(error instanceof Error?error.message:'刷新画面失败，请重试。');}}
+  async function reloadScene(){
+    if(reloading)return;
+    setReloading(true);setPlaying(false);setReady(false);
+    try{
+      await window.yingliu?.resetScene?.();
+      if(controller.getSnapshot().snapshot?.project?.id!==project.id)return;
+      // The iframe URL pins a published page, so reload the saved project snapshot before remounting it.
+      if(!await controller.refreshMediaProject())throw new Error('工程状态正在更新，请稍后重新加载画面。');
+      if(controller.getSnapshot().snapshot?.previewUrl===snapshot.previewUrl){
+        setRenderError('');setReload(value=>value+1);
+      }
+    }catch(error){setRenderError(error instanceof Error?error.message:'刷新画面失败，请重试。');}
+    finally{setReloading(false);}
+  }
   async function capturePng(){const capturedFrame=currentFrame.current;setPlaying(false);setCapturing(true);try{await controller.flush();if(controller.getSnapshot().error)throw new Error(controller.getSnapshot().error);const result=await controller.api.call<{frame?:{path:string;url:string}}>('inspect',{projectId:project.id,shotId:frameShotRange(project,capturedFrame).shot?.id,frame:capturedFrame});if(!result.frame)throw new Error('未获得 PNG 帧');setCapture(result.frame);controller.notify(`第 ${capturedFrame} 帧 PNG 已保存到项目中。`);}catch(error){controller.notify(error instanceof Error?error.message:'导出 PNG 失败');}finally{setCapturing(false);}}
   const localFrame=currentRange.localFrame;
   const output=project.outputs.at(-1),outdated=snapshot.previewRevision!==null&&snapshot.previewRevision!==project.revision;
@@ -53,7 +67,7 @@ export function Preview({snapshot,project,selectedShot,controller,focusFrame,foc
     <div className="vs-preview-heading"><span data-testid="current-shot-heading" data-shot-id={currentRange.shot?.id}>{currentRange.shot?`「${currentRange.shot.title}」· 帧 [${currentRange.start}, ${currentRange.end})`:'整片逐帧查看'}</span><button aria-label={expanded?'关闭大预览':'打开大预览'} onClick={()=>setExpanded(!expanded)}>{expanded?'收起 ✕':'大预览 ↗'}</button></div>
     <div className="vs-preview-screen" style={{'--vs-preview-ratio':`${project.target.width}/${project.target.height}`} as CSSProperties}>
       {showOutput&&output?.url?<video src={output.url} controls className="vs-output-video"/>:snapshot.previewUrl?<iframe key={`${snapshot.previewUrl}:${reload}`} ref={iframe} src={snapshot.previewUrl} title="影片画面预览" sandbox="allow-scripts allow-same-origin" onLoad={()=>requestRender(currentFrame.current)}/>:<div className="vs-preview-empty"><strong>画面从这里开始</strong><p>生成画面后，点击「预览」。<br/>手动编辑的镜头也可以直接预览。</p></div>}
-      {renderError&&!showOutput&&<div className="vs-render-error" role="alert"><strong>{renderError}</strong><button onClick={()=>void reloadScene()}>重新加载画面</button></div>}{snapshot.previewUrl&&!ready&&!renderError&&!showOutput&&<span className="vs-preview-badge">正在等待画面执行…</span>}{outdated&&<span className="vs-preview-badge">参数已更新 · 刷新预览</span>}
+      {renderError&&!showOutput&&<div className="vs-render-error" role="alert"><strong>{renderError}</strong><button disabled={reloading} onClick={()=>void reloadScene()}>重新加载画面</button></div>}{snapshot.previewUrl&&!ready&&!renderError&&!showOutput&&<span className="vs-preview-badge">正在等待画面执行…</span>}{outdated&&<span className="vs-preview-badge">参数已更新 · 刷新预览</span>}
     </div>
     {snapshot.audioUrl&&project.target.audioMode==='mixed'&&<audio ref={audio} src={snapshot.audioUrl} preload="auto" onError={()=>setAudioError('混音预览加载失败，可刷新预览后重试。')}/>}
     <div className="vs-player"><button aria-label={playing?'暂停':'播放'} disabled={disabled} onClick={()=>{setAudioError('');if(frame>=maxFrame)setFrame(0);setPlaying(v=>!v);}}>{playing?'Ⅱ':'▶'}</button><button aria-label="上一帧" disabled={disabled||frame===0} onClick={()=>seek(frame-1)}>◀|</button><button aria-label="下一帧" disabled={disabled||frame===maxFrame} onClick={()=>seek(frame+1)}>&gt;|</button><span>{(frame/fps).toFixed(3)}s</span><input type="range" aria-label="影片播放位置" min="0" max={maxFrame} step="1" value={frame} disabled={disabled} onChange={e=>seek(Number(e.target.value))}/><span>{(duration/fps).toFixed(3)}s</span></div>

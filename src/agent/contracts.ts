@@ -1,5 +1,7 @@
 import type { StudioSnapshot, SceneSource, VideoProject } from '../shared/types.ts';
 import type { Ledger, QcReport, Story } from './story.ts';
+import type { AuthorizeUpload, UploadConsentChallenge, UploadDestination } from '../models/upload-consent.ts';
+import type { MediaRequest, MediaTask } from '../jobs/contracts.ts';
 
 /** Risk tiers: read runs freely; write is revision-checked and undoable; cost/export always need a human by default. */
 export type ToolRisk = 'read' | 'write' | 'plan' | 'cost' | 'export';
@@ -9,6 +11,7 @@ export interface ToolContext {
   runId: string; projectId: string; signal: AbortSignal; port: AgentPort;
   /** Per-project structured plan (story.json) and spend ledger. */
   docs: AgentDocs;
+  videoReference?:{assetId:string;authorizeUpload:AuthorizeUpload};
 }
 export interface AgentDocs {
   story(): Promise<Story>;
@@ -40,6 +43,7 @@ export interface AgentTool {
   name: string; description: string; parameters: JsonSchema; risk: ToolRisk;
   /** Estimated spend before running (used by budget gate); null = unknown. */
   estimate?(args: Record<string, unknown>): number | null;
+  referenceImage?(args:Record<string,unknown>,ctx:ToolContext):Promise<string>;
   run(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult>;
 }
 
@@ -93,6 +97,14 @@ export interface AgentRun {
   /** One-shot approvals bound to a server execution ID + tool + canonical argument hash; consumed on use. */
   approvals?: { execId: string; tool: string; argsHash: string }[];
   reviewRounds: number;
+  allowImages?:boolean;
+  visionGrant?:string;
+  visionChallengeFingerprint?:string;
+  visionConsentRequired?:UploadConsentChallenge;
+  videoReferenceGrant?:{execId:string;assetId:string;fingerprint:string};
+  pendingVideoReference?:{execId:string;assetId:string};
+  /** Reflection was interrupted before a request was authorized. */
+  pendingSelfCheck?:boolean;
   /** Paid/side-effect submissions whose outcome is unknown (accepted-then-lost response). Never auto-resubmitted. */
   /** R03: receipt persisted *before* a paid/export side effect starts; cleared once its outcome is known. */
   inFlight?: { execId: string; tool: string; argsHash: string; startedAt: string };
@@ -106,7 +118,7 @@ export interface AgentStartInput {
   allowImages?: boolean; maxReviewRounds?: number;
 }
 export type AgentEvent = { type: 'run'; run: PublicRun } | { type: 'step'; runId: string; step: RunStep } | { type: 'delta'; runId: string; text: string };
-export type PublicRun = Omit<AgentRun, 'messages'> & { transcript: { role: string; content: string; tool?: string }[] };
+export type PublicRun = Omit<AgentRun, 'messages'|'visionGrant'|'visionChallengeFingerprint'|'pendingSelfCheck'|'videoReferenceGrant'|'pendingVideoReference'> & { transcript: { role: string; content: string; tool?: string }[] };
 
 /** Narrow host surface the agent may touch. Never exposes file paths or credentials. */
 export interface AgentPort {
@@ -126,5 +138,8 @@ export interface AgentPort {
   capabilities?(): Promise<Capabilities>;
   /** Import image bytes (e.g. a captured tail frame) as a project asset. */
   importImage?(projectId: string, name: string, bytes: Uint8Array, mime: string): Promise<{ id: string; name: string }>;
-  vision?(prompt: string, images: { mime: string; bytes: Uint8Array }[], signal: AbortSignal): Promise<string>;
+  visionDestination?():Promise<UploadDestination>;
+  vision?(prompt: string, images: { mime: string; bytes: Uint8Array }[], signal: AbortSignal, authorizeUpload?:AuthorizeUpload): Promise<string>;
+  videoReferenceDestination?():Promise<UploadDestination>;
+  generateVideoReference?(request:MediaRequest,authorizeUpload:AuthorizeUpload):Promise<MediaTask>;
 }

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { AgentContent, AgentEvent, AgentMessage, AgentPort, AgentRun, AgentStartInput, AgentTool, PublicRun, RunStep, ToolCall, ToolResult, ToolRisk, ToolSuccessReceipt } from './contracts.ts';
+import type { AgentEvent, AgentMessage, AgentPort, AgentRun, AgentStartInput, AgentTool, PublicRun, RunStep, ToolCall, ToolResult, ToolRisk, ToolSuccessReceipt } from './contracts.ts';
 import { chatTurn, looksLikeNoToolSupport, type ChatConfig } from './model-client.ts';
 import { backoff, budgetFrom, chargeModel, chargeTool, classify, emptyUsage, needsApproval, overBudget, tokenCost } from './budget.ts';
 import { bound, capabilityPrompt, compressMessages, summarizeProject, systemPrompt } from './context.ts';
@@ -10,8 +10,9 @@ import { join } from 'node:path';
 import { submissionOf } from './submission.ts';
 import { emptyLedger, emptyStory, normalizeCharacter, normalizeStyle, ProjectDocs, storyBrief, anchorPrompt, type Ledger, type QcReport, type Story } from './story.ts';
 import { qualityCheck } from './tools.ts';
+import { consentChallenge, UploadConsentRequired } from '../models/upload-consent.ts';
 
-export interface ResolvedAgentModel { config: ChatConfig; parameters: Record<string, unknown>; connectionId?: string; vision: boolean }
+export interface ResolvedAgentModel { config: ChatConfig; parameters: Record<string, unknown>; connectionId?: string }
 export interface AgentServiceOptions {
   resolveModel(): Promise<ResolvedAgentModel>;
   fetch?: typeof fetch; tools?: AgentTool[]; redact?: (text: string) => Promise<string>;
@@ -78,7 +79,6 @@ export class AgentService {
   private projectCommands = new Map<string, Promise<void>>();
   private listeners = new Set<(event: AgentEvent) => void>();
   private store: RunStore; private tools: AgentTool[]; private initialized?: Promise<void>; private stopped = false;
-  private imageBuffer = new Map<string, AgentContent[]>();
   private stories: ProjectDocs<Story>; private ledgers: ProjectDocs<Ledger>; private qcs: ProjectDocs<{ version: number; report?: QcReport }>;
   constructor(directory: string, private readonly port: AgentPort, private readonly options: AgentServiceOptions) {
     this.store = new RunStore(directory, options.redact); this.tools = options.tools ?? createTools();
@@ -149,16 +149,33 @@ export class AgentService {
     });
   }
   async lastQc(projectId: string) { return (await this.qcs.get(projectId)).report ?? null; }
-  async runQc(projectId: string, signal = new AbortController().signal): Promise<QcReport> { return qualityCheck(this.context('qc', projectId, signal, false)); }
-  /** F02 single image-send gate: without the run's consent the tool context has no vision port, so no tool can upload frames. */
-  private context(runId: string, projectId: string, signal: AbortSignal, allowImages = true): ToolContext {
-    const port: AgentPort = allowImages ? this.port : Object.create(this.port, { vision: { value: undefined, enumerable: true } });
+  async runQc(projectId: string, signal = new AbortController().signal): Promise<QcReport> { return qualityCheck(this.context('qc', projectId, signal)); }
+  private context(runId: string, projectId: string, signal: AbortSignal, run?:AgentRun): ToolContext {
+    const analyze=this.port.vision;
+    const vision:AgentPort['vision']=run?.allowImages&&analyze?(prompt,images,requestSignal)=>analyze.call(this.port,prompt,images,requestSignal,target=>{
+      if(run.visionGrant!==target.fingerprint)throw new UploadConsentRequired('review',target);
+    }):undefined;
+    const port:AgentPort=Object.create(this.port,{vision:{value:vision,enumerable:true}});
     return { runId, projectId, signal, port, docs: this.docs(projectId) };
   }
   /** Tools exposed to one run: image-upload tools are withheld unless the user allowed sending frames. */
   private runTools(run: AgentRun, capabilities: Capabilities): AgentTool[] {
     const tools = activeTools(this.tools, capabilities);
-    return (run as AgentRun & { allowImages?: boolean }).allowImages === true ? tools : tools.filter(tool => !(tool.requires ?? []).includes('vision'));
+    return run.allowImages === true ? tools : tools.filter(tool => !(tool.requires ?? []).includes('vision'));
+  }
+  private setVisionChallenge(run:AgentRun,error:UploadConsentRequired){
+    if(run.visionConsentRequired?.purpose!==error.purpose||run.visionChallengeFingerprint!==error.destination.fingerprint){
+      run.visionConsentRequired={...consentChallenge(error.purpose,error.destination),...(error.purpose==='video-reference'&&run.pendingVideoReference?{assetId:run.pendingVideoReference.assetId}:{})};
+      run.visionChallengeFingerprint=error.destination.fingerprint;
+    }
+    run.status='paused';run.message=error.message;
+  }
+  private invalidateVideoApproval(run:AgentRun,call:ToolCall){
+    const execId=call.execId;
+    if(run.approvals?.some(item=>item.execId===execId)){
+      run.approvals=run.approvals.filter(item=>item.execId!==execId);
+      call.execId=randomUUID();
+    }
   }
   private async spend(projectId: string, tool: string, cost: number | null | undefined, settleUnknown = false, executionId?: string) {
     await this.ledgers.update(projectId, current => {
@@ -191,7 +208,7 @@ export class AgentService {
   subscribe(listener: (event: AgentEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   private emit(event: AgentEvent) { for (const listener of this.listeners) { try { listener(event); } catch { /* listener errors never break the loop */ } } }
   public(run: AgentRun): PublicRun {
-    const { messages, ...rest } = structuredClone(run);
+    const { messages,visionGrant,visionChallengeFingerprint,pendingSelfCheck,videoReferenceGrant,pendingVideoReference,...rest } = structuredClone(run);
     const transcript = messages.slice(1).map(message => ({
       role: message.role,
       content: typeof message.content === 'string' ? bound(message.content, 2000) : Array.isArray(message.content) ? message.content.map(part => part.type === 'text' ? part.text : '[图片]').join('\n') : '',
@@ -248,7 +265,9 @@ export class AgentService {
         steps: [], queue: [], approvedCallIds: [], reviewRounds: 0,
       };
       (run as AgentRun & { maxReviewRounds?: number }).maxReviewRounds = Number.isSafeInteger(input.maxReviewRounds) ? Math.max(0, Math.min(5, input.maxReviewRounds!)) : this.options.maxReviewRounds ?? 2;
-      (run as AgentRun & { allowImages?: boolean }).allowImages = input.allowImages === true;
+      run.allowImages=input.allowImages===true;
+      if(run.allowImages&&this.port.visionDestination)run.visionGrant=(await this.port.visionDestination()).fingerprint;
+      this.requireOpen();
       this.runs.set(run.id, run); await this.store.trace(run.id, { event: 'run.start', goal, budget, autoApprove }); await this.save(run);
       this.launch(run); return this.public(run);
     });
@@ -313,12 +332,34 @@ export class AgentService {
       delete run.pending; run.status = 'running'; run.message = '已拒绝，智能体调整方案'; await this.save(run); this.launch(run); return this.public(run);
     });
   }
-  async resume(id: string): Promise<PublicRun> {
+  async resume(id:string,visionConsentId?:string,disableVision=false):Promise<PublicRun> {
     const run = await this.required(id);
     return this.projectCommand(run.projectId, async () => {
       if (!['paused', 'failed', 'waiting_task'].includes(run.status) || run.status === 'waiting_task' && this.active.has(id)) throw new Error('当前状态不能继续');
       await this.settled(id); if (!['paused', 'failed', 'waiting_task'].includes(run.status) || this.active.has(id)) throw new Error('当前状态不能继续');
       this.requireOpen(); await this.requireProjectAvailable(run.projectId, run.id);
+      if(disableVision){
+        const reference=run.pendingVideoReference;
+        if(run.visionConsentRequired?.purpose==='video-reference'&&reference){
+          const call=run.queue.find(item=>item.execId===reference.execId);
+          if(call){run.queue=run.queue.filter(item=>item!==call);run.messages.push({role:'tool',tool_call_id:call.id,content:'用户拒绝上传参考图片，本次图生视频未提交。'});}
+          run.approvals=run.approvals?.filter(item=>item.execId!==reference.execId);
+          delete run.videoReferenceGrant;delete run.pendingVideoReference;
+        }else{run.allowImages=false;delete run.visionGrant;}
+        delete run.visionConsentRequired;delete run.visionChallengeFingerprint;
+      }else if(visionConsentId!==undefined){
+        const challenge=run.visionConsentRequired;
+        const destination=challenge?.purpose==='video-reference'?this.port.videoReferenceDestination:this.port.visionDestination;
+        if(challenge?.id!==visionConsentId||!destination)throw new Error('上传授权已过期，请刷新运行状态后重新确认');
+        const target=await destination.call(this.port);
+        if(target.fingerprint!==run.visionChallengeFingerprint){this.setVisionChallenge(run,new UploadConsentRequired(challenge.purpose,target));await this.save(run);return this.public(run);}
+        if(challenge.purpose==='review')run.visionGrant=target.fingerprint;
+        else{
+          if(!run.pendingVideoReference||run.queue[0]?.execId!==run.pendingVideoReference.execId)throw new Error('原图生视频工具调用已变更');
+          run.videoReferenceGrant={...run.pendingVideoReference,fingerprint:target.fingerprint};delete run.pendingVideoReference;
+        }
+        delete run.visionConsentRequired;delete run.visionChallengeFingerprint;
+      }
       if (run.status === 'failed' && !run.queue.length) run.messages.push({ role: 'user', content: '上一步失败：' + (run.error ?? '') + '。请根据当前工程重新判断并继续。' });
       run.status = run.waiting ? 'waiting_task' : 'running'; delete run.error; run.message = '从断点继续'; await this.store.trace(run.id, { event: 'run.resume' }); await this.save(run); this.launch(run); return this.public(run);
     });
@@ -380,21 +421,29 @@ export class AgentService {
     let model = await this.options.resolveModel();
     if (run.model.mode === 'plan-json') model = { ...model, config: { ...model.config, supportsTools: false } };
     run.model = { connectionId: model.connectionId, model: model.config.model, mode: model.config.supportsTools ? 'tools' : 'plan-json' };
-    const meta = run as AgentRun & { maxReviewRounds?: number; allowImages?: boolean; dirty?: boolean };
+    const meta = run as AgentRun & { maxReviewRounds?: number; dirty?: boolean };
     await this.settleInFlight(run);
     while (true) {
       signal.throwIfAborted();
       if (run.waiting) { await this.awaitTask(run, signal); continue; }
+      if(run.pendingSelfCheck){
+        let review;
+        try{review=await this.selfCheck(run,signal);}
+        catch(error){if(!(error instanceof UploadConsentRequired))throw error;this.setVisionChallenge(run,error);await this.save(run);return;}
+        delete run.pendingSelfCheck;run.reviewRounds++;meta.dirty=false;
+        if(review&&!review.pass){run.messages.push({role:'user',content:`自检（第 ${run.reviewRounds} 轮）发现问题，请修复后再总结：\n${review.text}`});await this.save(run);continue;}
+        const content=run.messages.at(-1)?.content;
+        return this.complete(run,typeof content==='string'?content:'');
+      }
       if (run.queue.length) {
         // F06: budget is checked before *every* tool execution, not only before the next model turn.
         const limit = await this.budgetLimit(run, 'tool');
         if (limit) { run.status = 'budget_exceeded'; run.message = '已停止：' + limit; await this.store.trace(run.id, { event: 'budget', reason: limit, usage: run.usage, pendingCalls: run.queue.map(c => c.name) }); await this.save(run); return; }
         const call = run.queue[0];
-        const outcome = await this.runCall(run, call, model, signal);
+        const outcome = await this.runCall(run, call, signal);
         if (outcome === 'suspend') return;
         continue;
       }
-      const images = this.imageBuffer.get(run.id); if (images?.length) { run.messages.push({ role: 'user', content: [{ type: 'text', text: '上面工具截取的画面：' }, ...images] }); this.imageBuffer.delete(run.id); }
       const limit = await this.budgetLimit(run, 'model');
       if (limit) { run.status = 'budget_exceeded'; run.message = '已停止：' + limit; await this.store.trace(run.id, { event: 'budget', reason: limit, usage: run.usage }); await this.save(run); return; }
       const compressed = compressMessages(run.messages, this.options.contextChars ?? 120_000);
@@ -432,42 +481,65 @@ export class AgentService {
       if (turn.finish === 'length') { run.messages.push({ role: 'user', content: '上一条输出被截断，请更简短地继续。' }); continue; }
       // Reflection: verify writes visually before accepting "done".
       if (meta.dirty && run.reviewRounds < (meta.maxReviewRounds ?? 2)) {
-        run.reviewRounds++; meta.dirty = false;
-        const review = await this.selfCheck(run, signal);
-        if (review && !review.pass) { run.messages.push({ role: 'user', content: `自检（第 ${run.reviewRounds} 轮）发现问题，请修复后再总结：\n${review.text}` }); await this.save(run); continue; }
+        run.pendingSelfCheck=true;await this.save(run);continue;
       }
-      // Trace and persist the terminal snapshot before 'complete' is observable in memory (readers may act on it immediately).
-      await this.store.trace(run.id, { event: 'run.complete', usage: run.usage });
-      const final = { ...run, status: 'complete' as const, final: turn.content, message: '已完成', updatedAt: now() }; await this.store.save(final);
-      run.status = 'complete'; run.final = turn.content; run.message = '已完成'; run.updatedAt = final.updatedAt; this.emit({ type: 'run', run: this.public(run) }); return;
+      return this.complete(run,turn.content);
     }
   }
 
+  private async complete(run:AgentRun,content:string){
+    // Persist the terminal snapshot before callers can observe it.
+    await this.store.trace(run.id,{event:'run.complete',usage:run.usage});
+    const final={...run,status:'complete' as const,final:content,message:'已完成',updatedAt:now()};
+    delete final.visionConsentRequired;delete final.visionChallengeFingerprint;
+    await this.store.save(final);Object.assign(run,final);
+    delete run.visionConsentRequired;delete run.visionChallengeFingerprint;
+    this.emit({type:'run',run:this.public(run)});
+  }
+
   private async selfCheck(run: AgentRun, signal: AbortSignal): Promise<{ pass: boolean; text: string } | null> {
-    const allowImages = (run as AgentRun & { allowImages?: boolean }).allowImages === true;
-    const name = allowImages && this.port.vision && (await this.capabilities()).capabilities.roles.includes('vision') ? 'visual_review' : 'render_check', tool = this.tools.find(item => item.name === name); if (!tool) return null;
+    const name = run.allowImages && this.port.vision && (await this.capabilities()).capabilities.roles.includes('vision') ? 'visual_review' : 'render_check', tool = this.tools.find(item => item.name === name); if (!tool) return null;
     const step = await this.step(run, { kind: 'review', status: 'running', tool: name });
     try {
-      const result = await tool.run({}, this.context(run.id, run.projectId, signal, allowImages));
+      const result = await tool.run({}, this.context(run.id, run.projectId, signal, run));
       let pass = true;
       try { const value = JSON.parse(result.content.slice(result.content.indexOf('{'), result.content.lastIndexOf('}') + 1)); pass = value.skipped === true || value.pass === true || (name === 'render_check' && value.status === 'complete' && !value.error); } catch { pass = false; }
       await this.finishStep(run, step, { status: 'complete', summary: (pass ? '自检通过：' : '自检发现问题：') + bound(result.content, 300) });
       return { pass, text: result.content };
-    } catch (error) { if (signal.aborted) throw error; await this.finishStep(run, step, { status: 'failed', error: errorText(error) }); return { pass: false, text: '自检失败：' + errorText(error) }; }
+    } catch (error) { if (signal.aborted) throw error; await this.finishStep(run, step, { status: 'failed', error: errorText(error) }); if(error instanceof UploadConsentRequired)throw error;return { pass: false, text: '自检失败：' + errorText(error) }; }
   }
 
-  private async runCall(run: AgentRun, call: ToolCall, model: ResolvedAgentModel, signal: AbortSignal): Promise<'next' | 'suspend'> {
-    const meta = run as AgentRun & { dirty?: boolean; allowImages?: boolean };
+  private async runCall(run: AgentRun, call: ToolCall, signal: AbortSignal): Promise<'next' | 'suspend'> {
     const active = this.runTools(run, (await this.capabilities()).capabilities);
     const tool = active.find(item => item.name === call.name);
     const respond = (content: string) => { run.messages.push({ role: 'tool', tool_call_id: call.id, content }); run.queue.shift(); };
-    if (!tool) { respond(JSON.stringify({ error: (this.tools.some(t => t.name === call.name) ? ((this.tools.find(t => t.name === call.name)?.requires ?? []).includes('vision') && !meta.allowImages ? '用户未允许向视觉模型发送画面，该工具已停用；请改用 render_check / quality_check：' : '该工具当前未激活（对应模型未接入）：') : '未知工具：') + call.name + '。可用：' + active.map(t => t.name).join(', ') })); await this.save(run); return 'next'; }
+    if (!tool) { respond(JSON.stringify({ error: (this.tools.some(t => t.name === call.name) ? ((this.tools.find(t => t.name === call.name)?.requires ?? []).includes('vision') && !run.allowImages ? '用户未允许向视觉模型发送画面，该工具已停用；请改用 render_check / quality_check：' : '该工具当前未激活（对应模型未接入）：') : '未知工具：') + call.name + '。可用：' + active.map(t => t.name).join(', ') })); await this.save(run); return 'next'; }
     if (call.arguments.length > 2_100_000) { respond(JSON.stringify({ error: '工具参数超过 2MB 上限' })); await this.save(run); return 'next'; }
     let args: Record<string, unknown>;
     try { const parsed = JSON.parse(call.arguments || '{}'); if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('参数须为对象'); args = parsed; }
     catch (error) { respond(JSON.stringify({ error: '参数不是有效 JSON 对象：' + errorText(error) })); await this.save(run); return 'next'; }
     call.execId ??= randomUUID();
     const hash = argsHash(run.id, tool.name, args);
+    const ctx=this.context(run.id,run.projectId,signal,run);
+    if(tool.referenceImage){
+      const image=await tool.referenceImage(args,ctx);
+      if(image){
+        const execId=call.execId,grant=run.videoReferenceGrant;
+        const target=await this.port.videoReferenceDestination?.();
+        if(target&&(grant?.execId!==execId||grant.assetId!==image||grant.fingerprint!==target.fingerprint)){
+          this.invalidateVideoApproval(run,call);
+          if(run.pendingVideoReference?.execId!==call.execId||run.pendingVideoReference?.assetId!==image)delete run.visionChallengeFingerprint;
+          delete run.videoReferenceGrant;run.pendingVideoReference={execId:call.execId!,assetId:image};
+          this.setVisionChallenge(run,new UploadConsentRequired('video-reference',target));await this.save(run);return 'suspend';
+        }
+        ctx.videoReference={assetId:image,authorizeUpload:destination=>{
+          if(!grant||grant.fingerprint!==destination.fingerprint)throw new UploadConsentRequired('video-reference',destination);
+        }};
+      }else{
+        if(run.videoReferenceGrant?.execId===call.execId){this.invalidateVideoApproval(run,call);delete run.videoReferenceGrant;}
+        if(run.pendingVideoReference?.execId===call.execId){delete run.pendingVideoReference;delete run.visionConsentRequired;delete run.visionChallengeFingerprint;}
+      }
+    }
     const grant = (run.approvals ?? []).findIndex(item => item.execId === call.execId && item.tool === tool.name && item.argsHash === hash);
     if (grant >= 0) run.approvals!.splice(grant, 1); // single use: consumed before execution
     else {
@@ -486,7 +558,7 @@ export class AgentService {
     let result: ToolResult;
     // F04: paid / export tools have side effects that cannot be proven idempotent, so they are submitted exactly once.
     const sideEffect = tool.risk === 'cost' || tool.risk === 'export';
-    const work = () => tool.run({ ...args, __callId: call.execId }, this.context(run.id, run.projectId, signal, meta.allowImages === true));
+    const work = () => tool.run({ ...args, __callId: call.execId },ctx);
     if (sideEffect) { run.inFlight = { execId: call.execId!, tool: tool.name, argsHash: hash, startedAt: now() }; await this.save(run); }
     // Capabilities, approval and durable preparation can await I/O. Honor a budget changed during that preparation
     // at the last boundary before submitting work, including calls with an already consumed approval grant.
@@ -504,6 +576,13 @@ export class AgentService {
     catch (error) {
       if (signal.aborted) throw error; // R03: the in-flight receipt stays persisted and is settled by pause/restart/resume
       delete run.inFlight;
+      if(error instanceof UploadConsentRequired){
+        if(error.purpose==='video-reference'&&ctx.videoReference){
+          if(grant>=0)call.execId=randomUUID();
+          delete run.videoReferenceGrant;run.pendingVideoReference={execId:call.execId,assetId:ctx.videoReference.assetId};
+        }
+        await this.finishStep(run,step,{status:'skipped',summary:error.message});this.setVisionChallenge(run,error);await this.save(run);return 'suspend';
+      }
       // R04: decide on the adapter's structured submission state; only undeclared errors fall back to the transport classifier.
       const state = submissionOf(error) ?? (classify(error) === 'retry' ? 'unknown' : undefined);
       if (sideEffect && state === 'unknown') {
@@ -526,11 +605,12 @@ export class AgentService {
     const receipt: ToolSuccessReceipt = { execId: call.execId!, tool: tool.name, argsHash: hash, risk: tool.risk, stepIndex: step.index, at: now(), result };
     // Keep inFlight until the known outcome has its own durable journal. Any later failure only retries settlement.
     if (sideEffect) await this.store.saveToolSuccess(run.id, receipt);
-    await this.settleToolSuccess(run, receipt, model);
+    if(run.videoReferenceGrant?.execId===call.execId)delete run.videoReferenceGrant;
+    await this.settleToolSuccess(run, receipt);
     signal.throwIfAborted(); return 'next';
   }
 
-  private async settleToolSuccess(run: AgentRun, receipt: ToolSuccessReceipt, model?: ResolvedAgentModel): Promise<void> {
+  private async settleToolSuccess(run: AgentRun, receipt: ToolSuccessReceipt): Promise<void> {
     const key = run.id + '.' + receipt.execId;
     const call = run.queue.find(item => item.execId === receipt.execId);
     if (!call) {
@@ -548,17 +628,14 @@ export class AgentService {
       await this.store.removeToolSuccess(run.id, receipt.execId); return;
     }
     if (call.name !== receipt.tool || argsHash(run.id, call.name, JSON.parse(call.arguments || '{}')) !== receipt.argsHash) throw new Error('工具成功回执与执行参数不符；未重新提交');
-    const meta = run as AgentRun & { dirty?: boolean; allowImages?: boolean };
+    const meta = run as AgentRun & { dirty?: boolean };
     let result = receipt.result;
     if (!(run.settledToolExecIds ?? []).includes(key)) {
       chargeTool(run.usage, result.cost, receipt.risk); (run.settledToolExecIds ??= []).push(key);
     }
     if (receipt.risk === 'cost') await this.spend(run.projectId, receipt.tool, result.waitFor ? null : result.cost, false, key);
     if (receipt.risk === 'write') meta.dirty = true;
-    if (result.images?.length) {
-      if ((model?.vision ?? true) && meta.allowImages) this.imageBuffer.set(run.id, [...(this.imageBuffer.get(run.id) ?? []), ...result.images.map(image => ({ type: 'image_url' as const, image_url: { url: `data:${image.mime};base64,${Buffer.from(image.bytes).toString('base64')}` } }))]);
-      else result = { ...result, content: result.content + '（画面已截取；当前模型或设置不允许发送图片，请用 visual_review 或 render_check 检查）' };
-    }
+    if (result.images?.length) result = { ...result, content: result.content + '（旧回执含截取画面，请重新使用 capture_frame 获取视觉描述）' };
     const step = run.steps[receipt.stepIndex]; if (step) await this.finishStep(run, step, { status: 'complete', summary: bound(result.content, 300) });
     if (result.projectTask && !run.taskRefs?.some(task => task.id === result.projectTask!.id)) (run.taskRefs ??= []).push({ ...result.projectTask, callId: call.id, execId: call.execId });
     if (result.waitFor) { run.waiting = { ...result.waitFor, callId: call.id, execId: call.execId }; run.status = 'waiting_task'; run.message = '等待生成任务完成'; }

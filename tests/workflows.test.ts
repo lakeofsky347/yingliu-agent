@@ -10,6 +10,7 @@ import type {WorkflowPort,WorkflowRecord,WorkflowRequest,WorkflowCandidate} from
 import type {Asset,SceneSource,StudioSnapshot,VideoProject} from '../src/shared/types.ts';
 import type {MediaTaskService} from '../src/jobs/media-tasks.ts';
 import type {MediaRequest,MediaTask} from '../src/jobs/contracts.ts';
+import type {AuthorizeUpload,UploadDestination} from '../src/models/upload-consent.ts';
 
 const copy=<T>(value:T):T=>structuredClone(value);
 async function until<T>(read:()=>Promise<T>,check:(value:T)=>boolean):Promise<T>{for(let n=0;n<1000;n++){const value=await read();if(check(value))return value;await new Promise(resolve=>setTimeout(resolve,5));}throw new Error('workflow did not settle');}
@@ -21,10 +22,12 @@ async function fixture(t:TestContext,shotCount=2){
   const original=copy(project),sources=new Map(project.shots.map(shot=>[shot.id,defaultSceneSource()]));
   const calls={director:0,scene:new Map<string,number>(),voice:new Map<string,number>(),vision:[] as {prompt:string;images?:{bytes:Uint8Array;mime:string}[]}[],capture:[] as number[],candidates:[] as WorkflowCandidate[],commit:[] as {project:VideoProject;sources:Record<string,SceneSource>;label:string}[],generate:[] as (MediaRequest&{clientRequestId?:string})[],submissions:0,stage:[] as string[],ack:[] as string[]};
   const hooks={scene:undefined as undefined|((shotId:string,signal:AbortSignal)=>Promise<void>),capture:undefined as undefined|((frame:number)=>void),vision:undefined as undefined|((signal:AbortSignal)=>Promise<void>),loseCommitReceipt:false,failCommit:0,failAck:0};
+  const destinations={review:{fingerprint:'vision-A',origin:'https://vision-a.invalid',model:'fixture-vision'},'video-reference':{fingerprint:'video-A',origin:'https://video-a.invalid',model:'fixture-video'}} satisfies Record<string,UploadDestination>;
   const tasks=new Map<string,MediaTask>(),requests=new Map<string,string>();
   const fakeMedia={
-    async generate(request:MediaRequest&{clientRequestId?:string}){
+    async generate(request:MediaRequest&{clientRequestId?:string},authorizeUpload?:AuthorizeUpload){
       calls.generate.push(copy(request));const prior=request.clientRequestId&&requests.get(request.clientRequestId);if(prior)return copy(tasks.get(prior)!);
+      if(request.operation==='image-to-video')authorizeUpload?.(destinations['video-reference']);
       const id='media-'+(++calls.submissions),now=new Date().toISOString();const task:MediaTask={version:1,id,clientRequestId:request.clientRequestId??id,projectId:request.projectId,shotId:request.shotId,startRevision:request.expectedRevision,operation:request.operation,prompt:request.prompt,imageAssetIds:request.imageAssetIds??[],inputHashes:[],connection:{id:'fixture-connection',name:'Local fixture',protocol:'images',baseUrl:'http://127.0.0.1:1',auth:'none',credentialRef:'',enabled:true,revision:1,requestTimeoutMs:1000,concurrency:2},model:{id:'fixture-model',connectionId:'fixture-connection',model:'fixture',name:'Fixture',enabled:true,inputModalities:['text'],outputModalities:['image'],parameters:{}},parameters:{},phase:'ready',observation:'active',progress:1,message:'候选就绪',createdAt:now,updatedAt:now,files:[{path:'/fixture/'+id+'.png',mimeType:'image/png',name:id,bytes:1,sha256:'fixture',metadata:{}}]};
       tasks.set(id,task);if(request.clientRequestId)requests.set(request.clientRequestId,id);return copy(task);
     },
@@ -37,10 +40,11 @@ async function fixture(t:TestContext,shotCount=2){
   const snapshot=()=>({project:copy(project),root:directory,task:null,previewUrl:null,previewRevision:null,providers:[],environment:{browserPath:'',ffmpegPath:'',ffprobePath:'',browserAvailable:false,ffmpegAvailable:false,ffprobeAvailable:false},recent:[]} satisfies StudioSnapshot);
   const port:WorkflowPort={
     async snapshot(){return snapshot();},async source(_id,shotId){return copy(sources.get(shotId)??defaultSceneSource());},
-    async text(role,prompt,signal,_request,images){
+    async uploadDestination(purpose){return copy(destinations[purpose]);},
+    async text(role,prompt,signal,_request,images,authorizeUpload){
       signal.throwIfAborted();const input=JSON.parse(prompt);
       if(role==='director'){calls.director++;return JSON.stringify({shots:input.shots.length?input.shots.map((shot:{id:string})=>({shotId:shot.id,prompt:'画面 '+shot.id,narration:'旁白 '+shot.id})):[{title:'新镜头',intent:'解释',prompt:'新画面',narration:'新旁白',durationSeconds:1,params:{text:'新标题'}}]});}
-      if(role==='vision'){calls.vision.push({prompt,images:images?copy(images):undefined});await hooks.vision?.(signal);return '根据提供的关键帧检查：文字可读。';}
+      if(role==='vision'){authorizeUpload?.(destinations.review);calls.vision.push({prompt,images:images?copy(images):undefined});await hooks.vision?.(signal);return '根据提供的关键帧检查：文字可读。';}
       const shotId=String(input.shot.id);calls.scene.set(shotId,(calls.scene.get(shotId)??0)+1);await hooks.scene?.(shotId,signal);signal.throwIfAborted();return JSON.stringify({html:'<main>'+shotId+'</main>',css:'main{color:white}',js:'export function render(ctx){ctx.root.dataset.frame=String(ctx.localFrame)}'});
     },
     async commit(_id,expectedRevision,next,changed,label){
@@ -55,7 +59,7 @@ async function fixture(t:TestContext,shotCount=2){
   };
   let service=new WorkflowService(directory,fakeMedia as unknown as MediaTaskService,port);const services=[service];
   t.after(async()=>{for(const value of services)await value.dispose();await rm(directory,{recursive:true,force:true});});
-  return {directory,calls,hooks,port,tasks,original,get project(){return project;},set project(value:VideoProject){project=copy(value);},get service(){return service;},async restart(){await service.dispose();service=new WorkflowService(directory,fakeMedia as unknown as MediaTaskService,port);services.push(service);return service;},request(patch:Partial<WorkflowRequest>={}):WorkflowRequest{return {projectId:project.id,expectedRevision:project.revision,prompt:'制作测试影片',visual:'code',narration:false,review:false,allowImageUpload:false,...patch};}};
+  return {directory,calls,hooks,port,tasks,original,destinations,get project(){return project;},set project(value:VideoProject){project=copy(value);},get service(){return service;},async restart(){await service.dispose();service=new WorkflowService(directory,fakeMedia as unknown as MediaTaskService,port);services.push(service);return service;},request(patch:Partial<WorkflowRequest>={}):WorkflowRequest{return {projectId:project.id,expectedRevision:project.revision,prompt:'制作测试影片',visual:'code',narration:false,review:false,allowImageUpload:false,...patch};}};
 }
 
 test('director, scene and speech candidates enter an existing project in one commit',async t=>{
@@ -88,6 +92,28 @@ test('review requires upload consent and forwards captured bytes with verifiable
   const started=await f.service.run(f.request({review:true,allowImageUpload:true})),done=await settled(f.service,started.id);assert.equal(done.status,'complete',done.error);assert.deepEqual(f.calls.capture,[6,18]);assert.equal(f.calls.vision.length,1);
   const review=done.steps.find(step=>step.kind==='review')!;assert.equal(review.frameEvidence?.length,2);f.calls.vision[0]!.images!.forEach((image,index)=>{assert.equal(Buffer.from(image.bytes).toString(),'captured pixels at frame '+f.calls.capture[index]);assert.equal(review.frameEvidence![index]!.sha256,createHash('sha256').update(image.bytes).digest('hex'));});
   assert.equal(f.calls.candidates.length,2);assert.deepEqual(f.calls.candidates[0]!.project,f.calls.commit[0]!.project);assert.deepEqual(f.calls.candidates[0]!.sources,f.calls.commit[0]!.sources);assert.ok(review.reviewCandidateHash);
+});
+
+test('reference images are validated before planning and sent only to the target video model',async t=>{
+  const f=await fixture(t),project=f.project;
+  const [first,second]=project.shots;
+  project.assets.push({id:'reference',kind:'image',name:'参考图',description:'',path:'assets/reference.png'});
+  second.referenceIds.push('reference');
+  f.project=project;
+  const reference={imageAssetIds:['reference'],allowImageUpload:true};
+  await assert.rejects(f.service.run(f.request(reference)),/图生视频/);
+  await assert.rejects(f.service.run(f.request({...reference,visual:'video',allowImageUpload:false})),/明确允许/);
+  await assert.rejects(f.service.run(f.request({...reference,visual:'video',shotIds:[first.id]})),/所选镜头/);
+  assert.equal(f.calls.director,0);
+
+  const started=await f.service.run(f.request({...reference,visual:'video'}));
+  const done=await settled(f.service,started.id);
+  assert.equal(done.status,'complete',done.error);
+  assert.deepEqual(f.calls.generate.map(({shotId,operation,imageAssetIds})=>({shotId,operation,imageAssetIds})),[
+    {shotId:first.id,operation:'text-to-video',imageAssetIds:[]},
+    {shotId:second.id,operation:'image-to-video',imageAssetIds:['reference']},
+  ]);
+  assert.equal(f.calls.vision.length,0);
 });
 
 test('review refuses mixed revisions when a user edits between frame captures',async t=>{
@@ -185,7 +211,24 @@ test('review receipts survive a precommit failure and process restart without an
   const f=await fixture(t,1);f.hooks.failCommit=1;
   const started=await f.service.run(f.request({review:true,allowImageUpload:true})),failed=await settled(f.service,started.id);
   assert.equal(failed.status,'failed');assert.equal(f.calls.commit.length,0);assert.equal(f.calls.vision.length,1);assert.equal(failed.steps.find(step=>step.kind==='review')?.status,'complete');
+  f.destinations.review={fingerprint:'vision-B',origin:'https://vision-b.invalid',model:'fixture-vision'};
   await f.restart();await f.service.retry(started.id);const done=await settled(f.service,started.id);assert.equal(done.status,'complete',done.error);assert.equal(f.calls.vision.length,1);assert.equal(f.calls.capture.length,1);assert.equal(f.calls.commit.length,1);
+});
+
+test('workflow retries require fresh image egress consent after a rebind and renew against the displayed target',async t=>{
+  const f=await fixture(t,1);f.hooks.vision=async()=>{throw new Error('fixture vision request failed');};
+  const started=await f.service.run(f.request({review:true,allowReviewUpload:true}));
+  assert.equal((await settled(f.service,started.id)).status,'failed');assert.equal(f.calls.vision.length,1);
+  f.hooks.vision=undefined;f.destinations.review={fingerprint:'vision-B',origin:'https://vision-b.invalid',model:'fixture-vision'};
+  await f.restart();await f.service.retry(started.id);
+  const blocked=await settled(f.service,started.id),challenge=blocked.uploadConsentRequired!;
+  assert.equal(challenge.origin,'https://vision-b.invalid');assert.equal(challenge.purpose,'review');assert.equal(f.calls.vision.length,1);
+  f.destinations.review={fingerprint:'vision-C',origin:'https://vision-c.invalid',model:'other-model'};
+  const changed=await f.service.retry(started.id,challenge.id);
+  assert.equal(changed.uploadConsentRequired?.origin,'https://vision-c.invalid');assert.notEqual(changed.uploadConsentRequired?.id,challenge.id);
+  assert.equal(f.calls.vision.length,1);assert.equal(f.calls.commit.length,0);
+  await f.service.retry(started.id,changed.uploadConsentRequired!.id);
+  const done=await settled(f.service,started.id);assert.equal(done.status,'complete',done.error);assert.equal(f.calls.vision.length,2);assert.equal(f.calls.commit.length,1);
 });
 
 test('pausing candidate review preserves the project head and completed generation',async t=>{

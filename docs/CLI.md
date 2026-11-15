@@ -28,7 +28,7 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 - **单一数据所有者（C01）。** 每条命令在打开应用前，会按数据目录（`YINGLIU_DATA_DIR`）和工程目录（`YINGLIU_PROJECTS`）的真实目录身份，取得由操作系统持有的本机 TCP listener 锁，应用清理完毕才释放。符号链接别名指向同一把锁。其他进程最多等 `--lock-timeout` 秒（默认 30）；这一等待同样覆盖后续发现的实际工程根目录，并沿用命令的取消信号。超时返回 `BUSY`（exit 9）；能识别占用者时附上 pid 和命令。进程崩溃时操作系统自动释放，无需删除 `.yingliu-owner.lock`；旧版本遗留的空或截断文件不参与新锁判断。端口由目录身份哈希到 21000–28999（刻意避开 Linux 32768–60999 与 Windows/macOS 49152–65535 的临时端口范围，出站连接不会占用它）。每个目录有 1 个主端口和 3 个备用端口；监听方在握手里报出目录身份的哈希。若端口已被**另一个 profile** 的 yingliu 进程或会主动发数据的其他服务占用，就顺延到下一个备用端口，不再误报 BUSY；只有同一目录身份的持有者才返回 BUSY。抢到端口后还会复查前后各槽位，两个进程同时抢同一目录时，至少一方能看到对方，所以不会出现双重所有者。端口上是不发数据的监听者，或旧版（v1 协议）进程占着主端口时，无法确认身份，仍保守返回 BUSY，不会接管；4 个端口都被其他 profile 占满时同样返回 BUSY。仍可设置 `YINGLIU_LOCK_PORT=<1024–65535>` 指定固定端口（所有目录共用这一把锁，即整机串行，不再顺延），取值无效时返回配置错误（CONFIG，exit 10）。该互斥适用于同机采用相同协议的 CLI、桌面、浏览器服务及默认嵌入应用；旧 CLI 的 listener 协议继续兼容，不协调未采用它的旧桌面、其他机器或其他网络命名空间。实际工程根目录在打开或修复前动态加锁，不同 profile 打开同一外部工程时同样有界等待，仍被占用则返回 BUSY。长时间运行的桌面或 `agent run` 会独占整个 profile；并行任务请使用不同的数据、工程目录和实际工程。不要删除锁文件或绕过所有权。
 - 只读命令（`project list/get`、`agent status`、`story/ledger show`、`qc show`（不带 `--run`）、`models list`）以只读方式打开：不会结算中断的运行，不会恢复媒体任务，也不会改写状态。
 - 正常退出前会等待运行关联的工程任务。收到 SIGINT/SIGTERM 时，入口停止新调用，等待应用停止其拥有的工作与子进程，然后释放锁；JSON 返回 `INTERRUPTED`，分别退出 130/143。
-- `agent run/resume/approve/reject` 按工具回执中保存的任务 ID 汇总所有关联任务，结果在 `tasks` 数组中返回。任何未被成功显式重试替代的失败或取消任务都会返回 `ok:false`、`code: RUN_FAILED`（exit 7），并在 `error.run`、`error.task`、`error.tasks` 中附上详情；后续预览成功不会覆盖导出失败。成功导出按任务记录的 `outputId` 返回对应的 `data.output.path`，不会选择工程最后一个产物。模型可用 `export_mp4` 的 `retryTaskId` 显式重试失败或取消的导出；只有该重试链上成功且有对应成片时，才替代原失败任务。
+- `agent run/resume/approve/reject` 按工具回执中保存的任务 ID 汇总所有关联任务，结果在 `tasks` 数组中返回。等待上传授权时会先返回暂停状态和授权详情。任何未被成功显式重试替代的失败或取消任务都会返回 `ok:false`、`code: RUN_FAILED`（exit 7），并在 `error.run`、`error.task`、`error.tasks` 中附上详情；后续预览成功不会覆盖导出失败。成功导出按任务记录的 `outputId` 返回对应的 `data.output.path`，不会选择工程最后一个产物。模型可用 `export_mp4` 的 `retryTaskId` 显式重试失败或取消的导出；只有该重试链上成功且有对应成片时，才替代原失败任务。
 
 ## 退出码
 
@@ -60,7 +60,7 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 | `project import <F>` | `{id, title, root}`（新 ID；校验不通过时不会注册工程） |
 | `agent run --project ID --goal G [选项]` | Run（见下） |
 | `agent status <runId> [--trace]` | Run；加 `--trace` 时附带 `trace:[事件]` |
-| `agent resume <runId>` | Run |
+| `agent resume <runId> [--upload-consent I \| --skip-upload]` | Run |
 | `agent approve <runId> --call C --exec E [--args-hash H]` | Run（execId 必填；过期会返回 ERROR） |
 | `agent reject <runId> --call C --exec E [--reason R]` | Run |
 | `story show <projectId>` | Story |
@@ -77,6 +77,13 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 - `--max-review-rounds N`
 - `--no-wait` 已不支持（返回 USAGE，exit 2）：CLI 没有常驻进程，命令退出后运行会被中断。用 `--timeout` 控制等待，超时后运行会暂停，可用 `agent resume` 继续
 
+运行等待上传授权时，`agent run`、`agent resume` 和审批命令返回 `ok:true`、`data.status:"paused"` 和退出码 4。`agent status <runId> --json` 可随时查看当前的 `data.visionConsentRequired`。核对其中的 `purpose`、`origin`、`model` 及可能提供的 `assetId` 后，选择以下一种方式继续。
+
+- `yingliu agent resume <runId> --upload-consent <id> --json` 授权当前指定的发送目标。目标变化后会返回新的授权请求，需要重新核对。图生视频可能还要单独批准费用。
+- `yingliu agent resume <runId> --skip-upload --json` 跳过这次参考图生成，或关闭本轮远程关键帧自检并继续本地检查。
+
+省略两个选项时，等待上传的运行保持暂停并返回当前授权请求。两个选项互斥。
+
 **Run** 的结构：
 
 ```json
@@ -84,6 +91,7 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
  "message":"…","goal":"…","usage":{"steps":0,"toolCalls":0,"inputTokens":0,"outputTokens":0,"cost":0,"unknownCostCalls":0,"currency":"CNY"},
  "budget":{"maxSteps":24,"maxToolCalls":60,"maxTokens":400000,"maxCost":null,"currency":"CNY"},
  "pending":{"callId":"…","execId":"…","argsHash":"…","tool":"export_mp4","risk":"export","arguments":"{}","reason":"…","estimate":0},
+ "visionConsentRequired":{"id":"…","purpose":"review|video-reference","origin":"https://provider.example","model":"…","assetId":"…"},
  "uncertainSubmissions":[{"execId":"…","tool":"…","error":"…","jobId":"…"}],
  "final":"…","error":"…","steps":8,"task":{"kind":"export","status":"complete"}}
 ```

@@ -5,6 +5,7 @@ import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { pipeline } from 'node:stream/promises';
 import { chromium, type Browser, type Page } from 'playwright-core';
 import type { Asset, EnvironmentInfo, EnvironmentSettings, ExportResult, SceneSource, VideoProject, VideoSpec } from '../shared/types.js';
 import { compileSpec } from '../core/index.js';
@@ -21,7 +22,7 @@ export interface FrameCapture { frame:number; shotId:string; path:string; sha256
 export interface RenderIssue { shotId?:string; frame?:number; message:string;failure?:TaskFailureDiagnostic;comparison?:ReturnType<typeof compareFramePng>&{phase:'backward'|'cold';frame:number;expectedHash:string;actualHash:string;fontsStatus:'loaded'|'loading'|'unavailable';fontFaces:number;deviceScaleFactor:number} }
 export interface RenderCheckResult { ok:boolean; errors:RenderIssue[]; frames:FrameCapture[]; reportPath?:string }
 export function renderCheckError(result:RenderCheckResult):Error{const error=new Error(result.errors.map(issue=>issue.message).join('\n'));return Object.assign(error,{failure:result.errors.find(issue=>issue.failure)?.failure??taskFailure(error,'render_check')});}
-interface ProjectServer { server:Server; origin:string; root:string }
+interface ProjectServer { server:Server; origin:string; latestPage?:string; pages:Set<string> }
 const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.txt':'text/plain; charset=utf-8','.woff2':'font/woff2','.mp4':'video/mp4','.wav':'audio/wav','.mp3':'audio/mpeg','.m4a':'audio/mp4','.aac':'audio/aac','.flac':'audio/flac','.ogg':'audio/ogg'};
 
 export function detectEnvironment(settings:Partial<EnvironmentSettings>={},options:ToolEnvironmentOptions={}):EnvironmentInfo {
@@ -76,6 +77,8 @@ function stopChild(child:ChildProcess):void {
 
 async function projectServer(root:string):Promise<ProjectServer> {
   const absoluteRoot=path.resolve(root);
+  const pages=new Set<string>();
+  let published:ProjectServer;
   const server=createServer(async(req,res)=>{
     let file:Awaited<ReturnType<typeof fs.open>>|undefined;
     try {
@@ -83,13 +86,20 @@ async function projectServer(root:string):Promise<ProjectServer> {
       // A loopback listener is insufficient if a foreign website can send a forged Host header.
       const host=req.headers.host??'';
       if(!/^(?:127\.0\.0\.1|localhost):\d+$/.test(host)){res.writeHead(403);res.end();return;}
-      const pathname=decodeURIComponent(new URL(req.url??'/','http://'+host).pathname);
+      const url=new URL(req.url??'/','http://'+host),pathname=decodeURIComponent(url.pathname);
       const relative=pathname.replace(/^\//,'')||'index.html';
       // Scene code may read render resources, never editor state, journals or source history.
       const allowed=relative==='index.html'||/^runtime\/(?:frame(?:-[a-f0-9]{64})?\.mjs|spec(?:-[a-f0-9]{64})?\.json|scenes\/[\w-]+\.mjs|audio\/mix-[\w-]+\.wav)$/.test(relative)||
         /^assets\/[\w./-]+$/.test(relative)||/^\.studio\/inspection\/[\w-]+\.png$/.test(relative)||/^exports\/[\w-]+\/video\.mp4$/.test(relative);
       if(!allowed){res.writeHead(403);res.end('Resource is private');return;}
-      const full=await projectPath(absoluteRoot,relative),type=mime[path.extname(full).toLowerCase()];
+      let resource=relative;
+      if(relative==='index.html'){
+        const digest=url.searchParams.get('page');
+        if(digest!==null&&!pages.has(digest)){res.writeHead(404);res.end('Preview page not published');return;}
+        const page=digest??published.latestPage;
+        if(page)resource='runtime/page-'+page+'.html';
+      }
+      const full=await projectPath(absoluteRoot,resource),type=mime[path.extname(full).toLowerCase()];
       if(!type){res.writeHead(415);res.end('Unsupported file type');return;}
       // Match headers and bytes to one inode even if prepare atomically replaces
       // the public path while this request is in flight.
@@ -106,16 +116,28 @@ async function projectServer(root:string):Promise<ProjectServer> {
         if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start>end||start>=stat.size){res.writeHead(416,{'Content-Range':'bytes */'+stat.size});res.end();return;}
         status=206;headers['Content-Range']='bytes '+start+'-'+end+'/'+stat.size;
       }
-      headers['Content-Length']=Math.max(0,end-start+1);res.writeHead(status,headers);
-      if(req.method==='HEAD'){res.end();return;}
-      const stream=file.createReadStream({start,end,autoClose:true});file=undefined;stream.on('error',()=>res.destroy());res.on('close',()=>stream.destroy());stream.pipe(res);
+      if(res.destroyed)return;
+      headers['Content-Length']=Math.max(0,end-start+1);
+      // Small documents can release their handle before the response body is sent.
+      // Bound reads by the size observed on the same inode.
+      if(req.method==='GET'&&!media&&stat.size>0&&stat.size<=1_048_576&&!req.headers.range){
+        const body=Buffer.alloc(stat.size);let length=0;
+        while(length<body.length){const read=await file.read(body,length,body.length-length,null);if(!read.bytesRead)break;length+=read.bytesRead;}
+        await file.close();file=undefined;
+        if(res.destroyed)return;
+        headers['Content-Length']=length;res.writeHead(status,headers);res.end(body.subarray(0,length));return;
+      }
+      res.writeHead(status,headers);
+      if(req.method==='HEAD'||stat.size===0){res.end();return;}
+      // Keep the handle until the transfer settles, including browser aborts during preview reloads.
+      await pipeline(file.createReadStream({start,end}),res);
     }catch { if(!res.headersSent)res.writeHead(404);res.end('Not found'); }
     finally{if(file)try{await file.close();}catch{res.destroy();}}
   });
   await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',()=>{server.off('error',reject);resolve();});});
   const address=server.address();if(!address||typeof address==='string')throw new Error('Unable to bind preview server');
   // A distinct site lets Chromium isolate generated JS from the editor renderer.
-  return {root:absoluteRoot,server,origin:'http://localhost:'+address.port};
+  return published={server,origin:'http://localhost:'+address.port,pages};
 }
 async function closeServer(server:Server):Promise<void> {
   server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));
@@ -140,8 +162,7 @@ export class VideoRenderer {
   private readonly store:ProjectStore;
   constructor(store:ProjectStore=new ProjectStore()) { this.store=store; }
   async preview(root:string,project:VideoProject):Promise<string> {
-    await this.prepare(root,project);
-    const server=await this.server(root);return server.origin+'/index.html?revision='+project.revision;
+    return (await this.prepare(root,project)).url;
   }
   async assetBaseUrl(root:string):Promise<string> {return (await this.server(root)).origin+'/';}
   async assetUrl(root:string,asset:Asset):Promise<string> {
@@ -160,7 +181,7 @@ export class VideoRenderer {
     try{const server=await pending;this.servers.set(key,server);return server;}
     finally{if(this.pendingServers.get(key)===pending)this.pendingServers.delete(key);}
   }
-  private async prepare(root:string,project:VideoProject):Promise<VideoSpec> {
+  private async prepare(root:string,project:VideoProject):Promise<{spec:VideoSpec;server:ProjectServer;url:string}> {
     const spec=compileSpec(project);const sources:{id:string;html:string;css:string;moduleUrl:string}[]=[];
     let operation:TaskFailureDiagnostic['operation']='runtime_directory_create';
     try{
@@ -181,11 +202,14 @@ export class VideoRenderer {
     operation='runtime_spec_publish';await writeImmutableRuntime(await projectPath(root,'runtime/'+specName),manifest);
     operation='runtime_frame_alias_publish';await writeRuntimeFile(await projectPath(root,'runtime/frame.mjs'),browserRuntime);
     operation='runtime_spec_alias_publish';await writeRuntimeFile(await projectPath(root,'runtime/spec.json'),manifest);
-    // index.html is the publication point. Its immutable manifest and modules
-    // already exist in full; an old document keeps its old complete graph while
-    // another preview/check prepares a new revision in the same project.
-    operation='runtime_index_publish';await writeRuntimeFile(await projectPath(root,'index.html'),runtimeHtml(spec.target.width,spec.target.height,{runtimeUrl:'./runtime/'+runtimeName,specUrl:'./runtime/'+specName}));
-    return spec;
+    // Publish the immutable page after its dependencies. Windows can deny a
+    // rename over an index.html that a previous preview is still reading.
+    const html=runtimeHtml(spec.target.width,spec.target.height,{runtimeUrl:'./runtime/'+runtimeName,specUrl:'./runtime/'+specName});
+    const digest=hash(html);
+    operation='runtime_index_publish';await writeImmutableRuntime(await projectPath(root,'runtime/page-'+digest+'.html'),html);
+    const server=await this.server(root);
+    server.pages.add(digest);server.latestPage=digest;
+    return {spec,server,url:server.origin+'/index.html?revision='+project.revision+'&page='+digest};
     }catch(error){throw withTaskFailure(error,operation);}
   }
   private async openPage(url:string,spec:VideoSpec,settings:EnvironmentSettings,issues:RenderIssue[],signal?:AbortSignal):Promise<{browser:Browser;page:Page;removeAbort:()=>void}> {
@@ -234,11 +258,11 @@ export class VideoRenderer {
     return {buffer:await page.screenshot({type:'png',clip:{x:0,y:0,width:spec.target.width,height:spec.target.height},timeout:30_000}),shotId:result.info.sceneId};
   }
   async capture(root:string,project:VideoProject,settings:EnvironmentSettings,frame:number,signal?:AbortSignal):Promise<FrameCapture&{url:string}>{
-    const spec=await this.prepare(root,project),errors:RenderIssue[]=[];aborted(signal);
+    const {spec,server,url}=await this.prepare(root,project),errors:RenderIssue[]=[];aborted(signal);
     if(!Number.isSafeInteger(frame)||frame<0||frame>=spec.durationFrames)throw new Error('Frame outside project: '+frame);
     let connection:Awaited<ReturnType<VideoRenderer['openPage']>>|undefined;
     try{
-      const server=await this.server(root);connection=await this.openPage(server.origin+'/index.html',spec,settings,errors,signal);
+      connection=await this.openPage(url,spec,settings,errors,signal);
       const result=await this.frame(connection.page,spec,frame);aborted(signal);
       if(errors.length)throw new Error(errors.map(error=>error.message).join('; '));
       const relative='.studio/inspection/'+project.revision+'-'+frame+'-'+randomUUID()+'.png',file=await projectPath(root,relative);await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,result.buffer);
@@ -269,7 +293,7 @@ export class VideoRenderer {
     let operation:TaskFailureDiagnostic['operation']='render_check';
     const reportRoot=await projectPath(root,'validation/check-'+randomUUID());await fs.mkdir(reportRoot,{recursive:true});
     try {
-      const spec=await this.prepare(root,project),url=(await this.server(root)).origin+'/index.html';
+      const {spec,url}=await this.prepare(root,project);
       connection=await this.openPage(url,spec,settings,errors,signal);
       for(const frame of keyFrames(spec)){
         operation='render_frame';aborted(signal);const result=await this.frame(connection.page,spec,frame);
@@ -320,16 +344,15 @@ export class VideoRenderer {
       const source=await this.store.readSource(root,shot,project.revision);await this.store.writeSource(snapshotRoot,shot,source);
       inputHashes.push({path:shot.sourcePath+'/source.json',sha256:hash(json(source))});
     }
-    const spec=await this.prepare(snapshotRoot,snapshot),errors:RenderIssue[]=[],frames:FrameCapture[]=[];
-    if(spec.target.width%2||spec.target.height%2)throw new Error('H.264 yuv420p requires even width and height');
-    const snapshotServer=await projectServer(snapshotRoot);let connection:Awaited<ReturnType<VideoRenderer['openPage']>>|undefined,encoder:ChildProcess|undefined;
+    const {spec,server:snapshotServer,url}=await this.prepare(snapshotRoot,snapshot),errors:RenderIssue[]=[],frames:FrameCapture[]=[];
+    let connection:Awaited<ReturnType<VideoRenderer['openPage']>>|undefined,encoder:ChildProcess|undefined;
     const mp4Path=path.join(outputRoot,'video.mp4'),logPath=path.join(outputRoot,'ffmpeg.log');let log='',audioMix:AudioMix|null=null;
     const cancel=()=>{if(encoder)stopChild(encoder);};signal.addEventListener('abort',cancel,{once:true});
     let encoderResult:Promise<void>|undefined;
     try {
       onProgress(0.03,'制作输入已保存快照');audioMix=await this.audioMixer.mix(snapshotRoot,snapshot,env,signal);
       if(audioMix){await fs.writeFile(path.join(outputRoot,'audio-plan.json'),json(audioMix.plan));onProgress(.06,'配音、音乐与音效已完成混音');}
-      connection=await this.openPage(snapshotServer.origin+'/index.html',spec,env,errors,signal);
+      connection=await this.openPage(url,spec,env,errors,signal);
       const audioArgs=audioMix?['-i',audioMix.path,'-map','0:v:0','-map','1:a:0','-c:a','aac','-b:a','192k','-ar','48000','-ac','2','-t',String(spec.durationSeconds)]:['-an'];
       const crf=spec.target.quality==='high'?'16':spec.target.quality==='small'?'23':'18';
       encoder=spawn(env.ffmpegPath,['-hide_banner','-loglevel','warning','-y','-f','image2pipe','-vcodec','png','-framerate',spec.target.fps.num+'/'+spec.target.fps.den,'-i','pipe:0',...audioArgs,'-c:v','libx264','-preset','medium','-crf',crf,'-pix_fmt','yuv420p','-movflags','+faststart',mp4Path],{stdio:['pipe','ignore','pipe']});this.children.add(encoder);
@@ -366,7 +389,7 @@ export class VideoRenderer {
       await fs.rm(mp4Path,{force:true});throw new Error(signal.aborted?'Task cancelled':(error as Error).message);
     }finally{
       signal.removeEventListener('abort',cancel);if(connection){connection.removeAbort();await connection.browser.close().catch(()=>{});this.browsers.delete(connection.browser);}
-      await closeServer(snapshotServer.server);
+      this.servers.delete(path.resolve(snapshotRoot));await closeServer(snapshotServer.server);
     }
   }
   private async mediaQa(file:string,spec:VideoSpec,settings:EnvironmentSettings,signal:AbortSignal,expectedAudio=false):Promise<Record<string,unknown>> {

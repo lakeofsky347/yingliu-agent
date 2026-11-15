@@ -51,7 +51,7 @@ function port(caps: Capabilities, frame: Uint8Array = busy) {
   };
   return { port: value, calls, imports, project };
 }
-const model = async (): Promise<ResolvedAgentModel> => ({ parameters: {}, vision: false, config: { baseUrl: 'http://gateway.test/v1', model: 'deepseek-chat', timeoutMs: 5000, maxTokens: 1000, supportsTools: true } });
+const model = async (): Promise<ResolvedAgentModel> => ({ parameters: {}, config: { baseUrl: 'http://gateway.test/v1', model: 'deepseek-chat', timeoutMs: 5000, maxTokens: 1000, supportsTools: true } });
 async function settle(service: AgentService, id: string, until: PublicRun['status'][]) { for (let i = 0; i < 500; i++) { const run = await service.get(id); if (until.includes(run.status)) return run; await new Promise(r => setTimeout(r, 10)); } throw new Error('timeout ' + (await service.get(id)).status); }
 const plan = { title: '雪夜', logline: '小狐狸在雪夜找回围巾', targetSeconds: 4, style: { look: '水彩绘本', palette: '靛蓝与暖橙', motion: '缓慢推镜', negative: '写实照片' }, characters: [{ id: 'fox', name: '小狐狸', description: '橙色小狐狸', features: ['红色围巾', '白色尾尖'] }] };
 const shots = { shots: [{ id: 's1', shotId: 'a', summary: '雪地远景', shotType: '远景', camera: '推', durationSeconds: 2, dialogue: '雪下了一夜', characters: ['fox'] }, { id: 's2', shotId: 'b', summary: '近景找围巾', shotType: '近景', camera: '固定', durationSeconds: 2, characters: ['fox'], continueFromPrevious: true }] };

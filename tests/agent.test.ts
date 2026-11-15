@@ -55,7 +55,7 @@ function fakePort(overrides: Partial<AgentPort> = {}) {
   return { port, state };
 }
 function model(fetchSupportsTools = true, parameters: Record<string, unknown> = {}): () => Promise<ResolvedAgentModel> {
-  return async () => ({ connectionId: 'gw', parameters, vision: false, config: { baseUrl: 'http://gateway.test/v1', model: 'deepseek-chat', key: 'sk-SECRET-KEY', timeoutMs: 5000, maxTokens: 2048, supportsTools: fetchSupportsTools } });
+  return async () => ({ connectionId: 'gw', parameters, config: { baseUrl: 'http://gateway.test/v1', model: 'deepseek-chat', key: 'sk-SECRET-KEY', timeoutMs: 5000, maxTokens: 2048, supportsTools: fetchSupportsTools } });
 }
 async function settle(service: AgentService, id: string, until: PublicRun['status'][], ms = 5000): Promise<PublicRun> {
   const end = Date.now() + ms;
@@ -202,6 +202,64 @@ test('visual self-check loop sends failed reviews back until the vision model pa
     assert.equal(run.status, 'complete', run.message + JSON.stringify(run.steps.filter(x => x.error)));
     assert.equal(reviews, 2); assert.equal(run.reviewRounds, 2);
   } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
+});
+
+test('visual self-check is resumable without transmitting to a rebound vision destination', async t => {
+  const d=await dir(), sent:string[]=[];
+  let target={fingerprint:'vision-A',origin:'https://vision-a.invalid',model:'fixture-vision'};
+  const {port,state}=fakePort({
+    visionDestination:async()=>target,
+    vision:async(_prompt,_images,_signal,authorizeUpload)=>{
+      authorizeUpload!(target);sent.push(target.origin);return '{"pass":true,"issues":[]}';
+    },
+  });
+  const gateway=toolGateway((_body,turn)=>{
+    if(turn===0)return {toolCalls:[{name:'shot_write_source',arguments:{expectedRevision:3,shotId:'a',source:defaultSceneSource()}}]};
+    target={fingerprint:'vision-B',origin:'https://vision-b.invalid',model:'fixture-vision'};
+    return done('原总结');
+  });
+  const options={resolveModel:model(),fetch:gateway.fetch};
+  let service=new AgentService(d,port,options);
+  t.after(async()=>{await service.dispose();await rm(d,{recursive:true,force:true});});
+  const started=await service.start({projectId:'proj-1',goal:'改标题',allowImages:true});
+  const paused=await settle(service,started.id,['paused','failed']);
+  assert.equal(paused.status,'paused',paused.error);assert.equal(paused.visionConsentRequired?.origin,target.origin);assert.deepEqual(sent,[]);assert.equal(state.saved.length,1);
+  await service.dispose();service=new AgentService(d,port,options);
+  await service.resume(started.id);const blocked=await settle(service,started.id,['paused','failed']);
+  assert.equal(blocked.visionConsentRequired?.id,paused.visionConsentRequired?.id);assert.deepEqual(sent,[]);
+  await service.resume(started.id,blocked.visionConsentRequired!.id);
+  const final=await settle(service,started.id,['complete','failed']);
+  assert.equal(final.status,'complete',final.error);assert.equal(final.final,'原总结');assert.equal(final.reviewRounds,1);assert.deepEqual(sent,['https://vision-b.invalid']);assert.equal(state.saved.length,1);
+});
+
+test('agent video reference approval cannot follow a paid call to another provider or another asset',async t=>{
+  const d=await dir(),sent:string[]=[];
+  let target={fingerprint:'video-A',origin:'https://video-a.invalid',model:'fixture-video'};
+  const {port}=fakePort({
+    capabilities:async()=>({roles:['video']}),videoReferenceDestination:async()=>target,
+    generateVideoReference:async(request,authorizeUpload)=>{authorizeUpload(target);sent.push(request.imageAssetIds![0]!);return {id:'task-1'} as Awaited<ReturnType<NonNullable<AgentPort['generateVideoReference']>>>;},
+  });
+  const gateway=toolGateway((_body,turn)=>turn===0?{toolCalls:[{id:'video',name:'generate_video',arguments:{expectedRevision:3,prompt:'继续',useReference:true,characterIds:['fox']}}]}:done());
+  const service=new AgentService(d,port,{resolveModel:model(),fetch:gateway.fetch,pollMs:5,maxReviewRounds:0});
+  t.after(async()=>{await service.dispose();await rm(d,{recursive:true,force:true});});
+  const updateRef=(assetId:string)=>service.docs('proj-1').updateStory(story=>({...story,characters:[{id:'fox',name:'狐',description:'',features:[],referenceAssetIds:[assetId]}]}));
+  await updateRef('image-a');
+  const started=await service.start({projectId:'proj-1',goal:'生成视频'});
+  const initial=await settle(service,started.id,['paused','failed']);
+  assert.equal(initial.visionConsentRequired?.purpose,'video-reference');assert.equal(initial.visionConsentRequired?.assetId,'image-a');assert.deepEqual(sent,[]);
+  await service.resume(started.id,initial.visionConsentRequired!.id);
+  const paid=await settle(service,started.id,['awaiting_approval','paused','failed']);assert.equal(paid.status,'awaiting_approval',paid.error);
+  target={fingerprint:'video-B',origin:'https://video-b.invalid',model:'fixture-video'};
+  await updateRef('image-b');
+  await service.approve(started.id,'video',paid.pending!.execId);
+  const rebound=await settle(service,started.id,['paused','failed']);
+  assert.equal(rebound.visionConsentRequired?.origin,target.origin);assert.equal(rebound.visionConsentRequired?.assetId,'image-b');assert.deepEqual(sent,[]);
+  await service.resume(started.id,rebound.visionConsentRequired!.id);
+  const newPaid=await settle(service,started.id,['awaiting_approval','failed']);assert.equal(newPaid.pending?.callId,'video');assert.deepEqual(sent,[]);
+  assert.notEqual(newPaid.pending?.execId,paid.pending?.execId);
+  await assert.rejects(service.approve(started.id,'video',paid.pending!.execId),/审批已过期/);
+  await service.approve(started.id,'video',newPaid.pending!.execId);
+  const final=await settle(service,started.id,['complete','failed']);assert.equal(final.status,'complete',final.error);assert.deepEqual(sent,['image-b']);
 });
 
 test('cost tools wait for media tasks, report spend, and hint to apply', async () => {

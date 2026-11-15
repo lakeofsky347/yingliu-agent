@@ -1,3 +1,4 @@
+import { OPENAI_CHAT_MODEL } from '../src/models/provider-defaults.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
@@ -31,7 +32,7 @@ class MockProvider extends ProviderManager {
   async ready(){await this.save({apiKey:'mock-only-not-a-paid-key'});return this;}
   override async complete(turns:ModelMessage[],system:string,signal:AbortSignal){signal.throwIfAborted();this.prompts.push(structuredClone(turns));this.systems.push(system);const value=this.respond(turns,this.prompts.length);return typeof value==='string'?value:JSON.stringify(value);}
 }
-const chat=(message:string,projectId?:string):ChatInput=>({message,projectId,provider:'custom',model:'deepseek-chat'});
+const chat=(message:string,projectId?:string):ChatInput=>({message,projectId,provider:'custom',model:OPENAI_CHAT_MODEL});
 function patchPlan(project:VideoProject,patch:Record<string,unknown>,id=project.shotOrder[1]){return {intent:'modify',done:true,message:'修改已规划',actions:[{tool:'video_update',arguments:{expectedRevision:project.revision,update:{shotPatches:[{id,patch}]}}}]};}
 function firstPlan(count=1){return {intent:'create',done:true,message:'初稿已规划',actions:[{tool:'video_update',arguments:{expectedRevision:0,update:{storyboard:{shots:Array.from({length:count},(_,index)=>({title:'镜头 '+index,durationSeconds:5,params:{text:'主题 '+index}}))},sourcesByIndex:Array.from({length:count},()=>defaultSceneSource())}}}]};}
 
@@ -127,4 +128,36 @@ test('vision refuses project-local file symlinks before reading image pixels',co
   const config={id:'custom',name:'vision',baseUrl:'https://mock.invalid/v1',model:'vision-model',supportsVision:true,enableVision:true,maxVisionBytes:1024,maxVisionDimension:128};const input={...chat('观察这张图片',backend.state.project.id),shotId:backend.state.project.shots[0]!.id,imageAssetIds:['image-a'],allowImageUpload:true};
   if(!await createFileSymlinkOrSkip(context,join(backend.state.root,'assets','small.png'),join(backend.state.root,'assets','link.png')))return;
   await assert.rejects(authorizedImages(backend.state,input,config,new AbortController().signal),/Symlinks/);
+}));
+
+test('chat sends authorized pixels once to the vision route and retries need fresh consent',()=>withDirectory(async directory=>{
+  const backend=new FixtureBackend();
+  backend.state.project=createProject('images','topic');
+  backend.state.root=join(directory,'project');
+  await mkdir(join(backend.state.root,'assets'),{recursive:true});
+  await writeFile(join(backend.state.root,'assets','small.png'),Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jM1sAAAAASUVORK5CYII=','base64'));
+  backend.state.project.assets.push({id:'image-a',kind:'image',name:'图A',description:'',path:'assets/small.png'});
+  const calls:{url:string;messages:ModelMessage[]}[]=[];
+  const provider=new ProviderManager(directory,new MemorySecrets(),{fetch:async(url,options)=>{
+    const request={url:String(url),messages:JSON.parse(String(options?.body)).messages as ModelMessage[]};
+    calls.push(request);
+    const content=request.url.includes('vision.invalid')?'素材 image-a 画面中可见一条线。':
+      JSON.stringify({intent:'discuss',message:'已讨论画面设计。',done:true,actions:[]});
+    return Response.json({choices:[{message:{content},finish_reason:'stop'}]});
+  }});
+  await provider.save({baseUrl:'https://text.invalid/v1',apiKey:'text-fixture'});
+  const service=new ConversationService(backend,provider,directory);
+  const request={...chat('观察图片以讨论画面',backend.state.project.id),intent:'discuss' as const,imageAssetIds:['image-a'],allowImageUpload:true};
+  await assert.rejects(service.send(request),/多模态视觉/);
+  assert.equal(calls.length,0);
+  await provider.saveVision({baseUrl:'https://vision.invalid/v1',model:'vision-fixture',apiKey:'vision-fixture'});
+  const first=await service.send(request);
+  const turn=first.conversation.turns!.at(-1)!;
+  assert.deepEqual(turn.imageAssetIds,['image-a']);
+  assert.ok(calls[0]?.messages.some(message=>Array.isArray(message.content)&&message.content.some(part=>part.type==='image_url')));
+  assert.ok(calls[1]?.messages.every(message=>typeof message.content==='string'));
+  assert.match(String(calls[1]?.messages.at(-1)?.content),/画面中可见一条线/);
+  await service.send({...chat('',backend.state.project.id),retryTurnId:turn.id});
+  assert.deepEqual(calls.map(call=>new URL(call.url).hostname),['vision.invalid','text.invalid','text.invalid']);
+  assert.doesNotMatch(String(calls[2]?.messages.at(-1)?.content),/画面中可见一条线/);
 }));

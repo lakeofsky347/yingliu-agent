@@ -18,8 +18,9 @@ export function AgentPanel({controller,project}:{controller:StudioController;pro
   const feed=useRef<AgentRunFeed|null>(null),actionBusy=useRef(false),active=useRef(false);
   const disabled=busy||state.pending;
   const [caps,setCaps]=useState<{capabilities:{roles:string[];director?:string;models?:Record<string,string>};tools:{name:string;risk:ToolRisk}[];selfMade:string[]}|null>(null);
-  async function refreshCaps(){try{setCaps(await controller.api.call('agent.capabilities'));}catch{/* optional */}}
-  useEffect(()=>{void refreshCaps();const listener=()=>void refreshCaps();if(typeof window!=='undefined')window.addEventListener('yingliu-models-changed',listener);return ()=>{if(typeof window!=='undefined')window.removeEventListener('yingliu-models-changed',listener);};},[]);
+  const canReviewImages=caps?.capabilities.roles.includes('vision')??false;
+  async function refreshCaps(){setAllowImages(false);try{setCaps(await controller.api.call('agent.capabilities'));}catch{setCaps(null);}}
+  useEffect(()=>{void refreshCaps();const listener=()=>{setCaps(null);void refreshCaps();};window.addEventListener('yingliu-models-changed',listener);return ()=>window.removeEventListener('yingliu-models-changed',listener);},[controller]);
   useEffect(()=>{
     active.current=true;
     const token=typeof document!=='undefined'?document.querySelector<HTMLMetaElement>('meta[name="yingliu-token"]')?.content:undefined;
@@ -37,6 +38,9 @@ export function AgentPanel({controller,project}:{controller:StudioController;pro
     try{await work();await feed.current?.refresh();}catch(cause){if(active.current)setError(cause instanceof Error?cause.message:String(cause));}finally{actionBusy.current=false;if(active.current)setBusy(false);}
   }
   const run=runs.find(item=>item.id===selected);
+  const consent=run?.visionConsentRequired;
+  const videoReference=consent?.purpose==='video-reference';
+  const referenceName=consent?.assetId?project.assets.find(asset=>asset.id===consent.assetId)?.name:undefined;
   const autoApprove:ToolRisk[]=allowWrite?['read','write']:['read'];if(autoPlan)autoApprove.push('plan');
   return <div className="vs-agent-panel">
     <div className="vs-agent-compose">
@@ -46,11 +50,12 @@ export function AgentPanel({controller,project}:{controller:StudioController;pro
       <div className="vs-agent-options">
         <label><input type="checkbox" checked={allowWrite} onChange={e=>setAllowWrite(e.target.checked)}/>修改工程无需逐步确认（可撤销）</label>
         <label><input type="checkbox" checked={autoPlan} onChange={e=>setAutoPlan(e.target.checked)}/>创作计划无需审批</label>
-        <label><input type="checkbox" checked={allowImages} onChange={e=>setAllowImages(e.target.checked)}/>允许把截图发送给模型自检</label>
+        <label><input type="checkbox" checked={allowImages&&canReviewImages} disabled={disabled||!canReviewImages} onChange={e=>setAllowImages(e.target.checked)}/>允许视觉模型处理本次任务的截图</label>
         <label>最多步数 <input type="number" min={1} max={200} value={maxSteps} onChange={e=>setMaxSteps(Number(e.target.value)||24)}/></label>
         <label>费用上限 <input type="number" min={0} step="0.01" placeholder="不限" value={maxCost} onChange={e=>setMaxCost(e.target.value)}/></label>
       </div>
-      <button className="vs-primary" disabled={disabled||!goal.trim()} onClick={()=>void act(async()=>{const created=await controller.mediaCommand<PublicRun>('agent.start',{projectId:project.id,goal,autoApprove,allowImages,budget:{maxSteps,maxCost:maxCost===''?null:Number(maxCost)}});setSelected(created.id);setGoal('');})}>开始</button>
+      {!canReviewImages&&<p className="vs-media-help">截图自检需要在模型设置中配置多模态模型。</p>}
+      <button className="vs-primary" disabled={disabled||!goal.trim()} onClick={()=>void act(async()=>{const reviewImages=canReviewImages&&allowImages;setAllowImages(false);const created=await controller.mediaCommand<PublicRun>('agent.start',{projectId:project.id,goal,autoApprove,allowImages:reviewImages,budget:{maxSteps,maxCost:maxCost===''?null:Number(maxCost)}});setSelected(created.id);setGoal('');})}>开始</button>
       {error&&<p className="vs-error" role="alert">{error}</p>}
       {caps&&<div className="vs-agent-caps" aria-label="当前能力">
         <h4>当前能力</h4>
@@ -74,9 +79,13 @@ export function AgentPanel({controller,project}:{controller:StudioController;pro
           <button className="vs-primary" disabled={disabled} onClick={()=>void act(()=>controller.mediaCommand('agent.approve',{runId:run.id,callId:run.pending!.callId,execId:run.pending!.execId,argsHash:run.pending!.argsHash}))}>批准</button>
           <button disabled={disabled} onClick={()=>void act(()=>controller.mediaCommand('agent.reject',{runId:run.id,callId:run.pending!.callId,execId:run.pending!.execId,reason:''}))}>拒绝</button>
         </div>}
+        {consent&&<p className="vs-media-help" role="status">
+          继续前请确认将{videoReference?(referenceName?`参考图「${referenceName}」`:'视频生成参考图'):'截图'}发送给 {consent.model}（{consent.origin}）。
+        </p>}
         <div className="vs-agent-actions">
           {['running','waiting_task'].includes(run.status)&&<button disabled={disabled} onClick={()=>void act(()=>controller.api.call('agent.pause',{runId:run.id}))}>暂停</button>}
-          {['paused','failed'].includes(run.status)&&<button disabled={disabled} onClick={()=>void act(()=>controller.mediaCommand('agent.resume',{runId:run.id}))}>继续</button>}
+          {['paused','failed'].includes(run.status)&&<button disabled={disabled} onClick={()=>void act(()=>controller.mediaCommand('agent.resume',{runId:run.id,...(consent?{visionConsentId:consent.id}:{})}))}>{consent?'授权并继续':'继续'}</button>}
+          {['paused','failed'].includes(run.status)&&consent&&<button disabled={disabled} onClick={()=>void act(()=>controller.mediaCommand('agent.resume',{runId:run.id,disableVision:true}))}>{videoReference?'跳过图生视频':'仅做本地检查'}</button>}
           {!['complete','cancelled','failed','budget_exceeded'].includes(run.status)&&<button disabled={disabled} onClick={()=>void act(()=>controller.api.call('agent.cancel',{runId:run.id}))}>取消</button>}
           <button disabled={disabled} onClick={()=>void act(async()=>{await controller.load();})}>刷新工程</button>
         </div>

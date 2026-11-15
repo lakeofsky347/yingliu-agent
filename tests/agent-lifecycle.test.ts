@@ -8,7 +8,7 @@ import type { AgentPort, PublicRun } from '../src/agent/contracts.ts';
 import { createProject } from '../src/core/index.ts';
 import { toolGateway } from './model-gateway.ts';
 
-const model = async () => ({ parameters: {}, vision: false, config: { baseUrl: 'http://gateway.test/v1', model: 'mock', timeoutMs: 10_000, maxTokens: 1000, supportsTools: true } });
+const model = async () => ({ parameters: {}, config: { baseUrl: 'http://gateway.test/v1', model: 'mock', timeoutMs: 10_000, maxTokens: 1000, supportsTools: true } });
 const snapshot = (projectId: string) => ({ project: { ...createProject('生命周期隔离测试'), id: projectId }, task: null }) as any;
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
 const blockedFetch: typeof fetch = async (_url, init) => {

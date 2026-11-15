@@ -2,7 +2,9 @@
 
 正常应用通过模型中心保存多个连接，每个连接可注册多个模型，再将导演、场景代码、视觉检查、生图、生视频和配音角色分配给模型。文本与媒体分别使用各自协议；任意 Base URL 不代表兼容，应用不要求常驻公共网关，也不读取 DSH、Codex 或其他应用凭据。
 
-`custom` 是保留的旧文本配置兼容入口。首次迁移时，旧 `provider.json` 及 `yingliu.custom-model.api-key` 引用成为默认连接和模型；没有旧数据时保留 DeepSeek 兼容地址与模型作为未配置起点。缺少所需凭据时，在创建工程或持久化 pending 回合之前拒绝 AI 请求；显式配置 `auth:none` 的本地/无密钥服务不需要 Key。旧数据不会因迁移被删除，已有模型注册表优先。
+`custom` 是文本快速配置保留的稳定连接 ID。新工作区预填 OpenAI Chat Completions（`https://api.openai.com/v1`，`gpt-4.1-mini`）。已有模型注册表优先；首次读取旧配置时，`provider.json` 及原凭据引用继续用于文本角色。视觉理解快速配置使用独立连接和凭据，开启图片发送后才能发起视觉调用。缺少所需凭据时，在创建工程或持久化 pending 回合之前拒绝 AI 请求；显式配置 `auth:none` 的本地/无密钥服务允许直接访问。
+
+从旧版升级后，如原先只在文本连接启用了图片发送，请在「模型设置 → 多模态模型」配置视觉连接，或在「高级模型中心」绑定一个支持图片输入且允许发送的模型。每轮上传权限由本轮操作决定，重试历史对话时需要重新授权图片。
 
 离线 `demo / offline-director` 只允许测试显式构造 `ProviderManager(...,{allowFixtures:true})`，不出现在正常供应商目录。本次验证使用离线单元测试和 localhost 测试网关，未执行真实付费请求。协议通过、生成成功与成片质量分别记录；目录可访问、源码保存及运行检查不能替代真实供应商创作或视觉验收。
 
@@ -22,7 +24,7 @@
 
 连接请求超时允许 5–900 秒，concurrency 为 1–16；文本兼容传输将实际超时限制到 300 秒。当前连接并发设置用于媒体任务调度，不等价于所有文本或语音入口的统一供应商限流器。模型目录由已注册定义构成，用户可手动填写供应商 model 名，无需目录探测先成功。
 
-`models.check` 仅调用已保存 Base URL 下的 `GET /models`，即使媒体服务未实现目录，也不会触发一次生成来“测试连接”。没有目录或目录未列出某模型时，真实生成仍为 NOT_CHECKED。旧 `providers.save` 继续更新 custom 配置；`providers.get/check` 默认反映当前 director 路由，get 另附可用的 legacyConfig。完整新增连接和角色分配使用 models 接口。
+`models.check` 对 Chat Completions 连接调用已保存 Base URL 下的 `GET /models`。目录检查仅确认目录响应，生成能力需另行验证。`providers.save` 与 `providers.vision.save` 分别保存文本与视觉理解的快速配置。`providers.get` 返回当前文本与视觉角色状态，`providers.check` 可分别检查两类连接。完整新增连接和角色分配使用 models 接口。
 
 ## 首批协议
 
@@ -112,9 +114,9 @@ JSON 格式或本地规划校验错误会返回未提交回执，供有限修复
 
 ## 明确授权的图片输入
 
-对话图片发送同时需要：模型 inputModalities 包含 image（兼容配置表现为 `supportsVision:true`）、模型参数 `enableVision:true`、当前请求 `allowImageUpload:true`，以及明确 `imageAssetIds`。不会自动发送所有工程资产。选中镜头存在时，图片必须属于该镜头的生产或参考素材；未选中时也仅发送明确列出的资产 ID。
+对话图片发送需要已绑定且可调用的 `vision` 角色，其模型 inputModalities 包含 image、参数 `enableVision:true`、当前请求 `allowImageUpload:true`，并明确提供 `imageAssetIds`。选中镜头存在时，图片必须属于该镜头的生产或参考素材。未选中镜头时同样只处理列出的资产 ID。
 
-每轮最多 3 张、总计 6 MB、最长边 4096 像素、每张总像素不超过 16,777,216。工程路径通过 `projectPath` 校验，拒绝绝对路径、越界与符号链接；读取前后核对字节，读取文件签名和实际尺寸，支持 PNG/JPEG/WebP。超限时明确报错，用户先导入较小素材。图片以 data URL 发送到当前配置的模型服务，不写入聊天记录。有限修复的后续请求仍使用本轮明确选中的图片，移除较早请求中的重复图片块，以确保当前请求内的图片数量和字节上限。回合只记录实际发送的 asset ID。
+每轮最多 3 张、总计 6 MB、最长边 4096 像素、每张总像素不超过 16,777,216。工程路径通过 `projectPath` 校验，拒绝绝对路径、越界与符号链接；读取前后核对字节，读取文件签名和实际尺寸，支持 PNG/JPEG/WebP。超限时请导入较小素材。应用把图片作为 data URL 发给视觉理解接口，并将视觉分析作为文本交给导演或场景模型。回合记录保留资产 ID。
 
 未启用时只有文字/素材元信息进入模型。发送原素材像素仍不代表模型观察了渲染帧。对话的 `video_inspect` 当前返回源码与元数据，运行检查回执也不能宣称视觉验收。协作工作流有独立的实际关键帧检查，见下节。模型回复误称未发送图片的视觉观察会被替换为准确的元数据说明。
 
@@ -157,4 +159,4 @@ maxTasks 提供步骤数量边界。当前文本与语音缺少可靠预报价�
 
 `packId` 可选择内置配方作为本轮简报参考；未选择时不会把所有配方塞入导演上下文。配方保持 `design_proposal`，不是已实现且已通过美术验收的风格渲染器。实际生成代码、运行检查、画面观看和媒体导出分别验收。
 
-本地文本测试网关位于 `tests/model-gateway.ts`，媒体任务网关位于 `tests/media-gateway.ts`。`npm run verify:models` 使用隔离数据目录、localhost 网关与真实 Chromium 操作模型中心、图片/视频生成采用、视频裁剪及工作流，不调用真实供应商；它需要本机 Chromium、FFmpeg 和 ffprobe，默认浏览器为 `/usr/bin/chromium`，可用 CHROME_PATH 指定。协议与界面验收不证明真实供应商创作质量。DeepSeek 请求参数与完成原因依据[官方 Chat Completions 文档](https://api-docs.deepseek.com/api/create-chat-completion/)；本应用没有强制启用 JSON mode，因为兼容服务的支持情况不同，采用提示格式和有限修复。
+本地文本测试网关位于 `tests/model-gateway.ts`，媒体任务网关位于 `tests/media-gateway.ts`。`npm run verify:models` 使用隔离数据目录、localhost 网关与 Chromium 验证模型中心、图片／视频生成采用、视频裁剪和工作流，需要本机 Chrome／Chromium、FFmpeg 和 ffprobe，也可通过 `CHROME_PATH` 指定浏览器。兼容服务的 JSON mode 支持范围不同，文本计划通过提示格式和有限重试校验。 [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) · [OpenAI 图片输入指南](https://developers.openai.com/api/docs/guides/images-vision)
