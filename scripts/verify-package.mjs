@@ -67,24 +67,39 @@ try{
   await page.getByRole('textbox',{name:'影片名称',exact:true}).fill('打包后手动制作');await page.getByRole('textbox',{name:'主题与创作简报',exact:true}).fill('独立目录中继续制作自己的影片');await page.getByRole('button',{name:'创建空白影片',exact:true}).click();await page.getByRole('button',{name:'镜头',exact:true}).waitFor();let snapshot=await call('current');assert.equal(snapshot.project.shots.length,0);pass('blank storyboard graph');
   const detectedBrowser=snapshot.environment.browserPath;await page.getByRole('tab',{name:'运行环境',exact:true}).click();await page.getByRole('textbox',{name:'Chromium 浏览器路径',exact:true}).fill(join(temp,'missing-browser'));await page.getByRole('button',{name:'保存并检查环境',exact:true}).click();await page.getByText('部分工具无法执行。工程可以继续编辑；请修正路径后重新检查。',{exact:true}).waitFor();assert.equal((await call('app.health')).canRender,false);pass('invalid executable reports actual readiness failure');await page.getByRole('textbox',{name:'Chromium 浏览器路径',exact:true}).fill(detectedBrowser);await page.getByRole('button',{name:'保存并检查环境',exact:true}).click();await page.getByText('本地浏览器、编码器和媒体检查工具已就绪。',{exact:true}).first().waitFor();assert.equal((await call('app.health')).canRender,true);pass('environment form executes and validates real tool versions');await page.getByRole('radio',{name:'监视器',exact:true}).click();
   for(let i=0;i<3;i++){await page.getByRole('button',{name:'镜头',exact:true}).click();await page.waitForTimeout(650);}snapshot=await call('current');assert.equal(snapshot.project.shots.length,3);const before=[...snapshot.project.shotOrder];pass('manual graph adds three connected shots');
-  phase='timeline drag updates saved shot order';
+  phase='timeline pointer drag reaches insertion marker';
+  const collapseChat=page.getByRole('button',{name:'收起对话栏',exact:true});
+  if(await collapseChat.isVisible())await collapseChat.click();
   const chips=page.locator('.vs-clip');
+  await chips.nth(0).click();
+  const selected=page.locator('.vs-clip[aria-pressed="true"] .vs-clip-body strong');
+  const selectedTitle=await selected.textContent();
   await chips.nth(2).scrollIntoViewIfNeeded();
   const from=await chips.nth(2).boundingBox(),to=await chips.nth(0).boundingBox();
-  assert.ok(from&&to,'timeline clips must be visible');
-  await page.mouse.move(from.x+from.width/2,from.y+from.height/2);
+  const scroller=await page.locator('.vs-timeline-scroll').boundingBox();
+  assert.ok(from&&to&&scroller,'timeline clips must be visible');
+  const fromX=from.x+from.width/2,fromY=from.y+from.height/2;
+  const dropX=Math.max(to.x+to.width/5,scroller.x+6),dropY=to.y+to.height/2;
+  assert.ok(await chips.nth(2).evaluate((clip,{x,y})=>clip.contains(document.elementFromPoint(x,y)),{x:fromX,y:fromY}),'source clip must receive the pointer');
+  await page.mouse.move(fromX,fromY);
   await page.mouse.down();
-  // Move again within the destination to reliably deliver Chromium dragover before mouseup.
-  await page.mouse.move(to.x+to.width/4,to.y+to.height/2,{steps:8});
-  await page.mouse.move(to.x+to.width/6,to.y+to.height/2);
+  await page.mouse.move(dropX,dropY,{steps:8});
+  await page.locator('.vs-drop-marker').waitFor({state:'visible',timeout:5000});
+  await page.waitForFunction(({x,y})=>{
+    const first=document.querySelector('.vs-clip'),box=first?.getBoundingClientRect();
+    return box&&x<box.left+box.width/2&&first?.contains(document.elementFromPoint(x,y));
+  },{x:dropX,y:dropY},{timeout:5000});
   await page.mouse.up();
+  phase='timeline drag updates saved shot order';
   const reorderDeadline=Date.now()+10000;
   do{
     snapshot=await call('current');
     if(snapshot.project.shotOrder[0]===before[2])break;
     await page.waitForTimeout(200);
   }while(Date.now()<reorderDeadline);
-  assert.equal(snapshot.project.shotOrder[0],before[2]);pass('manual storyboard drag updates graph order');
+  assert.equal(snapshot.project.shotOrder[0],before[2]);
+  assert.equal(await selected.textContent(),selectedTitle,'drag must preserve the currently selected shot');
+  pass('manual storyboard drag updates graph order');
   phase='manual storyboard preview task completion';const beforePreview=await call('current');await page.getByRole('radio',{name:'分镜画布',exact:true}).click();await page.getByRole('button',{name:'全图概览',exact:true}).click();await page.getByRole('radio',{name:'监视器',exact:true}).click();await page.getByRole('button',{name:'刷新预览',exact:true}).click();
   snapshot=await waitForNewTask({read:()=>call('current'),previousTaskId:beforePreview.task?.id,projectId:beforePreview.project.id,minimumRevision:beforePreview.project.revision});pass('manual storyboard renders without conversation');
   phase='preview iframe ready handshake';const preview=page.frameLocator('iframe[title="影片画面预览"]');await preview.locator('canvas').waitFor();await page.waitForFunction(()=>{const button=document.querySelector('.vs-player button');return button&&!button.disabled;},{},{timeout:15000});assert.equal(await page.getByRole('button',{name:'播放',exact:true}).isEnabled(),true);pass('preview iframe ready handshake');
