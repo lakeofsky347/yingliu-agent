@@ -49,6 +49,29 @@ test('chat and discussion keep an empty workspace and never start preview',()=>w
   assert.ok(!backend.calls.some(call=>['create','apply','preview'].includes(call.endpoint)));assert.equal((await service.history()).turns?.length,2);assert.equal(provider.prompts[1]!.filter(m=>m.role==='assistant').length,1);
 }));
 
+test('a long style stays in the project and contributes one bounded user reference per director request',()=>withDirectory(async directory=>{
+  const backend=new FixtureBackend(),project=createProject('长风格工程');
+  project.shots=[];project.shotOrder=[];
+  const opening='暖纸底色与剪纸节奏',ending='风格文件的结尾';
+  const prompt=opening+'纸'.repeat(80000-opening.length-ending.length)+ending;
+  project.videoStyle={id:'long-style',name:'长风格',description:'剪纸',prompt,sourceFormat:'markdown',sourceName:'STYLE.md',createdAt:project.createdAt,updatedAt:project.updatedAt};
+  backend.state.project=project;
+  const provider=await new MockProvider(directory,(_turns,round)=>({intent:'discuss',message:'已参考风格',done:round>1,actions:round===1?[{tool:'video_project',arguments:{action:'get'}}]:[]})).ready();
+  await provider.save({contextCharLimit:8000});
+  const result=await new ConversationService(backend,provider,directory).send(chat('先讨论画面风格',project.id));
+  assert.equal(result.snapshot.project?.videoStyle?.prompt,prompt);
+  assert.equal(provider.prompts.length,2);
+  for(const [index,messages] of provider.prompts.entries()){
+    const system=provider.systems[index]!,serialized=messages.map(message=>String(message.content)).join('\n');
+    assert.match(system,/videoStyle 是用户选择的创作参考素材/);
+    assert.ok(!system.includes(opening));
+    assert.equal(serialized.split(opening).length,2);
+    assert.ok(!serialized.includes(ending));
+    assert.ok(serialized.includes('"promptTruncated":true'));
+    assert.ok(system.length+serialized.length<=8000);
+  }
+}));
+
 test('one-shot and twelve-shot drafts use atomic complete create, no fixed three-shot constraint',()=>withDirectory(async directory=>{
   for(const count of [1,12]){const backend=new FixtureBackend(),provider=await new MockProvider(join(directory,String(count)),()=>firstPlan(count)).ready(),service=new ConversationService(backend,provider,join(directory,String(count)));
     const result=await service.send(chat('制作一个30秒视频'));assert.equal(result.snapshot.project?.shots.length,count);assert.equal(backend.sources.size,count);assert.equal(backend.calls.filter(c=>c.endpoint==='create').length,1);assert.equal(backend.calls.filter(c=>c.endpoint==='apply').length,0);assert.equal(result.snapshot.project!.shots.reduce((n,s)=>n+s.durationFrames,0),900);assert.equal(result.conversation.turns?.[0]?.status,'succeeded');assert.match(result.conversation.messages.at(-1)!.content,/运行检查/);

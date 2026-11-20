@@ -10,6 +10,8 @@ if(process.isMainFrame)contextBridge.exposeInMainWorld('yingliu',Object.freeze({
   pickProject:()=>ipcRenderer.invoke('yingliu:pick-project'),
   exportProject:(projectId:string)=>ipcRenderer.invoke('yingliu:export-project',projectId),
   importProject:()=>ipcRenderer.invoke('yingliu:import-project'),
+  readSourceDrafts:()=>ipcRenderer.invoke('yingliu:read-source-drafts'),
+  writeSourceDrafts:(contents:string)=>ipcRenderer.invoke('yingliu:write-source-drafts',contents),
     pickExecutable:()=>ipcRenderer.invoke('yingliu:pick-executable'),
     resetScene:()=>ipcRenderer.invoke('yingliu:reset-scene'),
   onBeforeClose:(handler:()=>Promise<{ok:boolean;message?:string}>)=>{

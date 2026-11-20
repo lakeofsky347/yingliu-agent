@@ -15,11 +15,12 @@ export function AssetsPanel({project,selectedId,assetUrl,pending,locked,onSelect
   const needle=query.trim().toLocaleLowerCase();
   const counts=project.assets.reduce<Record<string,number>>((all,asset)=>({...all,[asset.kind]:(all[asset.kind]||0)+1}),{});
   const kinds=(['image','text','audio','video'] as const).filter(value=>counts[value]);
-  const visible=project.assets.filter(asset=>(kind==='all'||asset.kind===kind)&&(!needle||`${asset.name} ${asset.description} ${asset.text||''}`.toLocaleLowerCase().includes(needle)));
+  const activeKind=kind==='all'||counts[kind]?kind:'all';
+  const visible=project.assets.filter(asset=>(activeKind==='all'||asset.kind===activeKind)&&(!needle||`${asset.name} ${asset.description} ${asset.text||''}`.toLocaleLowerCase().includes(needle)));
   const uses=(asset:Asset)=>project.shots.filter(shot=>shot.assetIds.includes(asset.id)||shot.referenceIds.includes(asset.id)).length;
   const label:Record<Kind,string>={all:"全部",image:"图片",text:"文字",audio:"音频",video:"视频"};
   return <aside className={`vs-assets-panel ${dropping?'is-dropping':''}`} aria-label="资产库"
-    onDragEnter={event=>{if(event.dataTransfer.types.includes('Files')){event.preventDefault();setDropping(value=>value+1);}}}
+    onDragEnter={event=>{if(event.dataTransfer.types.includes('Files')){event.preventDefault();if(!locked)setDropping(value=>value+1);}}}
     onDragLeave={event=>{if(event.dataTransfer.types.includes('Files'))setDropping(value=>Math.max(0,value-1));}}
     onDragOver={event=>{if(event.dataTransfer.types.includes('Files'))event.preventDefault();}}
     onDrop={event=>{setDropping(0);if(event.dataTransfer.files.length){event.preventDefault();if(!locked&&!pending)onImport(event.dataTransfer.files);}}}>
@@ -27,12 +28,12 @@ export function AssetsPanel({project,selectedId,assetUrl,pending,locked,onSelect
       <h2>资产库 <small>{project.assets.length}</small></h2>
       <div className="vs-panel-header-actions">
         <IconButton icon="text" label="添加文字" onClick={onAddText} disabled={locked}/>
-        <IconButton icon="upload" label="导入图片、文字或音频" onClick={()=>file.current?.click()} disabled={pending||locked}/>
+        <IconButton icon="upload" label="导入图片、文字、音频或视频" onClick={()=>file.current?.click()} disabled={pending||locked}/>
         {onClose&&<IconButton icon="close" className="vs-assets-close" label="收起资产库" onClick={onClose}/>}
       </div>
     </div>
-    <div className="vs-search-box"><Icon name="search"/><input className="vs-search" type="search" aria-label="搜索资产" placeholder="搜索图片、文字、音频…" value={query} onChange={e=>setQuery(e.target.value)}/></div>
-    {kinds.length>1&&<div className="vs-chip-row" role="group" aria-label="按类型筛选">{(['all',...kinds] as Kind[]).map(value=><button type="button" key={value} aria-pressed={kind===value} className={`vs-chip ${kind===value?'is-active':''}`} onClick={()=>setKind(value)}>{label[value]}<small>{value==='all'?project.assets.length:counts[value]}</small></button>)}</div>}
+    <div className="vs-search-box"><Icon name="search"/><input className="vs-search" type="search" aria-label="搜索资产" placeholder="搜索图片、文字、音频和视频…" value={query} onChange={e=>setQuery(e.target.value)}/></div>
+    {kinds.length>1&&<div className="vs-chip-row" role="group" aria-label="按类型筛选">{(['all',...kinds] as Kind[]).map(value=><button type="button" key={value} aria-pressed={activeKind===value} className={`vs-chip ${activeKind===value?'is-active':''}`} onClick={()=>setKind(value)}>{label[value]}<small>{value==='all'?project.assets.length:counts[value]}</small></button>)}</div>}
     <input ref={file} hidden multiple type="file" accept={ACCEPT} onChange={e=>{if(e.target.files&&!locked&&!pending)onImport(e.target.files);e.target.value='';}}/>
     <div className="vs-assets">
       {visible.map(asset=>{const count=uses(asset),url=asset.kind==='image'?assetUrl(asset):'';return <div key={asset.id} className={`vs-asset ${selectedId===asset.id?'is-selected':''}`}>

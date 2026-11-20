@@ -11,6 +11,7 @@ import { createProject, defaultSceneSource, validateProject, migrateProject } fr
 import {probeAudio} from './audio.js';
 import {importVideoFile,MAX_VIDEO_BYTES} from '../media/video.js';
 import {syncDirectory} from './directory-sync.js';
+import {atomicRename} from './atomic-rename.js';
 import {inspectProjectPaths,portableProjectPathReason,safeRelativeProjectPath} from '../core/project-paths.js';
 
 export interface StoreOptions {
@@ -55,7 +56,7 @@ async function atomicWrite(file:string,data:string|Buffer):Promise<void> {
   const temporary=file+'.tmp-'+randomUUID();
   try {
     const handle=await fs.open(temporary,'w');try{await handle.writeFile(data);await handle.sync();}finally{await handle.close();}
-    await fs.rename(temporary,file);
+    await atomicRename(temporary,file);
     await syncDirectory(path.dirname(file));
   }
   finally { await fs.rm(temporary,{force:true}); }
@@ -212,7 +213,7 @@ export class ProjectStore {
     const stage=await projectPath(root,`.studio/staging/${record.id}.json`);await atomicWrite(stage,json(record));
     try{
       await this.options.onCommitPhase?.('staged');
-      const destination=await projectPath(root,`.studio/versions/${record.id}.json`);await fs.mkdir(path.dirname(destination),{recursive:true});await fs.rename(stage,destination);
+      const destination=await projectPath(root,`.studio/versions/${record.id}.json`);await fs.mkdir(path.dirname(destination),{recursive:true});await atomicRename(stage,destination);
       await this.indexRevision(root,record);
       const grouped=!!options.historyGroup&&state?.historyGroup===options.historyGroup;
       const next:StoreState={version:1,current:record.id,undo:state?[...state.undo,...(grouped?[]:[state.current])]:[],redo:[],historyGroup:options.historyGroup};
@@ -259,7 +260,7 @@ export class ProjectStore {
     const restored:StoredVersion={...target,id:randomUUID(),label:direction==='undo'?'撤销：'+current.label:'重做：'+target.label,createdAt:project.updatedAt,project};
     const stage=await projectPath(root,`.studio/staging/${restored.id}.json`);await atomicWrite(stage,json(restored));
     try{
-      await this.options.onCommitPhase?.('staged');const destination=await projectPath(root,`.studio/versions/${restored.id}.json`);await fs.mkdir(path.dirname(destination),{recursive:true});await fs.rename(stage,destination);
+      await this.options.onCommitPhase?.('staged');const destination=await projectPath(root,`.studio/versions/${restored.id}.json`);await fs.mkdir(path.dirname(destination),{recursive:true});await atomicRename(stage,destination);
       await this.indexRevision(root,restored);
       const next:StoreState={version:1,current:restored.id,undo:direction==='undo'?state.undo.slice(0,-1):[...state.undo,state.current],redo:direction==='redo'?state.redo.slice(0,-1):[...state.redo,state.current]};
       try{await atomicWrite(await projectPath(root,'.studio/state.json'),json(next));}catch(error){if((await this.state(root))?.current!==next.current)throw error;}
@@ -318,7 +319,7 @@ export class ProjectStore {
     if(!buffer.length||buffer.length>128*1024*1024)throw new Error('音频文件须为 1 字节至 128 MB');
     try{
       await atomicWrite(temporary,buffer);const metadata=await probeAudio(temporary,settings,signal);signal?.throwIfAborted();
-      const relative='assets/'+id+metadata.extension;await fs.rename(temporary,await projectPath(root,relative));
+      const relative='assets/'+id+metadata.extension;await atomicRename(temporary,await projectPath(root,relative));
       return {id,kind:'audio',name:input.name??(input.path?path.basename(input.path):'音频素材'+metadata.extension),description:input.description??'',path:relative,mime:metadata.mime,duration:metadata.duration,sampleRate:metadata.sampleRate,channels:metadata.channels};
     }finally{await fs.rm(temporary,{force:true});}
   }

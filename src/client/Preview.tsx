@@ -42,7 +42,7 @@ export function Preview({snapshot,project,selectedShot,controller,focusFrame,foc
   const currentRange=useMemo(()=>frameShotRange(project,frame),[project.shotOrder,project.shots,frame]);
   const marks=useMemo(()=>keyframeNumbers(range.start,range.end),[range.start,range.end]);
   const boundaries=useMemo(()=>{let at=0;const values:number[]=[];for(const id of project.shotOrder){const shot=project.shots.find(s=>s.id===id);if(!shot)continue;at+=shot.durationFrames;if(at<duration)values.push(at);}return values;},[project.shotOrder,project.shots,duration]);
-  const thumbnailKey=JSON.stringify([snapshot.previewUrl,marks]);
+  const thumbnailKey=JSON.stringify([snapshot.previewUrl,snapshot.previewRevision,marks]);
   const [thumbnails,setThumbnails]=useState<{key:string;urls:Record<number,string>;failed:boolean}>({key:'',urls:{},failed:false});
   useEffect(()=>{
     if(!previewUrl||!ready||showOutput||busy||!visible||syncing||snapshot.previewRevision!==project.revision)return;
@@ -144,7 +144,7 @@ export function Preview({snapshot,project,selectedShot,controller,focusFrame,foc
         {snapshot.previewUrl&&!ready&&!showOutput&&!previewError&&<span className="vs-preview-loading" aria-hidden="true"/>}
       <div className="vs-monitor-hud">
         <span className="vs-hud-chip" data-testid="current-shot-heading" data-shot-id={currentRange.shot?.id}>{shotLabel}</span>
-        {(outdated||syncing)&&<span className="vs-preview-badge"><i/>正在同步最新修改…</span>}
+        {(outdated||syncing)&&<span className="vs-preview-badge"><i/>{syncing?'正在同步最新修改…':'预览为已保存的旧版本'}</span>}
       </div>
       <button type="button" className="vs-monitor-expand" aria-label={expanded?"关闭大预览":"打开大预览"} title={expanded?"收起 · Esc":"大预览"} onClick={()=>setExpanded(!expanded)}><Icon name={expanded?'collapse':'expand'}/></button>
       </div>

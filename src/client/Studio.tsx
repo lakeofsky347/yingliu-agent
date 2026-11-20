@@ -24,6 +24,8 @@ import { EnvironmentPanel } from './EnvironmentPanel.tsx';
 import { StudioHeader, taskLabel, type MenuItem, type StageId, type StepInfo } from './StudioHeader.tsx';
 
 import { AgentPanel } from './AgentPanel.tsx';
+import { AgentRunFeed } from './agent-feed.ts';
+import type { PublicRun } from '../agent/contracts.ts';
 import { addPlacedShot } from './project-ui.ts';
 
 type PanelTab='agent'|'media'|'audio'|'source'|'workflow'|'spec'|'history'|'tasks'|'exports'|'environment';
@@ -34,6 +36,7 @@ export interface StudioProps {
   onNew:()=>void;
   onOpen:()=>void;
   onConfigure:()=>void;
+  onProjectUpdated?:()=>void;
   modelConfigured:boolean;
   visionReady:boolean;
   sceneModelName?:string;
@@ -61,19 +64,19 @@ function useLayout(ref:RefObject<HTMLElement>):StageLayout{
 
 export function Studio(props:StudioProps){return <ConfirmationScope><StudioContent {...props}/></ConfirmationScope>;}
 
-function StudioContent({controller,onHome,onNew,onOpen,onConfigure,modelConfigured,visionReady,sceneModelName,sceneConfigured,onConfigureVision,conversationBusy}:StudioProps){
+function StudioContent({controller,onHome,onNew,onOpen,onConfigure,onProjectUpdated,modelConfigured,visionReady,sceneModelName,sceneConfigured,onConfigureVision,conversationBusy}:StudioProps){
   const confirmAction=useConfirmAction(),cancelConfirmation=useCancelConfirmation();
   const [toasts]=useState(createToastStore),{toast}=toasts;
   useEffect(()=>controller.subscribe(toasts.dropUnavailableActions),[controller,toasts]);
   const state=useSyncExternalStore(controller.subscribe,controller.getSnapshot,controller.getSnapshot);
   const snapshot=state.snapshot,project=snapshot?.project||null,task=snapshot?.task;
   const isHome=!project;
-  useEffect(()=>()=>{cancelConfirmation?.();toasts.clear();},[controller,project?.id,isHome,cancelConfirmation,toasts]);
+  useEffect(()=>()=>{cancelConfirmation?.();toasts.clear();controller.persistDrafts();},[controller,project?.id,isHome,cancelConfirmation,toasts]);
   const busy=conversationBusy||state.pending||task?.status==='running';
   const generating=task?.status==='running'&&['storyboard','scenes','modify','audio'].includes(task.kind);
   const locked=busy;
   const studioRef=useRef<HTMLElement>(null),canvasRef=useRef<HTMLCanvasElement>(null),graphRef=useRef<LiteGraphEditor|null>(null);
-  const minimapRef=useRef<HTMLCanvasElement>(null);
+  const minimapRef=useRef<HTMLCanvasElement>(null),autoPreviewedRef=useRef('');
   const [playhead]=useState(createPlayhead);
   const layout=useLayout(studioRef);
   const [preferredStageMode,setStageModeState]=useState<StageMode>(()=>store.get<StageMode>('yingliu-agent-stage-mode','monitor'));
@@ -84,6 +87,41 @@ function StudioContent({controller,onHome,onNew,onOpen,onConfigure,modelConfigur
   const [zoom,setZoom]=useState(.9),[outputOpen,setOutputOpen]=useState(false),[keysOpen,setKeysOpen]=useState(false);
   const [wordOpen,setWordOpen]=useState(false),[instruction,setInstruction]=useState(''),[editScope,setEditScope]=useState<'shot'|'film'>('film');
   const [dismissedTask,setDismissedTask]=useState('');
+  const [agentRuns,setAgentRuns]=useState<PublicRun[]>([]),[agentLive,setAgentLive]=useState(false);
+  const agentFeedRef=useRef<AgentRunFeed|null>(null);
+  useEffect(()=>{
+    const projectId=project?.id;
+    setAgentRuns([]);setAgentLive(false);
+    if(!projectId)return;
+    let active=true,refreshNeeded=false,refreshing=false;
+    let versions=new Map<string,string>();
+    async function refreshProject(){
+      const current=controller.getSnapshot();
+      if(!active||refreshing||!refreshNeeded||current.pending||current.snapshot?.project?.id!==projectId)return;
+      refreshNeeded=false;refreshing=true;
+      let refreshed=false;
+      try{refreshed=await controller.refreshMediaProject();if(!refreshed)refreshNeeded=true;}
+      catch{/* The next agent event can refresh after a transport failure. */}
+      finally{refreshing=false;if(refreshed&&refreshNeeded)void refreshProject();}
+    }
+    const unsubscribe=controller.subscribe(()=>void refreshProject());
+    const token=typeof document!=='undefined'?document.querySelector<HTMLMetaElement>('meta[name="yingliu-token"]')?.content:undefined;
+    const subscription=new AgentRunFeed({
+      list:async()=>{const result=await controller.api.call<{runs?:PublicRun[]}|undefined>('agent.list',{projectId});return Array.isArray(result?.runs)?result.runs:[];},
+      connect:signal=>fetch('/events/agent?projectId='+encodeURIComponent(projectId),{method:'POST',headers:token?{'X-Yingliu-Token':token}:{},signal}),
+      onRuns:list=>{
+        if(!active)return;
+        setAgentRuns(list);
+        const nextVersions=new Map(list.map(run=>[run.id,`${run.status}:${run.steps.length}:${run.updatedAt??''}`]));
+        if([...nextVersions].some(([id,version])=>versions.get(id)!==version))refreshNeeded=true;
+        versions=nextVersions;
+        void refreshProject();
+      },
+      onLive:setAgentLive,
+    });
+    agentFeedRef.current=subscription;subscription.start();
+    return()=>{active=false;unsubscribe();subscription.stop();if(agentFeedRef.current===subscription)agentFeedRef.current=null;};
+  },[controller,project?.id]);
   const selectedShot=project?.shots.find(s=>s.id===state.selected),selectedAsset=project?.assets.find(a=>a.id===state.selected);
   const graphCheck=useMemo(()=>project?validateGraph(project):null,[project]);
   const spec=useMemo(()=>{try{return project?compileSpec(project):null;}catch{return null;}},[project]);
@@ -95,7 +133,7 @@ function StudioContent({controller,onHome,onNew,onOpen,onConfigure,modelConfigur
   const canvasVisible=stageMode!=='monitor';
   const setStageMode=(mode:StageMode)=>{setStageModeState(mode);store.set('yingliu-agent-stage-mode',mode);};
   function canHidePanel():boolean{
-    if(!controller.hasPanelDraft&&!controller.hasSourceDraft)return true;
+    if(!controller.hasPanelDraft&&!controller.hasVolatileSourceDraft)return true;
     toast({tone:'warning',message:controller.unsavedMessage});
     return false;
   }
@@ -115,6 +153,17 @@ function StudioContent({controller,onHome,onNew,onOpen,onConfigure,modelConfigur
   const assetBaseUrl=snapshot?.assetBaseUrl||snapshot?.previewUrl;
   const assetUrl=(asset:Asset):string=>state.localImages[asset.id]||(assetBaseUrl&&asset.path?new URL(asset.path,assetBaseUrl).href:'');
   const commit=controller.edit;
+  // Debounced auto-preview: ~1.2s after a saved revision settles with an outdated preview, prepare without locking edits.
+  useEffect(()=>{
+    if(!project||!graphCheck?.ok||state.dirty||state.saving||state.pending||state.previewing||state.conflict||state.sourceDraft||!!state.panelDraft||conversationBusy||generating||task?.status==='running')return;
+    if(snapshot?.previewRevision===project.revision)return;
+    const key=`${project.id}:${project.revision}`;if(autoPreviewedRef.current===key)return;
+    const timer=setTimeout(()=>{
+      autoPreviewedRef.current=key;
+      void controller.refreshPreview().then(result=>{if(result===undefined&&autoPreviewedRef.current===key)autoPreviewedRef.current='';});
+    },1200);
+    return()=>clearTimeout(timer);
+  },[project?.id,project?.revision,snapshot?.previewRevision,graphCheck?.ok,state.dirty,state.saving,state.pending,state.previewing,state.conflict,state.sourceDraft,state.panelDraft,conversationBusy,generating,task?.status,controller]);
   const graphUndo=useRef<EditUndo>();
   const undoAction=(undo:EditUndo|undefined)=>undo?.available()?{label:"撤销",...undo}:undefined;
   const onGraphRemoved=(removal:GraphRemoval)=>{
@@ -193,6 +242,7 @@ function StudioContent({controller,onHome,onNew,onOpen,onConfigure,modelConfigur
   async function importFiles(files:FileList|null){if(!files||locked||!canHidePanel())return;for(const file of Array.from(files))await controller.importFile(file);}
   async function refreshPreview(){
     if(!canHidePanel())return;
+    autoPreviewedRef.current=`${project?.id||''}:${project?.revision??''}`;
     await controller.action('preview');
   }
   async function modify(){
@@ -250,21 +300,33 @@ function StudioContent({controller,onHome,onNew,onOpen,onConfigure,modelConfigur
     return [
       {id:'storyboard',label:"分镜",state:runningKind==='storyboard'?'running':storyboardDone?'done':project.shots.length?'warning':'current',hint:storyboardDone?`${project.shots.length} 个镜头，主链完整`:project.shots.length?"主链待连接":"画布上的镜头"},
       {id:'scenes',label:"画面",state:runningKind==='scenes'||runningKind==='modify'?'running':scenesDone?'done':storyboardDone?'current':'todo',hint:"模型与素材"},
-      {id:'preview',label:"预览",state:runningKind==='preview'?'running':previewFresh?'done':scenesDone?'stale':'todo',hint:previewFresh?"预览与当前版本一致":"影片预览"},
+      {id:'preview',label:"预览",state:runningKind==='preview'||state.previewing?'running':previewFresh?'done':scenesDone?'stale':'todo',hint:previewFresh?"预览与当前版本一致":"影片预览"},
       {id:'export',label:"成片",state:runningKind==='export'?'running':latest&&(snapshot?.currentExportIds?.includes(latest.id)??latest.revision===project.revision)?'done':latest?'stale':previewFresh?'current':'todo',hint:latest?`最近导出 v${latest.revision}`:"历史成片"},
     ];
   })():[];
   const menu:MenuItem[]=project?[
     {id:'output',label:"输出设定",icon:'film',onSelect:()=>setOutputOpen(true)},
-    {id:'reveal',label:"打开项目文件夹 ",icon:'folder',disabled:!snapshot?.root,onSelect:()=>{if(snapshot?.root)void controller.action('reveal',{path:snapshot.root});}},
+    {id:'reveal',label:"打开项目文件夹",icon:'folder',disabled:!snapshot?.root,onSelect:()=>{if(snapshot?.root)void controller.action('reveal',{path:snapshot.root});}},
     {id:'media',label:"媒体模型",icon:'spark',separatorBefore:true,onSelect:()=>openPanel('media')},
     {id:'environment',label:"运行环境",icon:'settings',onSelect:()=>openPanel('environment')},
+    {id:'theme',label:state.scheme==='dark'?'切换到浅色工作台':'切换到深色工作台',icon:'monitor',onSelect:()=>{
+      const scheme=state.scheme==='dark'?'light':'dark';
+      controller.setScheme(scheme);
+      try{localStorage.setItem('yingliu-agent-workbench-scheme',scheme);}catch{/* Keep current theme for this session. */}
+    }},
     {id:'keys',label:"快捷键",icon:'keyboard',hint:'?',onSelect:()=>setKeysOpen(true)},
     {id:'new',label:'新建影片',icon:'plus',separatorBefore:true,disabled:busy,onSelect:onNew},
     {id:'open',label:'打开工程目录',icon:'folder',disabled:busy,onSelect:onOpen},
   ]:[];
+  const agentStatus=useMemo(()=>{
+    const approval=agentRuns.find(run=>run.status==='awaiting_approval'||(run.status==='paused'&&Boolean(run.visionConsentRequired)));
+    if(approval)return {state:'approval' as const,label:'智能体待批准',onClick:()=>{openPanel('agent');}};
+    const activeRun=agentRuns.find(run=>['running','waiting_task'].includes(run.status));
+    if(activeRun)return {state:'running' as const,label:'智能体运行中',onClick:()=>{openPanel('agent');}};
+    return null;
+  },[agentRuns]);
   const drawerTabs:DrawerTab<PanelTab>[]=[
-    {id:'agent',label:'智能体',icon:'spark'},
+    {id:'agent',label:'智能体',icon:'spark',badge:agentStatus?.state==='approval'?<i className="vs-tab-dot is-warn" aria-hidden="true"/>:agentStatus?.state==='running'?<i className="vs-tab-dot is-busy" aria-hidden="true"/>:undefined},
     {id:'audio',label:"声音与配音",icon:'music'},{id:'media',label:"模型与素材生成",icon:'spark'},{id:'source',label:"前端源码",icon:'code'},
     {id:'workflow',label:"协作制作",icon:'users'},{id:'spec',label:"制作要求",icon:'doc'},{id:'history',label:"修改历史",icon:'history'},
     {id:'tasks',label:"任务记录",icon:'tasks',badge:task?.status==='failed'?<i className="vs-tab-dot is-danger"/>:task?.status==='running'?<i className="vs-tab-dot is-busy"/>:undefined},
@@ -276,16 +338,20 @@ function StudioContent({controller,onHome,onNew,onOpen,onConfigure,modelConfigur
   const lockReason=generating?"正在生成，完成后可以继续编辑":"正在处理，请稍候…";
   const effectiveDrawerOpen=drawerOpen;
   return <main ref={studioRef} className="vs-studio" data-scheme={state.scheme} data-layout={layout} lang="zh-CN">
-    {project&&<StudioHeader project={project} state={state} steps={steps} task={task} busy={busy} graphOk={!!graphCheck?.ok} canExport={!!graphCheck?.ok}
+    {project&&<StudioHeader project={project} state={state} steps={steps} task={task} agentStatus={agentStatus} busy={busy} graphOk={!!graphCheck?.ok} canExport={!!graphCheck?.ok&&!state.sourceDraft&&!state.panelDraft&&!state.conflict}
       sceneModelName={sceneModelName} sceneConfigured={sceneConfigured} onConfigure={onConfigure}
-      onHome={onHome} onRename={title=>commit({...project,title,revision:project.revision+1,updatedAt:new Date().toISOString()})}
-      onStep={onStep} onGenerate={kind=>void generate(kind)} onExport={()=>{if(openPanel('tasks'))void controller.action('export');}}
+      onHome={onHome} onRename={title=>void controller.action('rename',{title},'影片名称已保存。').then(ok=>{if(ok)onProjectUpdated?.();})}
+      onStep={onStep} onGenerate={kind=>void generate(kind)} onExport={()=>{
+        if(!canHidePanel())return;
+        if(state.sourceDraft){toast({tone:'warning',message:'本工程有源码草稿，请保存或丢弃草稿后再导出。'});return;}
+        if(openPanel('tasks'))void controller.action('export');
+      }}
       onCancel={()=>void controller.action('cancel')} onHistory={()=>openPanel('history')} menu={menu}/>}
     {state.loading?<div className="vs-loading"><div className="vs-skeleton-grid" aria-hidden="true"><i/><i/><i/><i/></div><span>正在打开工作台…</span></div>:!project?<div className="vs-loading"><Button icon="plus" variant="primary" onClick={onNew}>新建影片</Button><Button icon="folder" onClick={onOpen}>打开工程目录</Button></div>:<>
       {(bannerError||state.sourceDraft||failedTask)&&<div className="vs-banners">
         {bannerError&&<div className="vs-banner is-danger" role="alert"><Icon name="warning"/><span>{bannerError}</span>{state.dirty&&<Button size="sm" icon="download" onClick={()=>downloadText(`${project.title||"影片"}-本地参数副本.json`,JSON.stringify(project,null,2),'application/json;charset=utf-8')}>保存本地参数副本</Button>}{state.conflict?<Button size="sm" icon="refresh" onClick={()=>void controller.load(true)}>{state.dirty?"放弃本地参数并重新读取":"重新读取工程（保留源码草稿）"}</Button>:state.dirty?<Button size="sm" icon="check" onClick={()=>void controller.flush()}>重试保存</Button>:null}</div>}
         {failedTask&&<div className="vs-banner is-warning" role="status"><Icon name="warning"/><span><strong>{failedTask.message||taskLabel(failedTask.kind)}</strong>{failedTask.error&&<small className="vs-task-error">{failedTask.error}</small>}</span><Button size="sm" icon="tasks" onClick={()=>openPanel('tasks')}>查看任务记录</Button><IconButton icon="close" label="关闭提示" onClick={()=>setDismissedTask(failedTask.id)}/></div>}
-        {state.sourceDraft&&<div className="vs-banner is-info vs-draft-banner" role="status"><Icon name="code"/><span>前端源码尚未保存，请在源码面板保存或丢弃草稿。</span><Button size="sm" onClick={()=>openPanel('source')}>查看源码草稿</Button></div>}
+        {state.sourceDraft&&<div className="vs-banner is-info vs-draft-banner" role="status"><Icon name="code"/><span>{state.sourceDraftCount?`${state.sourceDraftCount} 份源码草稿已保留，保存源码后才会进入预览与成片。`:'前端源码尚未保存，请在源码面板保存或丢弃草稿。'}</span><Button size="sm" onClick={()=>{const draft=controller.sourceDrafts().find(value=>project.shots.some(shot=>shot.id===value.shotId));if(draft)controller.select(draft.shotId);openPanel('source');}}>查看源码草稿</Button></div>}
       </div>}
       <div className={`vs-workbench ${assetsOpen?'is-assets-open':''}`} data-pane={pane} data-drawer={effectiveDrawerOpen?'open':'closed'}>
         <AssetsPanel project={project} selectedId={state.selected} assetUrl={assetUrl} pending={state.pending} locked={locked}
@@ -312,7 +378,7 @@ function StudioContent({controller,onHome,onNew,onOpen,onConfigure,modelConfigur
         <BottomDrawer tabs={drawerTabs} active={panel} open={effectiveDrawerOpen} height={drawerHeight} flash={flash}
           onSelect={tab=>openPanel(tab,false)} onToggle={()=>{if(!effectiveDrawerOpen||canHidePanel())setDrawerOpen(!effectiveDrawerOpen);}} onResize={height=>{setDrawerHeight(height);store.set('yingliu-agent-drawer-height',height);}}>
           <fieldset className="vs-panel-fields" disabled={conversationBusy}>
-            {panel==='agent'&&<AgentPanel key={project.id} controller={controller} project={project}/>}
+            {panel==='agent'&&<AgentPanel key={project.id} controller={controller} project={project} externalRuns={agentRuns} externalLive={agentLive} onExternalRefresh={()=>agentFeedRef.current?.refresh()}/>}
             {panel==='workflow'&&<WorkflowPanel key={project.id} controller={controller} project={project} selectedShot={selectedShot} visionReady={visionReady} onConfigure={onConfigureVision}/>}
             {panel==='media'&&<MediaPanel controller={controller} project={project} selectedShot={selectedShot}/>}
             {panel==='history'&&<HistoryPanel controller={controller}/>}
@@ -339,9 +405,9 @@ function StudioContent({controller,onHome,onNew,onOpen,onConfigure,modelConfigur
     {textOpen&&<Dialog label="添加文字资产" onClose={()=>setTextOpen(false)} busy={state.pending}><div className="vs-section-header"><div><h2>添加文字资产</h2><p className="vs-modal-lead">文案、故事或风格说明都可以连接到镜头，成为画面或参考。</p></div><IconButton icon="close" label="关闭" onClick={()=>setTextOpen(false)}/></div><textarea className="vs-textasset-input" aria-label="文字素材" rows={10} value={textAsset} onChange={e=>setTextAsset(e.target.value)} placeholder="粘贴文案、故事、产品介绍或风格参考…" data-dialog-autofocus/><div className="vs-modal-actions"><Button variant="primary" icon="plus" disabled={!textAsset.trim()||state.pending} onClick={()=>void controller.action('import',{name:truncate(textAsset.trim().split('\n')[0]||"文字素材",22),mime:'text/plain',text:textAsset}).then(()=>{if(!controller.getSnapshot().error){setTextOpen(false);setTextAsset('');}})}>加入资产库</Button></div></Dialog>}
     {keysOpen&&<Dialog label="快捷键" onClose={()=>setKeysOpen(false)} className="vs-keys-modal"><div className="vs-section-header"><h2>快捷键</h2><IconButton icon="close" label="关闭快捷键" onClick={()=>setKeysOpen(false)}/></div><ul className="vs-keys">
       <li><span>播放或暂停</span><span><kbd>空格</kbd></span></li>
-      <li><span>上一帧 / 下一帧</span><span><kbd>Alt</kbd><kbd>←</kbd><kbd>→</kbd></span></li>
+      <li><span>上一帧 / 下一帧（监视器聚焦）</span><span><kbd>←</kbd><kbd>→</kbd></span></li>
       <li><span>上一个 / 下一个镜头</span><span><kbd>[</kbd><kbd>]</kbd></span></li>
-      <li><span>在时间线上移动镜头</span><span><kbd>Alt</kbd><kbd>←</kbd><kbd>→</kbd></span></li>
+      <li><span>在时间线上移动选中镜头</span><span><kbd>Alt</kbd><kbd>←</kbd><kbd>→</kbd></span></li>
       <li><span>用文字修改</span><span><kbd>⌘ K</kbd></span></li>
       <li><span>提交改词</span><span><kbd>⌘ Enter</kbd></span></li>
       <li><span>撤销 / 重做</span><span><kbd>⌘ Z</kbd><kbd>⇧ ⌘ Z</kbd></span></li>

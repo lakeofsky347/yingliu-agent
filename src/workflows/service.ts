@@ -6,6 +6,7 @@ import { safeRelativeProjectPath } from '../core/project-paths.ts';
 import { defaultSceneSource, validateProject } from '../core/index.ts';
 import { normalizeStoryboard, parseModelJson, parseSceneSource } from '../host/generator.ts';
 import type { Asset, SceneSource, VideoProject } from '../shared/types.ts';
+import { VIDEO_STYLE_CONTEXT_GUIDANCE, videoStyleContext } from '../shared/video-style.ts';
 import type { MediaTaskService } from '../jobs/media-tasks.ts';
 import type { MediaTask } from '../jobs/contracts.ts';
 import type { WorkflowPort, WorkflowRecord, WorkflowRequest, WorkflowStep, WorkflowModelCall, WorkflowCandidate } from './contracts.ts';
@@ -240,7 +241,8 @@ export class WorkflowService {
     const selected=record.request.shotIds?.length?project.shots.filter(shot=>record.request.shotIds!.includes(shot.id)):project.shots;
     this.checkTaskBudget(record,selected.length||1);
     const step=this.step(record,'plan');this.beginStep(step);await this.persist(record);
-    const prompt=JSON.stringify({request:record.request.prompt,project:{title:project.title,topic:project.topic,targetDuration:project.targetDuration,target:project.target},shots:selected,output:selected.length?{shots:[{shotId:'必须使用给定镜头ID',prompt:'该镜头画面制作要求',narration:'旁白文字'}]}:{shots:[{title:'镜头标题',intent:'目标',durationSeconds:6,params:{text:'屏幕标题'},prompt:'画面制作要求',narration:'旁白文字'}]},instruction:'输出严格JSON，只安排选定镜头。空工程生成1–12个镜头。不要输出API地址或凭据。'});
+    const videoStyle=videoStyleContext(project.videoStyle);
+    const prompt=JSON.stringify({request:record.request.prompt,project:{title:project.title,topic:project.topic,targetDuration:project.targetDuration,target:project.target,videoStyle},shots:selected,output:selected.length?{shots:[{shotId:'必须使用给定镜头ID',prompt:'该镜头画面制作要求',narration:'旁白文字'}]}:{shots:[{title:'镜头标题',intent:'目标',durationSeconds:6,params:{text:'屏幕标题'},prompt:'画面制作要求',narration:'旁白文字'}]},instruction:'输出严格JSON，只安排选定镜头。空工程生成1–12个镜头。不要输出API地址或凭据。'+(videoStyle?VIDEO_STYLE_CONTEXT_GUIDANCE:'')});
     const validatePlan=(output:string)=>{
       const value=parseModelJson(output);
       if(!Array.isArray(value.shots)||value.shots.length<1||value.shots.length>12)throw new Error('导演须返回 1–12 个镜头计划');
@@ -266,7 +268,8 @@ export class WorkflowService {
       if(record.request.visual==='code'){
         const project=record.baseline!,shot=project.shots.find(item=>item.id===plan.shotId)!;
         const current=await this.port.source(record.projectId,plan.shotId);
-        const prompt=JSON.stringify({request:plan.prompt,shot,target:project.target,assets:project.assets.filter(asset=>shot.assetIds.includes(asset.id)||shot.referenceIds.includes(asset.id)),current,contract:'输出严格JSON {html,css,js}；JS导出render(ctx)，按ctx.localFrame/time独立求值，使用ctx.params。无外网、Node、IPC。ctx.hasVideo为true时宿主已绘制视频底图，只叠加文字图形，不用不透明全屏背景遮住底图，也不自行启动video播放。所有用户未要求修改的字段保持。'});
+        const videoStyle=videoStyleContext(project.videoStyle);
+        const prompt=JSON.stringify({request:plan.prompt,shot,target:project.target,videoStyle,assets:project.assets.filter(asset=>shot.assetIds.includes(asset.id)||shot.referenceIds.includes(asset.id)),current,contract:'输出严格JSON {html,css,js}；JS导出render(ctx)，按ctx.localFrame/time独立求值，使用ctx.params。无外网、Node、IPC。ctx.hasVideo为true时宿主已绘制视频底图，只叠加文字图形，不用不透明全屏背景遮住底图，也不自行启动video播放。所有用户未要求修改的字段保持。'+(videoStyle?VIDEO_STYLE_CONTEXT_GUIDANCE:'')});
         step.source=parseSceneSource(await this.text(record,step,'scene',prompt,signal,undefined,output=>{parseSceneSource(output);}));
       }else{
         let task:MediaTask;

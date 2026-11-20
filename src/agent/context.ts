@@ -1,4 +1,5 @@
 import type { VideoProject } from '../shared/types.ts';
+import { videoStyleContext } from '../shared/video-style.ts';
 import type { AgentMessage } from './contracts.ts';
 
 export const MAX_TOOL_RESULT_CHARS = 12_000;
@@ -9,6 +10,7 @@ export function summarizeProject(project: VideoProject | null): Record<string, u
   const fps = project.target.fps.num / project.target.fps.den;
   const order = project.shotOrder.length ? project.shotOrder : project.shots.map(shot => shot.id);
   const byId = new Map(project.shots.map(shot => [shot.id, shot]));
+  const videoStyle=videoStyleContext(project.videoStyle);
   return {
     id: project.id, title: project.title, topic: project.topic, revision: project.revision, targetDuration: project.targetDuration,
     target: { width: project.target.width, height: project.target.height, fps },
@@ -17,7 +19,8 @@ export function summarizeProject(project: VideoProject | null): Record<string, u
       composition: shot!.composition, action: shot!.action, assetIds: shot!.assetIds ?? [],
     })),
     assets: project.assets.map(asset => ({ id: asset.id, kind: asset.kind, name: asset.name, description: untrusted(asset.description ?? '', 300) })),
-    audio: (project as unknown as { audio?: { tracks?: unknown[] } }).audio?.tracks?.length ?? 0,
+    audio: project.audioClips?.length ?? 0,
+    ...(videoStyle ? { videoStyle: { ...videoStyle, name: untrusted(videoStyle.name), description: untrusted(videoStyle.description), prompt: untrusted(videoStyle.prompt,4000) } } : {}),
   };
 }
 

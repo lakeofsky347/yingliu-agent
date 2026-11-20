@@ -11,31 +11,39 @@ export const riskNames:Record<ToolRisk,string>={read:'只读',write:'修改工�
 const roleNames:Record<string,string>={image:'生图',video:'生视频',speech:'配音',music:'音乐',sfx:'音效',vision:'视觉检查'};
 const stepKinds:Record<RunStep['kind'],string>={model:'思考',tool:'工具',approval:'审批',review:'自检',compress:'整理上下文'};
 
-export function AgentPanel({controller,project}:{controller:StudioController;project:VideoProject}){
+export function AgentPanel({controller,project,externalRuns,externalLive,onExternalRefresh}:{controller:StudioController;project:VideoProject;externalRuns?:PublicRun[];externalLive?:boolean;onExternalRefresh?:()=>Promise<void>|void}){
   const state=useSyncExternalStore(controller.subscribe,controller.getSnapshot,controller.getSnapshot);
-  const [goal,setGoal]=useState(''),[runs,setRuns]=useState<PublicRun[]>([]),[selected,setSelected]=useState<string>(''),[busy,setBusy]=useState(false),[error,setError]=useState('');
-  const [allowWrite,setAllowWrite]=useState(true),[allowImages,setAllowImages]=useState(false),[maxSteps,setMaxSteps]=useState(24),[maxCost,setMaxCost]=useState(''),[live,setLive]=useState(false),[autoPlan,setAutoPlan]=useState(false);
+  const [goal,setGoal]=useState(''),[internalRuns,setInternalRuns]=useState<PublicRun[]>([]),[selected,setSelected]=useState<string>(''),[busy,setBusy]=useState(false),[error,setError]=useState('');
+  const [allowWrite,setAllowWrite]=useState(true),[allowImages,setAllowImages]=useState(false),[maxSteps,setMaxSteps]=useState(24),[maxCost,setMaxCost]=useState(''),[internalLive,setInternalLive]=useState(false),[autoPlan,setAutoPlan]=useState(false);
   const feed=useRef<AgentRunFeed|null>(null),actionBusy=useRef(false),active=useRef(false);
+  const hasExternalRuns=externalRuns!==undefined;
+  const runs=hasExternalRuns?externalRuns:internalRuns;
+  const live=hasExternalRuns?Boolean(externalLive):internalLive;
   const disabled=busy||state.pending;
   const [caps,setCaps]=useState<{capabilities:{roles:string[];director?:string;models?:Record<string,string>};tools:{name:string;risk:ToolRisk}[];selfMade:string[]}|null>(null);
   const canReviewImages=caps?.capabilities.roles.includes('vision')??false;
   async function refreshCaps(){setAllowImages(false);try{setCaps(await controller.api.call('agent.capabilities'));}catch{setCaps(null);}}
   useEffect(()=>{void refreshCaps();const listener=()=>{setCaps(null);void refreshCaps();};window.addEventListener('yingliu-models-changed',listener);return ()=>window.removeEventListener('yingliu-models-changed',listener);},[controller]);
   useEffect(()=>{
+    if(!hasExternalRuns)return;
+    setSelected(current=>externalRuns.some(run=>run.id===current)?current:externalRuns[0]?.id??'');
+  },[hasExternalRuns,externalRuns]);
+  useEffect(()=>{
     active.current=true;
+    if(hasExternalRuns)return()=>{active.current=false;};
     const token=typeof document!=='undefined'?document.querySelector<HTMLMetaElement>('meta[name="yingliu-token"]')?.content:undefined;
     const subscription=new AgentRunFeed({
-      list:async()=>(await controller.api.call<{runs:PublicRun[]}>('agent.list',{projectId:project.id})).runs,
+      list:async()=>{const result=await controller.api.call<{runs?:PublicRun[]}|undefined>('agent.list',{projectId:project.id});return Array.isArray(result?.runs)?result.runs:[];},
       connect:signal=>fetch('/events/agent?projectId='+encodeURIComponent(project.id),{method:'POST',headers:token?{'X-Yingliu-Token':token}:{},signal}),
-      onRuns:list=>{setRuns(list);setSelected(current=>list.some(run=>run.id===current)?current:list[0]?.id??'');},
-      onLive:setLive,
+      onRuns:list=>{setInternalRuns(list);setSelected(current=>list.some(run=>run.id===current)?current:list[0]?.id??'');},
+      onLive:setInternalLive,
     });
     feed.current=subscription;subscription.start();
     return()=>{active.current=false;subscription.stop();if(feed.current===subscription)feed.current=null;};
-  },[controller,project.id]);
+  },[controller,project.id,hasExternalRuns]);
   async function act(work:()=>Promise<unknown>){
     if(actionBusy.current||state.pending)return;actionBusy.current=true;setBusy(true);setError('');
-    try{await work();await feed.current?.refresh();}catch(cause){if(active.current)setError(cause instanceof Error?cause.message:String(cause));}finally{actionBusy.current=false;if(active.current)setBusy(false);}
+    try{await work();await (onExternalRefresh?onExternalRefresh():feed.current?.refresh());}catch(cause){if(active.current)setError(cause instanceof Error?cause.message:String(cause));}finally{actionBusy.current=false;if(active.current)setBusy(false);}
   }
   const run=runs.find(item=>item.id===selected);
   const consent=run?.visionConsentRequired;

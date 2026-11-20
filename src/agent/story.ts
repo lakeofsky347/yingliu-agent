@@ -116,7 +116,7 @@ export function pngLuma(bytes: Uint8Array): { mean: number; std: number } | null
 export interface QcIssue { check: 'black' | 'silence' | 'subtitle' | 'duration' | 'consistency'; severity: 'low' | 'medium' | 'high'; shotId?: string; message: string }
 /** status: pass = every check ran and nothing severe; partial = no severe issue but some checks could not run; fail = a severe issue. `pass` is true only for status pass. */
 export type QcStatus = 'pass' | 'partial' | 'fail';
-export interface QcReport { status?: QcStatus; pass: boolean; checkedAt: string; issues: QcIssue[]; unchecked: string[] }
+export interface QcReport { status?: QcStatus; pass: boolean; checkedAt: string; revision?: number; issues: QcIssue[]; unchecked: string[] }
 export function qcStatus(issues: QcIssue[], unchecked: string[]): QcStatus { return issues.some(i => i.severity === 'high') ? 'fail' : unchecked.length ? 'partial' : 'pass'; }
 
 /** Project-data checks (no rendering): silence, subtitle overflow, durations, consistency scores. */

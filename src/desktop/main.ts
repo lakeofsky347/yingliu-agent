@@ -8,6 +8,7 @@ import { editorWebPreferences } from './web-preferences.ts';
 import { ownedSceneProcesses, sameSceneProcess } from './scene-recovery.ts';
 import { acquireApplicationOwner, applicationDirectories, drainOwned, type OwnerLease } from '../app/ownership.ts';
 import { acquireDesktopOwner, busyDialogOptions, choiceFor } from './startup-owner.ts';
+import { SourceDraftFile } from './source-draft-file.ts';
 
 app.setName('映流智能体');
 app.commandLine.appendSwitch('site-per-process');
@@ -21,9 +22,10 @@ if(!ownsApplication)app.quit();
 app.on('second-instance',()=>{const window=BrowserWindow.getAllWindows()[0];if(window){if(window.isMinimized())window.restore();window.show();window.focus();}});
 let closing=false,preparing=false,dispose:(()=>Promise<void>)|undefined,prepareQuit:(()=>Promise<void>)|undefined;
 let ownership:OwnerLease|undefined,applicationInstance:Awaited<ReturnType<typeof createApplication>>|undefined,uiServer:Awaited<ReturnType<typeof startUiServer>>|undefined;
+let sourceDraftFile:SourceDraftFile|undefined;
 let cleanup:Promise<void>|undefined,startup:Promise<void>|undefined,cleanupFinished=false;
 const startupAbort=new AbortController();
-dispose=()=>cleanup??=(async()=>{try{await drainOwned([()=>applicationInstance?.dispose(),()=>uiServer?.close()]);}finally{try{await ownership?.release();}finally{cleanupFinished=true;}}})();
+dispose=()=>cleanup??=(async()=>{try{await drainOwned([()=>applicationInstance?.dispose(),()=>uiServer?.close(),()=>sourceDraftFile?.flush()]);}finally{try{await ownership?.release();}finally{cleanupFinished=true;}}})();
 async function stopImmediately(){
   if(closing)return;closing=true;startupAbort.abort(new Error('应用正在关闭'));
   await startup?.catch(()=>{});try{await dispose?.();}finally{app.quit();}
@@ -47,6 +49,9 @@ if(ownsApplication)void (startup=app.whenReady().then(async()=>{
     webPreferences:editorWebPreferences(join(__dirname,'preload.cjs'),editorSession)});
   window.webContents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
   const trusted=(event:Electron.IpcMainInvokeEvent)=>event.sender===window.webContents&&event.senderFrame!==null&&event.senderFrame.parent===null&&event.senderFrame.frameTreeNodeId===window.webContents.mainFrame.frameTreeNodeId&&new URL(event.senderFrame.url).origin===server.origin;
+  const drafts=new SourceDraftFile(dataDirectory);sourceDraftFile=drafts;
+  ipcMain.handle('yingliu:read-source-drafts',event=>{if(!trusted(event))throw new Error('此窗口无法读取源码草稿');return drafts.read();});
+  ipcMain.handle('yingliu:write-source-drafts',(event,contents:unknown)=>{if(!trusted(event)||closing)throw new Error('此窗口无法保存源码草稿');return drafts.write(contents);});
   ipcMain.handle('yingliu:call',(event,endpoint:unknown,payload:unknown)=>{if(!trusted(event)||typeof endpoint!=='string'||!ENDPOINTS.has(endpoint))throw new Error('此窗口无法调用应用服务');return application.route(endpoint,payload);});
   ipcMain.handle('yingliu:pick-project',async event=>{if(!trusted(event))throw new Error('此窗口无法打开文件');const result=await dialog.showOpenDialog(window,{title:'打开影片工程目录',properties:['openDirectory'],defaultPath:join(dataDirectory,'projects')});return result.canceled?null:result.filePaths[0]??null;});
   ipcMain.handle('yingliu:pick-executable',async event=>{if(!trusted(event))throw new Error('此窗口无法打开文件');const result=await dialog.showOpenDialog(window,{title:'选择本地可执行文件',properties:['openFile']});return result.canceled?null:result.filePaths[0]??null;});

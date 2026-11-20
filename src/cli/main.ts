@@ -34,7 +34,7 @@ const BOOL = new Set(['json', 'mock', 'no-wait', 'allow-paid', 'trace', 'force',
 /** C01: commands that only read. They open the profile with recovery disabled, so they never settle, resume or rewrite state. */
 export function isReadOnly(pos: string[], f: Flags): boolean {
   const [g, s] = pos;
-  return (g === 'project' && (s === 'list' || s === 'get')) || (g === 'agent' && s === 'status') || ((g === 'story' || g === 'ledger') && s === 'show') || (g === 'qc' && s === 'show' && f.run !== true) || (g === 'models' && s === 'list');
+  return (g === 'project' && (s === 'list' || s === 'get')) || (g === 'agent' && s === 'status') || ((g === 'story' || g === 'ledger') && s === 'show') || (g === 'qc' && s === 'show' && f.run !== true) || (g === 'models' && s === 'list') || (g === 'styles' && s === 'list');
 }
 const str = (f: Flags, k: string, required = false): string | undefined => { const v = f[k]; if (typeof v === 'string' && v) return v; if (required) throw new CliError('USAGE', `缺少参数 --${k}`); return undefined; };
 const num = (f: Flags, k: string): number | undefined => { const v = str(f, k); if (v === undefined) return undefined; const n = Number(v); if (!Number.isFinite(n)) throw new CliError('USAGE', `--${k} 必须是数字`); return n; };
@@ -159,7 +159,8 @@ export async function waitTask(ctx: Ctx, projectId: string, kind: string, taskId
 export const HELP = `yingliu — 映流智能体 headless CLI（详见 docs/CLI.md）
 全局：--json  --mock  --timeout <秒>  --lock-timeout <秒，默认 30>   数据目录：YINGLIU_DATA_DIR，工程目录：YINGLIU_PROJECTS
   doctor
-  project create --title <t> [--topic <t>] | list [--include-archived] | get <id> | export-zip <id> --out <file> | import <file>
+  project create --title <t> [--topic <t>] [--style <id>] | list [--include-archived] | get <id> | export-zip <id> --out <file> | import <file>
+  styles list
   agent run --project <id> --goal <g> [--auto-approve read,write,plan] [--allow-paid --max-cost <n> [--auto-approve ...,cost,export]] [--max-steps n] [--max-review-rounds n]
   agent status <runId> [--trace] | resume <runId> [--upload-consent <id> | --skip-upload]
   agent approve <runId> --call <callId> --exec <execId> [--args-hash h] | reject <runId> --call <callId> --exec <execId> [--reason r]
@@ -171,11 +172,24 @@ async function dispatch(ctx: Ctx, pos: string[]): Promise<{ data: unknown; exit?
   const [group, sub, arg] = pos, f = ctx.flags;
   switch (group) {
     case 'project': switch (sub) {
-      case 'create': { const s = await call(ctx, 'create', { blank: true, title: str(f, 'title', true), ...(str(f, 'topic') ? { topic: str(f, 'topic') } : {}) }); return { data: { id: s.project.id, title: s.project.title, root: s.root, revision: s.project.revision } }; }
+      case 'create': {
+        const styleId = str(f, 'style');
+        let selectedStyle: { id: string; name: string } | undefined;
+        if (styleId) {
+          const styles = (await call<{ styles: { id: string; name: string }[] }>(ctx, 'styles.list')).styles;
+          selectedStyle = styles.find(item => item.id === styleId);
+          if (!selectedStyle) throw new CliError('NOT_FOUND', '未找到视频风格 ' + styleId);
+        }
+        const s = await call(ctx, 'create', { blank: true, title: str(f, 'title', true), ...(str(f, 'topic') ? { topic: str(f, 'topic') } : {}), ...(selectedStyle ? { videoStyle: selectedStyle } : {}) });
+        return { data: { id: s.project.id, title: s.project.title, root: s.root, revision: s.project.revision, ...(s.project.videoStyle ? { videoStyle: { id: s.project.videoStyle.id, name: s.project.videoStyle.name } } : {}) } };
+      }
       case 'list': return { data: (await call(ctx, 'list', { includeArchived: f['include-archived'] === true })).projects };
       case 'get': { if (!arg) throw new CliError('USAGE', '用法：project get <id>'); const s = await call(ctx, 'current', { projectId: arg }); if (!s.project || s.project.id !== arg) throw new CliError('NOT_FOUND', '未找到视频工程 ' + arg); return { data: { project: s.project, root: s.root, task: s.task } }; }
       case 'export-zip': { if (!arg) throw new CliError('USAGE', '用法：project export-zip <id> --out <file>'); const out = resolve(str(f, 'out', true)!); return { data: await call(ctx, 'app.exportProject', { projectId: arg, path: out }) }; }
       case 'import': { if (!arg) throw new CliError('USAGE', '用法：project import <file>'); const s = await call(ctx, 'app.importProject', { path: resolve(arg) }); return { data: { id: s.project.id, title: s.project.title, root: s.root } }; }
+    } break;
+    case 'styles': switch (sub) {
+      case 'list': return { data: (await call<{ styles: unknown[] }>(ctx, 'styles.list')).styles };
     } break;
     case 'agent': switch (sub) {
       case 'run': {

@@ -72,6 +72,25 @@ test('manual preview preparation checks the saved revision without starting a va
   }finally{await f.close();}
 });
 
+test('editor autosave can commit without preparing preview, while existing saves still prepare it',async()=>{
+  const f=await fixture();try{
+    const initial=await f.backend.call<StudioSnapshot>('create',{title:'后台预览'});
+    const project=initial.project!,projectId=project.id;
+    assert.equal(initial.previewRevision,project.revision);
+    const saved=await f.backend.call<StudioSnapshot>('save',{project:{...project,title:'已保存的编辑'},expectedRevision:project.revision,deferPreview:true});
+    assert.equal(saved.project!.revision,project.revision+1);
+    assert.equal(saved.previewRevision,initial.previewRevision);
+    assert.equal(saved.previewUrl,initial.previewUrl);
+    const stale=await f.backend.route('preview',{projectId,expectedRevision:project.revision,prepareOnly:true});
+    assert.ok(!stale.ok);assert.equal(stale.error.code,'REVISION_CONFLICT');
+    const prepared=await f.backend.call<StudioSnapshot>('preview',{projectId,expectedRevision:saved.project!.revision,prepareOnly:true});
+    assert.equal(prepared.previewRevision,saved.project!.revision);
+    assert.equal(prepared.task,null);
+    const legacy=await f.backend.call<StudioSnapshot>('save',{project:prepared.project,expectedRevision:prepared.project!.revision});
+    assert.equal(legacy.previewRevision,legacy.project!.revision);
+  }finally{await f.close();}
+});
+
 test('asset imports require a revision and reject concurrent stale writes before importing',async()=>{
   const f=await fixture();try{
     const first=await f.backend.call<StudioSnapshot>('create',{title:'素材导入版本保护'}),id=first.project!.id;

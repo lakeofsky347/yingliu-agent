@@ -1,6 +1,8 @@
-import {randomUUID} from 'node:crypto';
-import {readFile,writeFile,mkdir,readdir,rename,rm} from 'node:fs/promises';
+import {createHash, randomUUID} from 'node:crypto';
+import {readFile,writeFile,mkdir,readdir,rm} from 'node:fs/promises';
 import {resolve,join,relative} from 'node:path';
+import {atomicRename} from './atomic-rename.ts';
+import {projectOpenPath} from './file-opener.ts';
 import {homedir} from 'node:os';
 import {createProject,compileSpec,defaultSceneSource,updateShot,updateTarget,validateProject,reorderShots} from '../core/index.ts';
 import type {VideoProject,StudioSnapshot,TaskState,EnvironmentSettings,ProviderGroup,RpcResult,SceneSource,Shot,ModelRoute,TtsSettings,AudioClip,VideoClip,Asset} from '../shared/types.ts';
@@ -10,11 +12,13 @@ import {VideoRenderer,detectEnvironment,renderCheckError} from './renderer.ts';
 import {sanitizeTaskFailure,taskFailure} from '../shared/task-diagnostic.ts';
 import {AppSceneGenerator,parseSceneSource,normalizeStoryboard} from './generator.ts';
 import {SpeechSynthesizer,extractVideoAudio} from './audio.ts';
+import {synthesizeLocalSfx} from '../media/local-sfx.ts';
 import type {MediaProjectPort} from '../jobs/contracts.ts';
 import {inspectGeneratedMedia,readProjectImage} from '../media/inspect.ts';
 import type { GeneratedFile, MediaTask } from '../jobs/contracts.ts';
 import {inspectCredential,isCredentialError,updateCredential} from '../app/secrets.ts';
 import {defaultTtsSettings,validateTtsSettings} from '../shared/tts-capability.ts';
+import {normalizeVideoStyle} from '../shared/video-style.ts';
 
 interface TaskRequest { endpoint:'preview'|'export'|'generate'; payload:Record<string,string> }
 interface RecordedTask extends TaskState { appRecordVersion?:1; revision?:number; request?:TaskRequest; retryOf?:string; outputId?:string }
@@ -104,14 +108,17 @@ export class StudioService {
   }
   private required(){if(!this.project||!this.root)throw new Error('请先新建或打开项目');return {project:this.project,root:this.root};}
   private assertIdle(){if(this.task?.status==='running')throw new Error('已有任务运行，请等待或取消');}
+  private resolveOutputUrls(project:VideoProject,root:string,baseUrl:string):void{
+    for(const output of project.outputs){output.path=join(root,'exports',output.id,'video.mp4');output.url=new URL(`exports/${encodeURIComponent(output.id)}/video.mp4`,baseUrl).href;}
+  }
   private async refreshPreview(){
     if(!this.project||!this.root)return;
     this.assetBaseUrl=await this.renderer.assetBaseUrl(this.root);
-    for(const output of this.project.outputs){output.path=join(this.root,'exports',output.id,'video.mp4');output.url=new URL(`exports/${encodeURIComponent(output.id)}/video.mp4`,this.assetBaseUrl).href;}
+    this.resolveOutputUrls(this.project,this.root,this.assetBaseUrl);
     try{compileSpec(this.project);}catch{this.previewUrl=null;this.previewRevision=null;this.audioUrl=null;return;}
-    this.previewUrl=await this.renderer.preview(this.root,this.project);this.previewRevision=this.project.revision;
-    this.audioUrl=await this.renderer.audioPreview(this.root,this.project,this.settings);
-    for(const output of this.project.outputs){output.path=join(this.root,'exports',output.id,'video.mp4');output.url=new URL(`exports/${encodeURIComponent(output.id)}/video.mp4`,this.previewUrl).href;}
+    const previewUrl=await this.renderer.preview(this.root,this.project);
+    const audioUrl=await this.renderer.audioPreview(this.root,this.project,this.settings);
+    this.previewUrl=previewUrl;this.previewRevision=this.project.revision;this.audioUrl=audioUrl;
   }
   private async refreshAfterCommit():Promise<void>{
     try{await this.refreshPreview();}catch(error){
@@ -122,10 +129,15 @@ export class StudioService {
       try{await this.writeTaskJournal(this.required().root,this.task);}catch{this.task.message+='；任务日志写入失败，请检查工程目录权限';}
     }
   }
-  private async persist(next:VideoProject,sources:Record<string,SceneSource>={},label='编辑工程',historyGroup?:string){
+  private async persist(next:VideoProject,sources:Record<string,SceneSource>={},label='编辑工程',historyGroup?:string,deferPreview=false){
     const {root,project:current}=this.required();next=structuredClone(next);next.revision=current.revision+1;this.fitAudio(next);
     this.project=await this.store.commit(root,next,sources,{expectedRevision:current.revision,label,historyGroup});
     // Rendering follows the durable commit. A preview failure leaves the new version undoable.
+    if(deferPreview&&this.assetBaseUrl){
+      this.resolveOutputUrls(this.project,root,this.assetBaseUrl);
+      try{compileSpec(this.project);}catch{this.previewUrl=null;this.previewRevision=null;this.audioUrl=null;}
+      return;
+    }
     await this.refreshAfterCommit();
   }
   private async apply(data:any){
@@ -198,10 +210,11 @@ export class StudioService {
   }
   private async writeTaskJournal(root:string,task:RecordedTask):Promise<void>{
     const folder=await projectPath(root,'.studio/tasks');await mkdir(folder,{recursive:true});
-    const file=await projectPath(root,`.studio/tasks/${task.id}.json`),temporary=file+'.tmp';
+    const file=await projectPath(root,`.studio/tasks/${task.id}.json`),temporary=file+'.tmp-'+randomUUID();
     task.logPath=file;task.message=await this.redact(task.message);if(task.error)task.error=await this.redact(task.error);
     if(task.request){task.request=this.recordedRequest(task.request.endpoint,task.request.payload);if(task.request)for(const key of Object.keys(task.request.payload))task.request.payload[key]=await this.redact(task.request.payload[key]!);}
-    await writeFile(temporary,JSON.stringify(task,null,2)+'\n');await rename(temporary,file);
+    try{await writeFile(temporary,JSON.stringify(task,null,2)+'\n');await atomicRename(temporary,file);}
+    finally{await rm(temporary,{force:true});}
   }
   private recordedRequest(endpoint:string,data:any):TaskRequest|undefined{
     if(!data||typeof data!=='object'||Array.isArray(data))return;
@@ -296,6 +309,7 @@ export class StudioService {
           if(data.project){project=structuredClone(data.project);validateStoredProject(project);validateSources(project,data.sources??[]);for(const item of data.sources??[])parseSceneSource(JSON.stringify(item.source));}
           else{
             project=createProject(String(data.title||'未命名视频'),String(data.topic||''));if(data.target)project=updateTarget(project,data.target);if(data.targetDuration!==undefined)project.targetDuration=Number(data.targetDuration);
+            if(data.videoStyle!==undefined)project.videoStyle=normalizeVideoStyle(data.videoStyle);
             if(data.blank===true){project.shots=[];project.shotOrder=[];project.graph={positions:{'film-output':[375,140]},groups:[]};project.extensions.graphEdges=[];}
             project.extensions.brief={profile:String(data.profile??''),preset:String(data.preset??'')};
           }
@@ -303,7 +317,7 @@ export class StudioService {
           if(!data.project)for(const shot of this.project.shots)await this.store.markSourceGood(this.root,shot).catch(()=>{});await this.refreshAfterCommit();break;
         }
         case 'open':this.assertIdle();this.root=resolve(String(data.path));this.project=await this.store.open(this.root);this.task=null;await this.recoverTask();await this.refreshAfterCommit();break;
-        case 'save':{if(this.task?.status==='running'&&this.task.kind!=='export')this.assertIdle();const {project}=this.required();if(!data.project||data.project.id!==project.id)throw new Error('项目已切换，请刷新后重试');const next=structuredClone(data.project) as VideoProject;this.fitAudio(next);await this.persist({...next,outputs:project.outputs}, {},'保存工程');break;}
+        case 'save':{if(this.task?.status==='running'&&this.task.kind!=='export')this.assertIdle();const {project}=this.required();if(!data.project||data.project.id!==project.id)throw new Error('项目已切换，请刷新后重试');const next=structuredClone(data.project) as VideoProject;this.fitAudio(next);await this.persist({...next,outputs:project.outputs},{},'保存工程',undefined,data.deferPreview===true);break;}
         case 'apply':await this.apply(data);break;
         case 'import':{this.assertIdle();const {root,project}=this.required();const asset=await this.store.importAsset(root,data,this.settings);const next=structuredClone(project);next.assets.push(asset);next.graph.positions[asset.id]=[60,80+(next.assets.length-1)*180];await this.persist(next,{},'导入素材');break;}
         case 'video.clip.save':{
@@ -331,7 +345,7 @@ export class StudioService {
           const next={...this.tts,...options},file=join(this.baseDirectory,'tts.json'),temporary=file+'.tmp-'+randomUUID();
           const onlyClearingKey=data.apiKey!==undefined&&!String(data.apiKey).trim()&&!Object.keys(options).length;
           if(!onlyClearingKey)validateTtsSettings(next,detectEnvironment(this.settings));
-          const commit=async()=>{await mkdir(this.baseDirectory,{recursive:true});await writeFile(temporary,JSON.stringify(next,null,2));await rename(temporary,file);this.tts=next;};
+          const commit=async()=>{await mkdir(this.baseDirectory,{recursive:true});await writeFile(temporary,JSON.stringify(next,null,2));await atomicRename(temporary,file);this.tts=next;};
           try{if(data.apiKey===undefined)await commit();else await updateCredential(this.ctx.credentials,'YINGLIU_TTS_API_KEY',String(data.apiKey).trim()||undefined,commit);}
           finally{await rm(temporary,{force:true});}break;
         }
@@ -345,6 +359,37 @@ export class StudioService {
           else if(operation==='remove'){const next=structuredClone(project);next.audioClips=next.audioClips?.filter(c=>c.id!==data.clipId);await this.persist(next,{},operation==='update'?'修改音轨':'删除音轨');}
           else if(operation==='import'){const asset=await this.store.importAsset(root,data,this.settings);const next=structuredClone(project);next.assets.push(asset);await this.persist(this.withAudioClip(next,asset.id,data),{},'导入音频');}
           else throw new Error('音频操作无效');break;
+        }
+        case 'audio.sfx':{
+          const {root,project}=this.required();
+          if(data.projectId!==undefined&&data.projectId!==project.id)throw new Error('工程已切换，请刷新后重试');
+          if(!Number.isSafeInteger(data.expectedRevision))this.assertRevision(data,true);
+          const requestId=data.requestId===undefined?randomUUID():data.requestId;
+          if(typeof requestId!=='string'||requestId.length<1||requestId.length>300)throw new Error('导入 requestId 须为 1–300 字符');
+          const sfxName=String(data.name||'本地音效').trim().slice(0,60)||'本地音效';
+          const placement={role:'sfx' as const,shotId:data.shotId,startSeconds:data.startSeconds,trimStart:data.trimStart,trimEnd:data.trimEnd,volume:data.volume,fadeIn:data.fadeIn,fadeOut:data.fadeOut,loop:data.loop,fitDuration:data.fitDuration};
+          const key=createHash('sha256').update(requestId).digest('hex');
+          const digest=createHash('sha256').update(JSON.stringify({name:sfxName,spec:data.spec,placement})).digest('hex');
+          const existing=(project.extensions.importRequests as Record<string,{digest:string;assetId:string}>|undefined)?.[key];
+          if(existing){
+            if(existing.digest!==digest)throw Object.assign(new Error('相同导入请求 ID 不能用于不同内容'),{code:'IMPORT_REQUEST_CONFLICT'});
+            break;
+          }
+          this.assertRevision(data,true);
+          this.assertIdle();
+          const bytes=synthesizeLocalSfx(data.spec);
+          const asset=await this.store.importAsset(root,{name:sfxName+'.wav',mime:'audio/wav',dataBase64:Buffer.from(bytes).toString('base64')},this.settings);
+          const next=structuredClone(project);
+          next.assets.push(asset);
+          next.graph.positions[asset.id]=[60,80+(next.assets.length-1)*180];
+          next.extensions={...next.extensions,importRequests:{...(next.extensions.importRequests as Record<string,unknown>|undefined),[key]:{digest,assetId:asset.id}}};
+          try{this.withAudioClip(next,asset.id,placement);}
+          catch(error){
+            if(asset.path)await projectPath(root,asset.path).then(file=>rm(file,{force:true})).catch(()=>{});
+            throw error;
+          }
+          await this.persist(next,{},'合成并导入本地音效');
+          break;
         }
         case 'inspect':{const {root,project}=this.required();const spec=compileSpec(project);const shot=project.shots.find(s=>s.id===data.shotId);const source=shot&&data.includeSource?await this.store.readSource(root,shot):undefined;let frame;
           if(data.frame!==undefined)frame=await this.renderer.capture(root,project,this.settings,Number(data.frame),data.signal instanceof AbortSignal?data.signal:undefined);
@@ -400,7 +445,7 @@ export class StudioService {
         }
         case 'cancel':this.controller?.abort(new Error('用户已取消'));break;
         case 'environment':this.assertIdle();if(data.maxVideoBytes!==undefined){if(!Number.isSafeInteger(data.maxVideoBytes)||data.maxVideoBytes<1||data.maxVideoBytes>512*1024*1024)throw new Error('单个视频文件上限须为 1 字节至 512 MiB');this.settings.maxVideoBytes=data.maxVideoBytes;}for(const key of ['browserPath','ffmpegPath','ffprobePath'] as const)if(data[key]!==undefined){if(typeof data[key]!=='string')throw new Error('执行文件路径须为字符串');this.settings[key]=data[key];}await mkdir(this.baseDirectory,{recursive:true});await writeFile(join(this.baseDirectory,'environment.json'),JSON.stringify(this.settings,null,2));break;
-        case 'reveal':{const {root}=this.required(),path=resolve(String(data.path??root));if(path!==root&&!path.startsWith(root+'/'))throw new Error('请选择本项目文件');if(!this.ctx.reveal)throw new Error('当前运行器没有文件打开服务');await this.ctx.reveal(path);break;}
+        case 'reveal':{const {root}=this.required(),target=await projectOpenPath(root,data.path==null?root:String(data.path));if(!this.ctx.reveal)throw new Error('当前运行器没有文件打开服务');await this.ctx.reveal(target);break;}
         default:throw new Error('未找到应用操作');
       }
       return {ok:true,value:await this.snapshot()};

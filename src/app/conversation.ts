@@ -6,6 +6,7 @@ import { addShot, bindAsset, compileSpec, createProject, deleteShot, reorderShot
 import { normalizeStoryboard, parseModelJson, parseSceneSource } from '../host/generator.ts';
 import { projectPath } from '../host/store.ts';
 import type { AudioClip, SceneSource, Shot, StudioSnapshot, VideoProject } from '../shared/types.ts';
+import { VIDEO_STYLE_CONTEXT_GUIDANCE, videoStyleContext } from '../shared/video-style.ts';
 import type { BackendPort, ChatInput, ChatMessage, Conversation, ConversationTurn, ProviderConfig } from './contracts.ts';
 import { DEMO_MODEL, DEMO_PROVIDER, demoSceneSource, demoStoryboard, ProviderManager, type ModelContent, type ModelMessage } from './model.ts';
 import { packBriefContext } from './packs.ts';
@@ -180,11 +181,29 @@ export class ConversationService {
     const limit=config.contextMessageLimit??24,maxChars=config.contextCharLimit??90000;let remaining=Math.floor(maxChars*.55);const history:ModelMessage[]=[];
     for(const m of [...conversation.messages].reverse()){if(history.length>=limit)break;const content=m.content.slice(0,Math.min(remaining,20000));if(!content)break;remaining-=content.length;history.unshift({role:m.role,content});}
     const turns:ModelMessage[]=history;const receipts:Obj[]=[];const collected:unknown[]=[];
-    for(let round=0;round<4;round++){signal.throwIfAborted();const context={requestedIntent:requested,request:input.message,project:snapshot.project,selectedShotIds:snapshot.project?selectedShots(snapshot.project,input).map(s=>s.id):[],imageEvidence:{sentAssetIds:evidence.ids,pixelsSent:false,observations:evidence.observations},receipts};const contextText=JSON.stringify(context);if(contextText.length>Math.floor(maxChars*.75))throw new Error('工程上下文超过模型设置上限，请提高上下文限制或缩小工程内容');
-      turns.push({role:'user',content:'当前上下文：'+contextText});
-      const system=DIRECTOR+'\n'+packBriefContext(input.packId);const size=(m:ModelMessage)=>typeof m.content==='string'?m.content.length:m.content.reduce((total,part)=>total+(part.type==='text'?part.text.length:0),0);
-      let requestSize=system.length+turns.reduce((total,m)=>total+size(m),0);while(requestSize>maxChars&&turns.length>1)requestSize-=size(turns.shift()!);if(requestSize>maxChars)throw new Error('当前工程与导演提示超过上下文上限，请提高模型上下文限制');
-      const raw=await this.providers.complete(turns,system,signal,config.maxTokens,{provider:input.provider,model:input.model});turns.push({role:'assistant',content:raw});
+    for(let round=0;round<4;round++){
+      signal.throwIfAborted();
+      const project=snapshot.project?{...snapshot.project,videoStyle:undefined}:null;
+      const context={requestedIntent:requested,request:input.message,project,selectedShotIds:snapshot.project?selectedShots(snapshot.project,input).map(s=>s.id):[],imageEvidence:{sentAssetIds:evidence.ids,pixelsSent:false,observations:evidence.observations},receipts};
+      const prefix='当前上下文：',contextText=JSON.stringify(context),contextLimit=Math.floor(maxChars*.75);
+      if(contextText.length>contextLimit)throw new Error('工程上下文超过模型设置上限，请提高上下文限制或缩小工程内容');
+      const director=DIRECTOR+'\n'+packBriefContext(input.packId);
+      let system=director,content=prefix+contextText;
+      const videoStyle=videoStyleContext(snapshot.project?.videoStyle,Math.min(4000,Math.floor(maxChars/10)));
+      if(videoStyle){
+        const withStyle=JSON.stringify({...context,project:{...project,videoStyle}});
+        const guidedSystem=director+'\n'+VIDEO_STYLE_CONTEXT_GUIDANCE;
+        if(withStyle.length<=contextLimit&&guidedSystem.length+prefix.length+withStyle.length<=maxChars){
+          system=guidedSystem;content=prefix+withStyle;
+        }
+      }
+      const request:ModelMessage[]=[...turns,{role:'user',content}];
+      const size=(m:ModelMessage)=>typeof m.content==='string'?m.content.length:m.content.reduce((total,part)=>total+(part.type==='text'?part.text.length:0),0);
+      let requestSize=system.length+request.reduce((total,m)=>total+size(m),0);
+      while(requestSize>maxChars&&request.length>1)requestSize-=size(request.shift()!);
+      if(requestSize>maxChars)throw new Error('当前工程与导演提示超过上下文上限，请提高模型上下文限制');
+      const raw=await this.providers.complete(request,system,signal,config.maxTokens,{provider:input.provider,model:input.model});
+      turns.push({role:'user',content:prefix+contextText},{role:'assistant',content:raw});
       try{const plan=parseModelJson(raw),actions=array(plan.actions??[],'actions');const combined={...plan,actions:[...collected,...actions]};const prepared=compileDirectorPlan(combined,snapshot,input,requested);
         if(plan.done===true&&!prepared.inspect.length){
           try{if(prepared.mutated){signal.throwIfAborted();const candidate=prepared.candidate!;snapshot=prepared.create?await this.backend.call('create',{project:candidate,sources:prepared.sources}):await this.backend.call('apply',{projectId:snapshot.project!.id,expectedRevision:snapshot.project!.revision,project:candidate,sources:prepared.sources});}
@@ -196,7 +215,7 @@ export class ConversationService {
           }
         }
         collected.push(...actions.filter(raw=>{const action=object(raw);return action.tool!=='video_inspect'&&!(action.tool==='video_project'&&object(action.arguments??{}).action!=='create');}));
-        for(const inspect of prepared.inspect){const result=inspect.kind==='project'?{project:snapshot.project}:await this.backend.call('inspect',{projectId:snapshot.project?.id,shotId:inspect.shotId,includeSource:inspect.includeSource});const serialized=JSON.stringify(result);receipts.push({status:'read',result:serialized.length>45000?serialized.slice(0,45000)+' [TRUNCATED]':result});}
+        for(const inspect of prepared.inspect){const result=inspect.kind==='project'?{project}:await this.backend.call('inspect',{projectId:snapshot.project?.id,shotId:inspect.shotId,includeSource:inspect.includeSource});const serialized=JSON.stringify(result);receipts.push({status:'read',result:serialized.length>45000?serialized.slice(0,45000)+' [TRUNCATED]':result});}
         turns.push({role:'user',content:'工具规划与读取回执：'+JSON.stringify({status:'planned-not-committed',receipts})+'。读取已实际执行，修改仍未提交；请根据回执回答或完成计划，不要重复尚未提交的修改动作。'});
       }catch(error){if(round===3||(error as {commitFailure?:boolean}).commitFailure)throw error;receipts.push({status:'error',message:errorText(error),committed:false});turns.push({role:'user',content:'计划未提交，格式或工具校验错误：'+errorText(error)+'。返回修复后的完整计划；不要重复之前尚未提交的动作。'});collected.length=0;}
     }

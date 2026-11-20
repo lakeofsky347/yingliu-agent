@@ -2,6 +2,7 @@ import {defaultTtsSettings,ttsCapability} from '../shared/tts-capability.ts';
 import { useEffect, useState, type ReactNode } from 'react';
 import type { Asset, AudioClip, Shot, StudioSnapshot, TtsSettings, VideoProject } from '../shared/types.ts';
 import type { StudioController } from './controller.ts';
+import { LocalSfxPanel } from './LocalSfxPanel.tsx';
 function Field({label,children}:{label:string;children:ReactNode}){return <label className="vs-field"><span>{label}</span>{children}</label>;}
 function numeric(value:string):number{return Number(value)||0;}
 export function AudioPanel({project,snapshot,controller,assetUrl,selectedShot,busy}:{project:VideoProject;snapshot:StudioSnapshot;controller:StudioController;assetUrl:(asset:Asset)=>string;selectedShot?:Shot;busy:boolean}){
@@ -20,6 +21,7 @@ export function AudioPanel({project,snapshot,controller,assetUrl,selectedShot,bu
     {assets.length===0&&<p className="vs-audio-empty">先在资产库导入 WAV、MP3、M4A、AAC、FLAC 或 OGG；也可以填写镜头旁白并生成配音。</p>}
     <label className="vs-audio-duration-lock"><input type="checkbox" checked={project.extensions.lockDuration===true} onChange={e=>controller.edit({...project,extensions:{...project.extensions,lockDuration:e.target.checked},revision:project.revision+1,updatedAt:new Date().toISOString()})}/>锁定镜头时长<small>解除锁定时，较长旁白可自动延长对应镜头。</small></label>
     <div className="vs-audio-narration"><Field label={selectedShot?`「${selectedShot.title}」旁白`:'镜头旁白'}><textarea aria-label="镜头旁白" rows={2} value={selectedShot?.narration||''} disabled={!selectedShot||busy} placeholder="选中镜头后填写配音文案…" onChange={e=>{if(selectedShot)controller.edit({...project,shots:project.shots.map(s=>s.id===selectedShot.id?{...s,narration:e.target.value}:s),revision:project.revision+1,updatedAt:new Date().toISOString()});}}/></Field><button disabled={busy||!selectedShot?.narration?.trim()||!tts?.enabled||!capability.available} onClick={()=>selectedShot&&void controller.action('audio',{operation:'synthesize',shotId:selectedShot.id,text:selectedShot.narration,fitDuration:project.extensions.lockDuration!==true,replaceVoice:true})}>生成镜头配音</button>{!capability.available?<small>{capability.message}</small>:!tts?.enabled&&<small>在配音模型设置中启用配音服务。</small>}</div>
+    <LocalSfxPanel controller={controller} busy={busy}/>
     <div className="vs-audio-clips">{clips.map(c=>{const asset=assets.find(a=>a.id===c.assetId),shot=project.shots.find(s=>s.id===c.shotId);return <article className="vs-audio-clip" key={c.id}>
       <div className="vs-audio-clip-heading"><span className="vs-audio-role">{({voice:'配音',music:'音乐',sfx:'音效'})[c.role]}</span><strong>{asset?.name||'音频素材已移除'}</strong><span>{shot?shot.title:'全片'}</span><button aria-label={`删除声音片段 ${asset?.name||c.id}`} onClick={()=>edit(clips.filter(v=>v.id!==c.id))}>删除</button></div>
       {asset&&assetUrl(asset)&&<audio controls preload="metadata" src={assetUrl(asset)}/>}

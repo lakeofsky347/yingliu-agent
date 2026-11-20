@@ -80,7 +80,7 @@ export async function qualityCheck(ctx: ToolContext): Promise<QcReport> {
     catch (error) { if (ctx.signal.aborted) throw error; unchecked.push(`${f.shotId}：截帧失败（${error instanceof Error ? error.message : String(error)}）`); }
   }
   const status = qcStatus(issues, unchecked);
-  const report: QcReport = { status, pass: status === 'pass', checkedAt: new Date().toISOString(), issues, unchecked };
+  const report: QcReport = { status, pass: status === 'pass', checkedAt: new Date().toISOString(), revision: project.revision, issues, unchecked };
   await ctx.docs.saveQc(report); return report;
 }
 

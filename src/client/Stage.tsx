@@ -44,13 +44,13 @@ export function Stage({project,snapshot,state,controller,playhead,layout,stageMo
         </>}
         <Button icon="plus" size="sm" disabled={locked} onClick={onAddShot} title={selectedShot?"在选中镜头后添加":"添加镜头"}>镜头</Button>
         <span className="vs-separator"/>
-        <IconButton icon="refresh" label="刷新预览" title="检查资源并刷新预览" disabled={busy||!graphCheck?.ok} onClick={onRefreshPreview}/>
+        <IconButton icon="refresh" label="刷新预览" title="检查资源并刷新预览" disabled={busy||!!state.previewing||state.sourceDraft||!!state.panelDraft||!graphCheck?.ok} onClick={onRefreshPreview}/>
         <button type="button" aria-label="用文字修改" className={`vs-word-trigger ${wordOpen?'is-active':''}`} aria-expanded={wordOpen} onClick={()=>onWordOpen(!wordOpen)} title={"用文字修改"+' · ⌘K'}><Icon name="spark"/><span>用文字修改</span><kbd>⌘K</kbd></button>
       </div>
     </div>
     <div className="vs-stage-body">
       <div className="vs-stage-monitor" aria-hidden={stageMode==='canvas'||undefined}>
-        <Preview key={project.id} snapshot={snapshot} project={project} selectedShot={selectedShot} controller={controller} transport={playhead} focusFrame={state.focusFrame} focusSerial={state.focusSerial} busy={busy} visible={stageMode!=='canvas'} syncing={state.saving||state.dirty}/>
+        <Preview key={project.id} snapshot={snapshot} project={project} selectedShot={selectedShot} controller={controller} transport={playhead} focusFrame={state.focusFrame} focusSerial={state.focusSerial} busy={busy} visible={stageMode!=='canvas'} syncing={state.saving||state.dirty||!!state.previewing}/>
       </div>
       <div className="vs-stage-canvas" aria-hidden={stageMode==='monitor'||undefined}>
         <div className="vs-graph-shell"><canvas ref={canvasRef}/>

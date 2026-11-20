@@ -23,6 +23,10 @@ export interface GraphLayout {
   groups:{id:string;title:string;bounds:[number,number,number,number]}[];
 }
 export interface VideoTarget { width:number; height:number; fps:{num:number;den:number}; audioMode:'none'|'mixed'; quality?:'standard'|'high'|'small' }
+export interface VideoStyle {
+  id:string; name:string; description:string; prompt:string;
+  sourceFormat:'markdown'|'json'|'zip'|'folder'|'custom'; sourceName:string; createdAt:string; updatedAt:string;
+}
 export interface AudioClip {
   id:string;assetId:string;role:'voice'|'music'|'sfx';shotId?:string;
   startSeconds:number;trimStart:number;trimEnd?:number;volume:number;fadeIn:number;fadeOut:number;loop?:boolean;
@@ -42,7 +46,7 @@ export interface VideoProject {
   createdAt:string; updatedAt:string; revision:number; target:VideoTarget;
   assets:Asset[]; shots:Shot[]; shotOrder:string[]; graph:GraphLayout;
   outputs:ExportResult[]; extensions:Record<string,unknown>;
-  sessionIds?:string[];audioClips?:AudioClip[];videoClips?:VideoClip[];
+  sessionIds?:string[];audioClips?:AudioClip[];videoClips?:VideoClip[];videoStyle?:VideoStyle;
 }
 export interface SpecShot extends Shot { startFrame:number; endFrame:number; assets:Asset[]; videoClip?:VideoClip }
 export interface VideoSpec {
@@ -66,7 +70,7 @@ export interface StudioSnapshot {
   previewUrl:string|null; previewRevision:number|null; assetBaseUrl?:string|null; providers:ProviderGroup[];
   currentExportIds?:string[];
   environment:EnvironmentInfo; recent:{path:string;title:string;id:string}[];
-  sessionId?:string;focus?:{shotId?:string;frame?:number};audioUrl?:string|null;tts?:TtsSettings;ttsConfigured?:boolean;credentialStatus?:SecretStoreStatus;
+  sessionId?:string;focus?:{shotId?:string;frame?:number};audioUrl?:string|null;tts?:TtsSettings;ttsConfigured?:boolean;credentialStatus?:SecretStoreStatus;styles?:VideoStyle[];
 }
 export type RpcResult<T=unknown>={ok:true;value:T}|{ok:false;error:{code:string;message:string}};
 export interface ClientRpc { call(channel:string,endpoint:string,payload:unknown,signal?:AbortSignal):Promise<RpcResult> }
