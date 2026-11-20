@@ -71,8 +71,11 @@ export function Timeline({shots,connectedCount,fps,selectedId,locked,playhead,on
     return index>=shots.length?clip.offsetLeft+clip.offsetWidth+4:clip.offsetLeft-4;
   }
   function drop(event:DragEvent){
-    const id=event.dataTransfer.getData(SHOT_MIME);setDragging(null);const index=dropIndex;setDropIndex(null);
-    if(!id||index===null||!shots.some(shot=>shot.id===id))return;event.preventDefault();
+    const id=event.dataTransfer.getData(SHOT_MIME);setDragging(null);setDropIndex(null);
+    if(locked||!id||!shots.some(shot=>shot.id===id))return;
+    event.preventDefault();
+    // React may batch the last dragover with drop. Read the final pointer position.
+    const index=insertionIndex(event.clientX);
     const ids=shots.map(shot=>shot.id),from=ids.indexOf(id);ids.splice(from,1);ids.splice(index>from?index-1:index,0,id);
     if(ids.join()!==shots.map(shot=>shot.id).join())onReorder(ids);
   }

@@ -342,8 +342,8 @@
 
 /* Storyboard canvas -------------------------------------------------------- */
 .vs-graph-shell{position:relative;flex:1;min-height:240px;overflow:hidden;background:var(--vs-g-bg)}
-.vs-graph-shell canvas{display:block;width:100%;height:100%;outline:none}
-.vs-graph-shell canvas:focus-visible{box-shadow:inset 0 0 0 2px var(--vs-accent)}
+.vs-graph-shell>canvas{position:absolute;inset:0;display:block;width:100%;height:100%;outline:none}
+.vs-graph-shell>canvas:focus-visible{box-shadow:inset 0 0 0 2px var(--vs-accent)}
 .vs-graph-legend{position:absolute;left:12px;bottom:12px;display:flex;gap:12px;padding:6px 12px;border-radius:999px;background:var(--vs-glass);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid var(--vs-glass-border);box-shadow:var(--vs-shadow-dock);color:var(--vs-text-2);font-size:var(--vs-fs-xs);pointer-events:none}
 .vs-graph-legend span{display:flex;align-items:center;gap:6px}
 .vs-graph-legend i{width:10px;height:3px;border-radius:2px}

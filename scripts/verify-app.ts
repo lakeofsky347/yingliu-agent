@@ -102,7 +102,14 @@ try{
   const scene=page.frames().find(frame=>frame.url().startsWith(new URL(snapshot.previewUrl!).origin));assert.ok(scene);assert.deepEqual(await scene.evaluate(()=>({node:typeof require,bridge:typeof (window as any).yingliu})),{node:'undefined',bridge:'undefined'});
   const processes=await native!.evaluate(({BrowserWindow})=>{const contents=BrowserWindow.getAllWindows()[0]!.webContents;return {editor:contents.mainFrame.osProcessId,scenes:contents.mainFrame.frames.filter(frame=>frame.url.startsWith('http://localhost:')).map(frame=>frame.osProcessId)};});assert.ok(processes.scenes.length);assert.ok(processes.scenes.every(pid=>pid!==processes.editor));record('scene runs in separate OS renderer process without desktop bridge',processes);
   assert.equal((await fetch(new URL('project.json',snapshot.previewUrl!))).status,403);assert.equal((await fetch(new URL('/api/current',page.url()),{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,403);record('scene private files and tokenless editor HTTP are denied');
-  await page.getByRole('radio',{name:'监视器',exact:true}).click();await page.locator('iframe[title="影片画面预览"]').scrollIntoViewIfNeeded();await page.waitForTimeout(300);await capture('04-workspace.png');await capture('04-preview-viewport.png');
+  checkpoint('preview viewport: confirm monitor view');
+  const monitorView=page.getByRole('radio',{name:'监视器',exact:true});
+  if(await monitorView.getAttribute('aria-checked')!=='true')await monitorView.click();
+  checkpoint('preview viewport: scroll visible frame');
+  const monitorFrame=page.locator('.vs-stage-monitor iframe[title="影片画面预览"]');
+  await monitorFrame.waitFor({state:'visible',timeout:15000});
+  await monitorFrame.scrollIntoViewIfNeeded({timeout:15000});
+  await capture('04-workspace.png');await capture('04-preview-viewport.png');
   // Actual six-second encode with explicitly synthetic audio, using real browser/FFmpeg.
   project=snapshot.project!;project.target={width:640,height:360,fps:{num:24,den:1},audioMode:'mixed',quality:'small'};project.targetDuration=6;project.shots=project.shots.map(shot=>({...shot,durationFrames:48,params:{...shot.params,fontSize:96}}));snapshot=await call('save',{projectId:id,project,expectedRevision:project.revision});
   const wav=join(data,'synthetic-tone.wav');const tone=spawnSync(snapshot.environment.ffmpegPath,['-v','error','-f','lavfi','-i','sine=frequency=440:duration=1.5','-y',wav]);assert.equal(tone.status,0);
