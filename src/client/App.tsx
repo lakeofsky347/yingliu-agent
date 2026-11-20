@@ -28,7 +28,22 @@ export function App({controller,api}:{controller:StudioController;api:StudioApi}
   const [manage,setManage]=useState<{project:ProjectSummary;action:ManageAction}|null>(null),[manageTitle,setManageTitle]=useState('');
   const messagesEnd=useRef<HTMLDivElement>(null),inputRef=useRef<HTMLTextAreaElement>(null),archiveInput=useRef<HTMLInputElement>(null),sendingRef=useRef(false),historySerial=useRef(0),sendRef=useRef<(message:string,intent:ChatInput['intent'],retryTurnId?:string,shotId?:string|null,role?:ChatInput['role'])=>Promise<void>>(async()=>{});
   const configured=!!(settings?.ready??settings?.hasKey),sceneConfigured=settings?.sceneReady??configured,visionReady=settings?.visionReady===true,blocked=sending||projectBusy||state.pending||state.snapshot?.task?.status==='running';
-  async function refreshLibrary(){setProjectsLoading(true);try{const value=await api.call<{projects:ProjectSummary[]}>('list',{includeArchived:true});setProjects(value.projects);setLibraryReady(true);}catch(cause){setError(errorMessage(cause));}finally{setProjectsLoading(false);}}
+  const libraryRead=useRef(0),lastLibraryRead=useRef(0);
+  async function refreshLibrary(showLoading=true){
+    const read=++libraryRead.current;lastLibraryRead.current=Date.now();
+    if(showLoading)setProjectsLoading(true);
+    try{
+      const value=await api.call<{projects:ProjectSummary[]}>('list',{includeArchived:true});
+      if(read===libraryRead.current){setProjects(value.projects);setLibraryReady(true);}
+    }catch(cause){if(read===libraryRead.current)setError(errorMessage(cause));}
+    finally{if(read===libraryRead.current)setProjectsLoading(false);}
+  }
+  useEffect(()=>{
+    if(view!=='home'||projectsLoading||blocked)return;
+    const refresh=()=>{if(Date.now()-lastLibraryRead.current>=5000)void refreshLibrary(false);};
+    window.addEventListener('focus',refresh);
+    return()=>window.removeEventListener('focus',refresh);
+  },[api,view,projectsLoading,blocked]);
   async function refreshHealth(){try{setHealth(await api.call<AppHealth>('app.health'));}catch(cause){setError(errorMessage(cause));}}
   useEffect(()=>{let active=true;void refreshLibrary();void refreshHealth();api.call<PackCatalog>('packs.list').then(value=>{if(active)setPacks(value);}).catch(()=>{});api.call<ProviderSettings>('providers.get').then(value=>{if(active){setSettings(value);controller.setRoute(value.sceneRoute??value.route??{provider:value.config.id||'custom',model:value.config.model});}}).catch(cause=>{if(active)setError(errorMessage(cause));});return()=>{active=false;};},[api]);
   useEffect(()=>{
@@ -113,7 +128,7 @@ export function App({controller,api}:{controller:StudioController;api:StudioApi}
           </details>}
           {!visionReady&&images.length>0&&<button className="yl-image-setup" type="button" disabled={blocked} onClick={()=>openSettingsAt('multimodal')}>配置多模态模型以使用参考图</button>}
           <div className="yl-composer-bottom"><small>Ctrl / ⌘ Enter 发送</small><button className="yl-button yl-primary" type="submit" disabled={!draft.trim()||blocked}><span>{sending?'处理中':configured?'发送':'配置模型'}</span><AppIcon name="send"/></button></div></form><div className="yl-chat-foot">对话、节点与源码修改，共用同一份本地工程。</div></aside>:<button className="yl-chat-rail" onClick={()=>setCollapsed(false)} aria-label="展开创作对话"><AppIcon name="chat"/><span>创作对话</span><span>↗</span></button>}
-      <div className="yl-editor-shell"><div className="yl-editor-heading"><div><span className="yl-eyebrow">STORYBOARD WORKSPACE</span><span>每一个镜头，都可以亲手打磨。</span></div><span>{project?`${project.shots.length} 个镜头 · v${project.revision}`:''}</span></div><fieldset className={`yl-editor ${sending?'is-conversing':''}`} disabled={sending} aria-busy={sending}><Studio controller={controller} onNew={()=>setWizard(true)} onOpen={()=>void chooseProject()} onConfigure={()=>setSettingsOpen(true)} modelConfigured={configured} visionReady={visionReady} onConfigureVision={()=>openSettingsAt('multimodal')} sceneModelName={settings?.sceneRoute?.model} sceneConfigured={sceneConfigured}/></fieldset>{collapsed&&error&&<div className="yl-error" role="alert">{error}</div>}{project&&<div className="yl-project-footer">{(['rename','duplicate','backup','archive'] as ManageAction[]).map(action=><button disabled={blocked} key={action} onClick={()=>manageProject({id:project.id,title:project.title,path:state.snapshot?.root||''},action)}>{({rename:'重命名',duplicate:'复制工程',backup:'备份工程包',archive:'归档工程'})[action as 'rename'|'duplicate'|'backup'|'archive']}</button>)}</div>}</div>
+      <div className="yl-editor-shell"><div className="yl-editor-heading"><div><span className="yl-eyebrow">STORYBOARD WORKSPACE</span><span>每一个镜头，都可以亲手打磨。</span></div><span>{project?`${project.shots.length} 个镜头 · v${project.revision}`:''}</span></div><div className="yl-editor" aria-busy={sending}><Studio controller={controller} onHome={()=>void home()} conversationBusy={sending} onNew={()=>setWizard(true)} onOpen={()=>void chooseProject()} onConfigure={()=>setSettingsOpen(true)} modelConfigured={configured} visionReady={visionReady} onConfigureVision={()=>openSettingsAt('multimodal')} sceneModelName={settings?.sceneRoute?.model} sceneConfigured={sceneConfigured}/></div>{collapsed&&error&&<div className="yl-error" role="alert">{error}</div>}{project&&<div className="yl-project-footer">{(['rename','duplicate','backup','archive'] as ManageAction[]).map(action=><button disabled={blocked} key={action} onClick={()=>manageProject({id:project.id,title:project.title,path:state.snapshot?.root||''},action)}>{({rename:'重命名',duplicate:'复制工程',backup:'备份工程包',archive:'归档工程'})[action as 'rename'|'duplicate'|'backup'|'archive']}</button>)}</div>}</div>
     </div>}
     <input ref={archiveInput} hidden type="file" accept=".yingliu,application/octet-stream" onChange={event=>{const file=event.target.files?.[0];if(file)void importPackage(file);event.target.value='';}}/>
     {onboardingOpen&&!settingsOpen&&<OnboardingDialog textReady={configured} inStudio={view==='studio'} busy={blocked} onConfigure={openSettingsAt} onContinue={()=>{dismissOnboarding();if(view==='home')setWizard(true);}} onDismiss={dismissOnboarding}/>}

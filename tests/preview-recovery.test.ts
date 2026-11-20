@@ -20,7 +20,7 @@ before(async()=>{
     function Fixture(){
       const [version,setVersion]=useState(1),[fast,setFast]=useState(false);
       useLayoutEffect(()=>{window.fixture={deliver,change:(next,immediate=false)=>flushSync(()=>{setFast(immediate);setVersion(next);})};if(fast)deliver('video-studio/frame');},[version,fast]);
-      return <Preview project={project} controller={controller} snapshot={{previewUrl:location.origin+'/scene?revision='+version,previewRevision:project.revision}}/>;
+      return <Preview project={project} controller={controller} busy snapshot={{previewUrl:location.origin+'/scene?revision='+version,previewRevision:project.revision}}/>;
     }
     createRoot(document.getElementById('root')).render(<Fixture/>);
   `,resolveDir:process.cwd(),sourcefile:'preview-recovery-fixture.tsx',loader:'tsx'},bundle:true,platform:'browser',format:'esm',write:false,logLevel:'silent'});

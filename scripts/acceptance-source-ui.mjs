@@ -1,6 +1,6 @@
 /** Standalone browser evaluator. Never read source values, titles, IDs or paths. */
 export function captureSourceUiState(){
-  const all=selector=>Array.from(document.querySelectorAll(selector)),chips=all('.vs-shotchip'),tabs=all('.vs-tabs [role="tab"]');
+  const all=selector=>Array.from(document.querySelectorAll(selector)),chips=all('.vs-clip'),tabs=all('.vs-tabs [role="tab"]');
   const sourceTabs=tabs.filter(element=>element.textContent?.trim()==='前端源码'),editors=all('textarea[aria-label="HTML 源码"]');
   const saveButtons=all('.vs-source-toolbar button').filter(element=>element.textContent?.trim()==='保存源码');
   function control(elements){
@@ -14,8 +14,8 @@ export function captureSourceUiState(){
       bounds:{x:Math.round(rectangle.x),y:Math.round(rectangle.y),width:Math.round(rectangle.width),height:Math.round(rectangle.height)}};
   }
   const active=tabs.find(element=>element.getAttribute('aria-selected')==='true'),activeText=active?.textContent?.trim();
-  return {captureStatus:'CAPTURED',selectedTab:activeText==='前端源码'?'source':activeText==='影片预览'?'preview':activeText==='运行环境'?'environment':active?'other':'none',
-    sourcePanel:document.querySelector('.vs-dock-content .vs-source')?'editor':document.querySelector('.vs-dock-content .vs-loading')?'loading':document.querySelector('.vs-dock-content .vs-dock-empty')?'empty':'other',
+  return {captureStatus:'CAPTURED',selectedTab:activeText==='前端源码'?'source':activeText==='运行环境'?'environment':active?'other':'none',
+    sourcePanel:document.querySelector('.vs-drawer-body .vs-source')?'editor':document.querySelector('.vs-drawer-body .vs-loading')?'loading':document.querySelector('.vs-drawer-body .vs-dock-empty')?'empty':'other',
     shotCount:chips.length,selectedShotIndex:chips.findIndex(element=>element.classList.contains('is-active')),firstShotSelected:chips.length>0&&chips[0].classList.contains('is-active'),
     sourceDirty:document.querySelector('.vs-source-dirty')?.textContent?.trim()==='尚未保存',studioDisabled:!!document.querySelector('.vs-studio fieldset:disabled'),
     tabCount:all('[role="tab"]').length,buttonCount:all('button,[role="button"]').length,textboxCount:all('textarea,input[type="text"],input[type="url"],input[type="password"],[role="textbox"]').length,

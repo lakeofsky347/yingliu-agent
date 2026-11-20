@@ -1,6 +1,7 @@
 import type { ModelRoute, SceneSource, StudioApi, StudioSnapshot, VideoProject } from '../shared/types.ts';
 
 export interface ProjectHistory {canUndo:boolean;canRedo:boolean;entries:{id:string;label:string;createdAt:string;revision:number}[];cursor:number}
+export interface EditUndo {available:()=>boolean;run:()=>Promise<boolean>}
 export interface StudioState {
   snapshot:StudioSnapshot|null;loading:boolean;pending:boolean;saving:boolean;dirty:boolean;sourceDraft:boolean;panelDraft:string;conflict:boolean;
   error:string;notice:string;scheme:'light'|'dark';selected:string|null;route:ModelRoute;
@@ -38,7 +39,7 @@ export class StudioController {
   private listeners=new Set<()=>void>();private disposed=false;
   private saveTimer:ReturnType<typeof setTimeout>|undefined;private pollTimer:ReturnType<typeof setTimeout>|undefined;
   private sourceDraftDirty=false;private panelDrafts=new Map<string,string>();private loadSerial=0;
-  private editSerial=0;private dirty=false;private savingPromise:Promise<void>|null=null;private saveFailed=false;
+  private editSerial=0;private savedEditSerial=0;private dirty=false;private savingPromise:Promise<void>|null=null;private saveFailed=false;
   private polling=false;private actionEpoch=0;private serverRevision:number|null=null;private serverProjectId:string|null=null;
   private creativeHandler:((kind:'storyboard'|'scenes'|'modify',instruction:string,shotId?:string)=>Promise<void>)|null=null;
   constructor(readonly api:StudioApi){}
@@ -101,13 +102,31 @@ export class StudioController {
   }
   setRoute=(route:ModelRoute):void=>this.update({route});clearError=():void=>{if(!this.state.conflict)this.update({error:''});};notify=(notice:string):void=>this.update({notice});
   setCreativeHandler(handler:typeof this.creativeHandler):void{this.creativeHandler=handler;}
-  edit=(project:VideoProject,_record=true):void=>{
-    if(!this.state.snapshot||this.state.pending||this.state.conflict)return;
-    const task=this.state.snapshot.task;if(task?.status==='running'&&['storyboard','scenes','modify','audio'].includes(task.kind))return;
+  edit=(project:VideoProject,_record=true):boolean=>{
+    if(this.disposed||this.state.snapshot?.project?.id!==project.id||this.busy||this.state.conflict)return false;
     this.editSerial++;this.dirty=true;
     this.update({snapshot:{...this.state.snapshot,project},saving:true,dirty:true,notice:'',error:''});
     clearTimeout(this.saveTimer);this.saveTimer=setTimeout(()=>{this.saveTimer=undefined;void this.flush();},450);
+    return true;
   };
+  /** Undo the deletion only while its isolated save is still the latest edit. */
+  editWithUndo(project:VideoProject):{undo?:EditUndo}|null{
+    const revision=this.serverRevision,epoch=this.actionEpoch,serial=this.editSerial+1;
+    const isolated=!this.hasUnsavedChanges&&!this.busy&&revision!==null&&this.serverProjectId===project.id;
+    if(!this.edit(project))return null;
+    if(!isolated||revision===null)return {};
+    const nextRevision=revision+1;
+    const available=()=>!this.disposed&&!this.busy&&!this.state.conflict&&!this.saveFailed&&!this.hasSourceDraft&&!this.hasPanelDraft
+      &&this.state.snapshot?.project?.id===project.id&&this.editSerial===serial&&this.actionEpoch===epoch
+      &&(this.dirty?this.serverRevision===revision:this.savedEditSerial===serial&&this.serverRevision===nextRevision);
+    return {undo:{available,run:async()=>{
+      if(!available())return false;
+      await this.flush();
+      if(!available()||this.dirty||this.serverRevision!==nextRevision)return false;
+      await this.action('undo',{projectId:project.id,expectedRevision:nextRevision},'已撤销，修改历史保存在工程中。');
+      return !this.state.error;
+    }}};
+  }
   undo=():void=>{void this.action('undo',{},'已撤销上一步，历史保存在工程中。');};
   redo=():void=>{void this.action('redo',{},'已重做，历史保存在工程中。');};
   async flush():Promise<void>{
@@ -118,6 +137,7 @@ export class StudioController {
     const operation=(async()=>{try{
       const expectedRevision=this.serverProjectId===project.id?this.serverRevision:undefined;
       const snapshot=await this.api.call<StudioSnapshot>('save',{project,expectedRevision});
+      this.savedEditSerial=serial;
       if(serial===this.editSerial){this.dirty=false;this.accept(snapshot,false,true);this.update({saving:false,dirty:false,error:'',conflict:false});}
       else{this.accept(snapshot,true,true);this.update({error:''});}
       await this.refreshHistory();
@@ -129,10 +149,15 @@ export class StudioController {
     if(this.state.pending)return;this.actionEpoch++;this.update({pending:true,error:this.state.conflict?this.state.error:'',notice:''});
     try{
       await this.flush();if(this.panelDrafts.size&&!['reveal','cancel'].includes(endpoint))throw new Error(this.unsavedMessage);if(this.sourceDraftDirty&&!['saveSource','restoreSource','reveal','environment','cancel'].includes(endpoint))throw new Error('前端源码尚未保存，请先在源码面板保存修改。');if(this.dirty)throw new Error(this.state.error||'项目尚未保存，请重试保存。');
-      const guard=['saveSource','restoreSource','apply','rename','undo','redo','retry','audio','import'].includes(endpoint)?{expectedRevision:this.serverRevision}:{};
+      const guard=['saveSource','restoreSource','apply','rename','undo','redo','retry','audio','import','preview'].includes(endpoint)?{expectedRevision:this.serverRevision}:{};
       const request=['create','open','focus'].includes(endpoint)?payload:{projectId:this.state.snapshot?.project?.id,...guard,...payload as object};
       const snapshot=await this.api.call<StudioSnapshot>(endpoint,request);this.accept(snapshot,false);await this.refreshHistory();this.update({notice,conflict:false,error:''});
     }catch(error){this.update({error:message(error)});}finally{this.update({pending:false});}
+  }
+  async preparePreview(projectId:string):Promise<boolean>{
+    if(this.busy||this.hasUnsavedChanges||this.state.snapshot?.project?.id!==projectId)return false;
+    await this.action('preview',{projectId,prepareOnly:true});
+    return !this.state.error&&this.state.snapshot?.project?.id===projectId&&Boolean(this.state.snapshot.previewUrl);
   }
   /** Background workflow refreshes never follow another project's global selection. */
   async refreshMediaProject():Promise<boolean>{

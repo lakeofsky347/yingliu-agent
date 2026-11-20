@@ -51,6 +51,27 @@ test('save and source endpoints reject stale versions at their serialized commit
   }finally{await f.close();}
 });
 
+test('manual preview preparation checks the saved revision without starting a validation task',async()=>{
+  const f=await fixture();try{
+    const created=await f.backend.call<StudioSnapshot>('create',{title:'仅准备预览'});
+    const projectId=created.project!.id,revision=created.project!.revision;
+    for(const endpoint of ['preview','thumbnails']){
+      const missing=await f.backend.route(endpoint,{projectId,prepareOnly:true,frames:[0]});
+      assert.ok(!missing.ok);assert.equal(missing.error.code,'REVISION_REQUIRED');
+      const stale=await f.backend.route(endpoint,{projectId,prepareOnly:true,frames:[0],expectedRevision:revision+1});
+      assert.ok(!stale.ok);assert.equal(stale.error.code,'REVISION_CONFLICT');
+    }
+    const prepared=await f.backend.call<StudioSnapshot>('preview',{projectId,expectedRevision:revision,prepareOnly:true});
+    assert.equal(prepared.task,null);
+    assert.equal(prepared.previewRevision,revision);
+    assert.equal(prepared.project!.revision,revision);
+    for(const frames of [[-1],[0,1,2,3],[0.25],[]]){
+      const result=await f.backend.route('thumbnails',{projectId,expectedRevision:revision,frames});
+      assert.ok(!result.ok);assert.match(result.error.message,/1 至 3 个有效帧/);
+    }
+  }finally{await f.close();}
+});
+
 test('asset imports require a revision and reject concurrent stale writes before importing',async()=>{
   const f=await fixture();try{
     const first=await f.backend.call<StudioSnapshot>('create',{title:'素材导入版本保护'}),id=first.project!.id;
