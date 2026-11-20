@@ -5,7 +5,8 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-import {createProject,compileSpec,validateProject,migrateProject,deleteShot,deleteAsset,duplicateShot} from '../src/core/index.ts';
+import {chromium,type BrowserContextOptions,type LaunchOptions,type PageScreenshotOptions} from 'playwright-core';
+import {createProject,compileSpec,validateProject,migrateProject,deleteShot,deleteAsset,duplicateShot,reorderFromGraph} from '../src/core/index.ts';
 import {ProjectStore} from '../src/host/store.ts';
 import {VideoRenderer,detectEnvironment} from '../src/host/renderer.ts';
 import {probeVideo,MAX_VIDEO_BYTES} from '../src/media/video.ts';
@@ -21,6 +22,63 @@ test('video clips validate source ranges, one layer per shot and v1 migration pr
   const duplicated=duplicateShot(migrated,migrated.shots[0]!.id);assert.equal(duplicated.videoClips?.length,2);assert.notEqual(duplicated.videoClips![0]!.shotId,duplicated.videoClips![1]!.shotId);assert.equal(validateProject(duplicated).ok,true);
   migrated.videoClips[0]!.trimEnd=3;assert.equal(validateProject(migrated).ok,false);migrated.videoClips[0]!.trimEnd=1.5;
   migrated.videoClips.push({...migrated.videoClips[0]!,id:'other'});assert.equal(validateProject(migrated).ok,false);
+});
+
+test('duplicating a disconnected shot retains its source and leaves the storyboard edges intact',()=>{
+  const project=createProject('分镜草稿');
+  const [first,second,third]=project.shots;
+  const edges=[{from:first!.id,to:second!.id},{from:second!.id,to:'film-output'}];
+  const draft=reorderFromGraph(project,edges);
+  const duplicated=duplicateShot(draft,third!.id);
+  const shot=duplicated.shots.at(-1)!;
+  assert.notEqual(shot.id,third!.id);
+  assert.equal((duplicated.extensions.sourceCopies as Record<string,string>)[shot.id],third!.sourcePath);
+  assert.deepEqual(duplicated.shotOrder,draft.shotOrder);
+  assert.deepEqual(duplicated.extensions.graphEdges,edges);
+});
+
+test('static thumbnails use one browser per uncached batch and preserve the current render scale',{skip:!env.browserAvailable,timeout:60_000},async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'yingliu-thumbnails-')),store=new ProjectStore({baseDirectory:directory}),renderer=new VideoRenderer(store);
+  const launch=chromium.launch.bind(chromium);
+  let screenshotAttempts=0;
+  const mock=t.mock.method(chromium,'launch',async(options:LaunchOptions)=>{
+    const browser=await launch(options),newContext=browser.newContext.bind(browser);
+    t.mock.method(browser,'newContext',async(options:BrowserContextOptions)=>{
+      const context=await newContext(options),newPage=context.newPage.bind(context);
+      t.mock.method(context,'newPage',async()=>{
+        const page=await newPage(),screenshot=page.screenshot.bind(page);
+        t.mock.method(page,'screenshot',async(options:PageScreenshotOptions)=>{
+          if(++screenshotAttempts===1)throw new Error('Protocol error (Page.captureScreenshot): Unable to capture screenshot');
+          return screenshot(options);
+        });
+        return page;
+      });
+      return context;
+    });
+    return browser;
+  });
+  try{
+    const created=await store.create(createProject('分镜缩略图'));
+    const [first,second]=compileSpec(created.project).shots;
+    const frames=[first!.startFrame,second!.startFrame];
+    const results=await renderer.thumbnails(created.root,created.project,env,frames);
+    assert.deepEqual(results.map(result=>[result.frame,result.shotId]),[[frames[0],first!.id],[frames[1],second!.id]]);
+    for(const result of results){
+      const response=await fetch(result.url);
+      assert.equal(response.headers.get('content-type'),'image/png');
+      const bytes=Buffer.from(await response.arrayBuffer());
+      assert.deepEqual(bytes,await readFile(result.path));
+      assert.equal(bytes.readUInt32BE(16),320);
+      assert.equal(bytes.readUInt32BE(20),180);
+    }
+    assert.deepEqual(await renderer.thumbnails(created.root,created.project,{...env,browserPath:'/nonexistent'},[frames[1]]),[results[1]]);
+    assert.equal(mock.mock.callCount(),1);
+    const png=await renderer.capture(created.root,created.project,env,frames[0]!);
+    assert.equal(screenshotAttempts,2);
+    const original=await readFile(png.path);
+    assert.equal(original.readUInt32BE(16),created.project.target.width);
+    assert.equal(original.readUInt32BE(20),created.project.target.height);
+  }finally{await renderer.close();await rm(directory,{recursive:true,force:true});}
 });
 
 test('real video imports, random seeks, code overlays, mixed-shot export and migrated history',{skip:!(env.browserAvailable&&env.ffmpegAvailable&&env.ffprobeAvailable),timeout:120_000},async()=>{

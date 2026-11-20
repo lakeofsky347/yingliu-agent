@@ -54,7 +54,7 @@ try{
   await page.getByLabel('角色名',{exact:true}).fill('A 未保存草稿');await page.getByLabel('项目费用上限',{exact:true}).fill('9');
   const reads=storyReads;await until(async()=>storyReads>reads,10000);
   assert.equal(await page.getByLabel('角色名',{exact:true}).inputValue(),'A 未保存草稿');assert.equal(await page.getByLabel('项目费用上限',{exact:true}).inputValue(),'9');pass('真实轮询后角色与预算输入保留');
-  await page.getByRole('tab',{name:'影片预览',exact:true}).click();assert.equal(await page.getByRole('tab',{name:'智能体',exact:true}).getAttribute('aria-selected'),'true');
+  await page.getByRole('tab',{name:'声音与配音',exact:true}).click();assert.equal(await page.getByRole('tab',{name:'智能体',exact:true}).getAttribute('aria-selected'),'true');
   await page.getByRole('button',{name:'项目首页',exact:true}).click();assert.equal(await page.locator('.vs-studio').count(),1);
   await page.getByLabel('切换影片工程',{exact:true}).selectOption(b.id);assert.equal(await page.getByLabel('角色名',{exact:true}).inputValue(),'A 未保存草稿');
   const closePrevented=await page.evaluate(()=>{const event=new Event('beforeunload',{cancelable:true});window.dispatchEvent(event);return event.defaultPrevented;});assert.equal(closePrevented,true);pass('角色和预算草稿阻止切面板、首页、跨工程与浏览器关闭');

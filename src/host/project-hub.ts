@@ -176,7 +176,7 @@ export class ProjectHub {
         await this.saveIndex();return {ok:true,value:await this.decorate(service,sessionId)};
       }
       const result=await service.rpc(endpoint,data);if(!result.ok)return result;
-      if(['source','inspect','history','tasks','jobs'].includes(endpoint))return result;
+      if(['source','inspect','thumbnails','history','tasks','jobs'].includes(endpoint))return result;
       if(endpoint==='catalog')this.providers=(result.value as StudioSnapshot).providers;
       if(endpoint==='tts'){const snapshot=result.value as StudioSnapshot;this.tts=snapshot.tts;}
       await this.remember(await service.snapshot());return {ok:true,value:await this.decorate(service,sessionId)};

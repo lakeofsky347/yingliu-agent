@@ -32,7 +32,7 @@ function hash(buffer:Buffer|string):string { return createHash('sha256').update(
 function json(value:unknown):string { return JSON.stringify(value,null,2)+'\n'; }
 /** Runtime-only: retry the observed Windows EPERM/rename without weakening publication.
  * Await each complete durable write; never race an abandoned write against a timeout. */
-export async function writeRuntimeFile(file:string,content:string,platform:NodeJS.Platform=process.platform):Promise<void>{
+export async function writeRuntimeFile(file:string,content:string|Uint8Array,platform:NodeJS.Platform=process.platform):Promise<void>{
   const deadline=performance.now()+750;let firstError:unknown;
   for(let attempt=1;;attempt++){
     try{await writeDurableFile(file,content);return;}
@@ -90,7 +90,8 @@ async function projectServer(root:string):Promise<ProjectServer> {
       const relative=pathname.replace(/^\//,'')||'index.html';
       // Scene code may read render resources, never editor state, journals or source history.
       const allowed=relative==='index.html'||/^runtime\/(?:frame(?:-[a-f0-9]{64})?\.mjs|spec(?:-[a-f0-9]{64})?\.json|scenes\/[\w-]+\.mjs|audio\/mix-[\w-]+\.wav)$/.test(relative)||
-        /^assets\/[\w./-]+$/.test(relative)||/^\.studio\/inspection\/[\w-]+\.png$/.test(relative)||/^exports\/[\w-]+\/video\.mp4$/.test(relative);
+        /^assets\/[\w./-]+$/.test(relative)||/^\.studio\/inspection\/[\w-]+\.png$/.test(relative)||
+        /^\.studio\/thumbnails\/[a-f0-9]{64}\/\d+\.png$/.test(relative)||/^exports\/[\w-]+\/video\.mp4$/.test(relative);
       if(!allowed){res.writeHead(403);res.end('Resource is private');return;}
       let resource=relative;
       if(relative==='index.html'){
@@ -246,7 +247,10 @@ export class VideoRenderer {
       return {browser,page,removeAbort:()=>signal?.removeEventListener('abort',cancel)};
     }catch(error){signal?.removeEventListener('abort',cancel);await browser.close().catch(()=>{});this.browsers.delete(browser);throw error;}
   }
-  private async frame(page:Page,spec:VideoSpec,frame:number):Promise<{buffer:Buffer;shotId:string}> {
+  private async frame(
+    page:Page,spec:VideoSpec,frame:number,
+    screenshot=()=>page.screenshot({type:'png',clip:{x:0,y:0,width:spec.target.width,height:spec.target.height},timeout:30_000}),
+  ):Promise<{buffer:Buffer;shotId:string}> {
     const result=await deadline(page.evaluate(async input=>{
       try{
         const info=await (window as any).__VIDEO_WORKPACK__.renderFrame(input);
@@ -255,7 +259,58 @@ export class VideoRenderer {
       }catch(error){const e=error as any;return {ok:false,message:e.message,shotId:e.shotId,frame:e.frame};}
     },{frame,fps:spec.target.fps}),'Frame '+frame);
     if(!result.ok){const error=new Error(result.message) as Error&RenderIssue;error.shotId=result.shotId;error.frame=result.frame;throw error;}
-    return {buffer:await page.screenshot({type:'png',clip:{x:0,y:0,width:spec.target.width,height:spec.target.height},timeout:30_000}),shotId:result.info.sceneId};
+    for(let attempt=1;;attempt++){
+      try{return {buffer:await screenshot(),shotId:result.info.sceneId};}
+      catch(error){
+        if(attempt===3||!(error instanceof Error)||!error.message.includes('Unable to capture screenshot'))
+          throw withTaskFailure(error,'render_frame');
+        await deadline(page.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve())))),'Compositor frame '+frame)
+          .catch(error=>{throw withTaskFailure(error,'render_frame');});
+      }
+    }
+  }
+  /** Reuse one isolated page for uncached thumbnails of the saved project revision. */
+  async thumbnails(root:string,project:VideoProject,settings:EnvironmentSettings,requested:unknown):Promise<(FrameCapture&{url:string})[]>{
+    const spec=compileSpec(project);
+    if(!Array.isArray(requested)||requested.length<1||requested.length>3||[...requested].some(frame=>!Number.isSafeInteger(frame)||frame<0||frame>=spec.durationFrames))
+      throw new Error('缩略图请求须包含 1 至 3 个有效帧');
+    const frames=[...new Set<number>(requested)],server=await this.server(root);
+    const key=hash(JSON.stringify({runtime:browserRuntime,revision:project.revision,spec}));
+    const errors:RenderIssue[]=[];
+    let connection:Awaited<ReturnType<VideoRenderer['openPage']>>|undefined;
+    try{
+      const captures:(FrameCapture&{url:string})[]=[];
+      let screenshot:(()=>Promise<Buffer>)|undefined;
+      for(const frame of frames){
+        const relative='.studio/thumbnails/'+key+'/'+frame+'.png',file=await projectPath(root,relative);
+        const shot=spec.shots.find(shot=>frame>=shot.startFrame&&frame<shot.endFrame)!;
+        let bytes:Buffer|undefined=await fs.readFile(file).catch(error=>{
+          if((error as NodeJS.ErrnoException).code==='ENOENT')return undefined;
+          throw error;
+        });
+        if(!bytes){
+          if(!connection){
+            const {url}=await this.prepare(root,project);
+            connection=await this.openPage(url,spec,settings,errors);
+            const session=await connection.page.context().newCDPSession(connection.page);
+            const {width,height}=spec.target,scale=Math.min(1,320/width,180/height);
+            screenshot=async()=>{
+              const capture=await deadline(session.send('Page.captureScreenshot',{
+                format:'png',optimizeForSpeed:true,clip:{x:0,y:0,width,height,scale},captureBeyondViewport:false,
+              }),'Thumbnail screenshot');
+              return Buffer.from(capture.data,'base64');
+            };
+          }
+          bytes=(await this.frame(connection.page,spec,frame,screenshot)).buffer;
+          if(errors.length)throw new Error(errors.map(error=>error.message).join('; '));
+          await writeRuntimeFile(file,bytes);
+        }
+        captures.push({frame,shotId:shot.id,path:file,sha256:hash(bytes),url:server.origin+'/'+relative});
+      }
+      return captures;
+    }finally{
+      if(connection){connection.removeAbort();await connection.browser.close().catch(()=>{});this.browsers.delete(connection.browser);}
+    }
   }
   async capture(root:string,project:VideoProject,settings:EnvironmentSettings,frame:number,signal?:AbortSignal):Promise<FrameCapture&{url:string}>{
     const {spec,server,url}=await this.prepare(root,project),errors:RenderIssue[]=[];aborted(signal);
