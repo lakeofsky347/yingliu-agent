@@ -175,6 +175,6 @@ export function Preview({snapshot,project,selectedShot,controller,focusFrame,foc
     {capture&&<div className="vs-captured-frame"><Icon name="check"/><a href={capture.url} target="_blank" rel="noreferrer">查看已保存 PNG ↗</a><button type="button" onClick={()=>void controller.action('reveal',{path:capture.path})}>打开 PNG 文件</button><button type="button" className="vs-iconbutton" aria-label="关闭提示" onClick={()=>setCapture(null)}><Icon name="close"/></button></div>}
     {snapshot.previewUrl&&ready&&!showOutput&&<div className="vs-keyframe-strip"><div className="vs-eyebrow" data-testid="keyframe-scope">{selectedInFilm&&selectedShot?`选中「${selectedShot.title}」的关键帧`:"全片关键帧"}</div><div className="vs-keyframes" aria-label="镜头关键帧">{marks.map((number,index)=><FrameThumb key={`${thumbnailKey}:${number}`} url={thumbnails.key===thumbnailKey?thumbnails.urls[number]:undefined} failed={thumbnails.key===thumbnailKey&&thumbnails.failed} frame={number} active={Math.abs(frame-number)<=2} label={index===0?"首帧":index===marks.length-1?"末帧":"中帧"} onSelect={seek}/>)}</div></div>}
     {audioError&&<p className="vs-inline-error">{audioError}</p>}
-    {previewError&&<p className="vs-inline-error vs-render-error" role="alert">{previewError}<button type="button" disabled={reloading} onClick={()=>void reloadScene()}>重新加载画面</button></p>}
+    {previewError&&<div className="vs-inline-error vs-render-error" role="alert"><strong>{previewError}</strong><button type="button" disabled={reloading} onClick={()=>void reloadScene()}>重新加载画面</button></div>}
   </div>;
 }
