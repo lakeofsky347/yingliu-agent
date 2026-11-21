@@ -1,7 +1,9 @@
 import type { Asset, Shot, VideoProject, VideoSpec, VideoTarget } from '../shared/types.js';
 import { normalizeVideoStyle } from '../shared/video-style.ts';
 import {inspectProjectPaths,safeRelativeProjectPath as safeRelativePath} from './project-paths.js';
+import {validateProductionPolicy} from './production-policy.js';
 export { defaultSceneSource } from './default-source.js';
+export * from './production-policy.js';
 
 export interface ValidationResult { ok:boolean; errors:string[]; warnings:string[] }
 export interface StoryEdge { from:string; to:string }
@@ -30,8 +32,8 @@ function plainObject(value:unknown):value is Record<string,unknown> {
 
 /** Migrate in memory: stable IDs, revision and historical snapshots are not rewritten. */
 export function migrateProject(project:VideoProject):VideoProject {
-  if(!project||![1,2].includes(project.schemaVersion))throw new Error('不支持的项目版本');
-  const migrated=copy(project);migrated.schemaVersion=2;migrated.videoClips??=[];return migrated;
+  if(!project||![1,2,3].includes(project.schemaVersion))throw new Error('不支持的项目版本');
+  const migrated=copy(project);if(migrated.schemaVersion===1)migrated.schemaVersion=2;migrated.videoClips??=[];return migrated;
 }
 
 /** New projects have three editable ten-second scenes; media is never invented. */
@@ -62,7 +64,8 @@ export function defaultShot(index=0,fps={num:30,den:1}):Shot {
 export function validateProject(project:VideoProject,options:{portablePaths?:boolean}={}):ValidationResult {
   const errors:string[]=[],warnings:string[]=[];
   if(!plainObject(project))return {ok:false,errors:['项目必须是对象'],warnings};
-  if(project.schemaVersion!==1&&project.schemaVersion!==2)errors.push('不支持的项目版本');
+  if(![1,2,3].includes(project.schemaVersion))errors.push('不支持的项目版本');
+  if(project.schemaVersion===3)errors.push(...validateProductionPolicy(project));
   if(typeof project.id!=='string'||!project.id.trim())errors.push('项目 ID 不能为空');
   if(typeof project.title!=='string'||!project.title.trim())errors.push('项目标题不能为空');
   if(typeof project.topic!=='string')errors.push('主题必须是文字');
@@ -212,7 +215,7 @@ export function compileSpec(project:VideoProject):VideoSpec {
   });
   if(frame>1000000)throw new Error('全片超过 1,000,000 帧限制');
   return {projectId:project.id,title:project.title,topic:project.topic,target:copy(project.target),
-    durationFrames:frame,durationSeconds:frame*project.target.fps.den/project.target.fps.num,shots};
+    durationFrames:frame,durationSeconds:frame*project.target.fps.den/project.target.fps.num,shots,...(project.productionPolicy?{productionPolicy:copy(project.productionPolicy)}:{})};
 }
 
 /** Allocate an exact integer frame budget, preserving relative duration weights. */

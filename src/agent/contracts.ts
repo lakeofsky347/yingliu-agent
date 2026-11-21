@@ -47,7 +47,7 @@ export interface AgentTool {
   run(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult>;
 }
 
-export type GenRole = 'image' | 'video' | 'speech' | 'music' | 'sfx' | 'vision';
+export type GenRole = 'image' | 'video' | 'speech' | 'music' | 'sfx' | 'vision' | 'blender';
 export interface Capabilities { roles: GenRole[]; director?: string; models?: Partial<Record<GenRole, string>> }
 /** `id` is the provider's tool_call_id (only used to thread tool messages); `execId` is server-generated and single-use. */
 export interface ToolCall { id: string; name: string; arguments: string; execId?: string }
@@ -109,6 +109,8 @@ export interface AgentRun {
   /** R03: receipt persisted *before* a paid/export side effect starts; cleared once its outcome is known. */
   inFlight?: { execId: string; tool: string; argsHash: string; startedAt: string };
   uncertainSubmissions?: { execId: string; tool: string; at: string; error: string; attempts: number; jobId?: string }[]; final?: string; error?: string;
+  /** Pending follow-up / steering user messages queued while running. */
+  pendingUserMessages?: string[];
   /** Capabilities and tool names active at the latest model step. */
   active?: { roles: GenRole[]; tools: string[]; selfMade: string[] };
 }
@@ -142,4 +144,6 @@ export interface AgentPort {
   vision?(prompt: string, images: { mime: string; bytes: Uint8Array }[], signal: AbortSignal, authorizeUpload?:AuthorizeUpload): Promise<string>;
   videoReferenceDestination?():Promise<UploadDestination>;
   generateVideoReference?(request:MediaRequest,authorizeUpload:AuthorizeUpload):Promise<MediaTask>;
+  /** Render a deterministic whitebox 3D shot previsualization via local headless Blender. */
+  renderPreviz?(projectId:string,spec:import('../host/blender.ts').PrevizSceneSpec,options:{shotId?:string;name?:string;bindPreviewClip?:boolean;signal:AbortSignal}):Promise<{imageAssetId:string;videoAssetId?:string;width:number;height:number;fps:number;frameCount:number;revision:number}>;
 }

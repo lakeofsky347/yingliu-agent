@@ -37,6 +37,16 @@ export const TEMPLATE_PRESETS: Record<string, { label: string; output: 'image' |
     submitPath: '/v1/sound-generation', submitBody: '{"text":"{{prompt}}","duration_seconds":{{duration|3}}}', responseType: 'binary', resultMime: 'audio/mpeg', idPath: '', authHttpName: 'xi-api-key', authPrefix: '' } },
   'openai-speech': { label: 'OpenAI 兼容 TTS（/audio/speech，同步二进制）', output: 'audio', template: {
     submitPath: '/audio/speech', submitBody: '{"model":"{{model}}","input":"{{prompt}}","voice":"{{param.voice|alloy}}","response_format":"mp3"}', responseType: 'binary', resultMime: 'audio/mpeg', idPath: '' } },
+  'kling-video-i2v': { label: '可灵 图生视频（自定义模板；推荐改用官方可灵协议）', output: 'video', template: {
+    submitPath: '/v1/videos/image2video', submitBody: '{"model_name":"{{model}}","prompt":"{{prompt}}","image":"{{image}}","duration":"{{duration|5}}"}',
+    idPath: 'data.task_id', pollPath: '/v1/videos/image2video/{{id}}', statusPath: 'data.task_status', resultPath: 'data.task_result.videos[].url', errorPath: 'data.task_status_msg',
+    statusMap: 'submitted:queued,processing:running,succeed:succeeded,failed:failed' } },
+  'elevenlabs-tts': { label: 'ElevenLabs 配音（TTS，同步二进制）', output: 'audio', template: {
+    submitPath: '/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM', submitBody: '{"text":"{{prompt}}","model_id":"{{model}}"}',
+    responseType: 'binary', resultMime: 'audio/mpeg', idPath: '', authHttpName: 'xi-api-key', authPrefix: '' } },
+  'replicate-musicgen': { label: 'Replicate 音乐生成（MusicGen）', output: 'audio', template: {
+    submitPath: '/models/{{modelOwner}}/{{modelName}}/predictions', submitBody: '{"input":{"prompt":"{{prompt}}","duration":{{duration|15}}}}',
+    idPath: 'id', pollPath: '/predictions/{{id}}', statusPath: 'status', resultPath: 'output', errorPath: 'error', cancelPath: '/predictions/{{id}}/cancel' } },
   'generic-async': { label: '通用异步任务（自定义字段）', output: 'image', template: {} },
 };
 

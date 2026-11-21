@@ -30,5 +30,12 @@ export const SKILLS: Record<string, { title: string; body: string }> = {
 - 生成图片/视频时传 characterIds，系统会自动拼接一致性锚点；不要在提示词里改写角色外貌。
 - 连续动作的相邻镜头：先 frame_handoff 取上一镜尾帧，再把它作为 generate_video 的首帧。
 - 生成后用 consistency_review 打分；低分只提出重生建议，重生仍需用户批准。` },
+  'blender-previz': { title: 'Blender 白模预演与空间构图', body: `当本机已接入 Blender 且分镜（plan_story / plan_shots）已获用户批准后，遵循四阶段流程：
+1. 分镜确认 → 2. Blender 白模预演 → 3. 用户审阅预演 → 4. 预演输入创作模型实际呈现。
+- 坐标系：右手系，+X 向右、+Y 向前（景深方向）、+Z 向上（米为单位）；角色站位用 kind="character"（含 height 与 facingDeg 朝向角，0° 朝 +Y，180° 面向相机），道具/建筑体块用 box/cylinder/sphere/plane。
+- 焦距与景别：24mm 广角建景/环境交代，35mm 标准叙事，50mm 中近景人物对话，85mm 特写情绪。
+- 运镜设计：通过 camera.startPos → endPos 与 startTarget → endTarget 表达推拉摇移环绕；保持起止移动平缓，避免高速穿模。
+- 产出与审阅：先用 blender_render_previz 为关键镜头生成白模预演帧（PNG）与白模动态视频（MP4），再用 submit_previz_review 提交给用户审阅。
+- 喂给正式创作模型：预演审阅通过后，将已批准的 previzImageAssetId 传给 generate_video（作为 imageAssetId 首帧/空间参考）或参考其构图执行 generate_image / shot_write_source；在提示词中明确强调“参考构图、机位与人物站位，但用目标美术风格真实渲染，不要保留灰白模型质感”。` },
 };
 export function skillIndex(): string { return Object.entries(SKILLS).map(([id, s]) => `${id}（${s.title}）`).join('、'); }

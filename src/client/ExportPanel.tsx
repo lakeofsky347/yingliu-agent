@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { QcReport } from '../agent/story.ts';
 import type { VideoProject } from '../shared/types.ts';
 import type { StudioController } from './controller.ts';
+import { LocalQualityPanel } from './LocalQualityPanel.tsx';
+import { ExportQualityReport } from './ExportQualityReport.tsx';
 import { AppIcon, localTime } from './ui.tsx';
 
 function formatQaValue(value:unknown):string {
@@ -57,6 +59,7 @@ export function ExportPanel({project,controller}:{project:VideoProject;controlle
       {qcReport&&qcReport.unchecked.length>0&&<ul className="vs-qc">{qcReport.unchecked.map((item,index)=><li key={index}>未检查：{item}</li>)}</ul>}
       {qcReport&&!qcReport.issues.length&&!qcReport.unchecked.length&&!qcMismatch&&<p className="vs-media-help">当前工程关键帧与音画检查未发现异常。</p>}
     </section>
+    <LocalQualityPanel project={project} controller={controller}/>
     <div className="yl-panel-heading"><div><h3>已导出的影片</h3><p>每份成片记录生成时的工程版本；继续修改不会覆盖旧成片。</p></div><span>{outputs.length} 份</span></div>
     {playing?.url&&<div className="yl-export-player"><video key={playing.id} src={playing.url} controls preload="metadata" onError={()=>setError('成片无法播放。请打开文件检查，或从任务面板重新导出。')}/><div><span>{project.title} · v{playing.revision}</span><button onClick={()=>setSelected(null)}>关闭播放</button></div></div>}
     {error&&<p className="yl-error" role="alert">{error}</p>}
@@ -70,6 +73,7 @@ export function ExportPanel({project,controller}:{project:VideoProject;controlle
           <p>{output.width} × {output.height} · {output.duration.toFixed(2)} 秒 · {output.frameCount} 帧</p>
           <small>{localTime(output.createdAt)}</small>
           <p className="yl-export-path" title={output.path}>{output.path}</p>
+          {output.localQuality&&<ExportQualityReport report={output.localQuality} revision={output.revision}/>}
           {qaEntries.length>0&&<details className="vs-media-advanced yl-export-qa" data-export-quality>
             <summary>成片检查摘要</summary>
             <ul>{qaEntries.map(([key,value])=><li key={key}><strong>{key}</strong>：{formatQaValue(value)}</li>)}</ul>

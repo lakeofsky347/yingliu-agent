@@ -374,6 +374,36 @@ export class AgentService {
       return this.public(run);
     });
   }
+  async sendMessage(id: string, rawMessage: string): Promise<PublicRun> {
+    const message = String(rawMessage ?? '').trim();
+    if (!message || message.length > 12_000) throw new Error('消息须为 1–12000 字');
+    const run = await this.required(id);
+    return this.projectCommand(run.projectId, async () => {
+      if (this.stopped) throw new Error('应用正在关闭');
+      if (this.active.has(id) || run.status === 'running' || run.status === 'waiting_task') {
+        (run.pendingUserMessages ??= []).push(message);
+        run.message = '已收到补充指令，将在本步后应用';
+        await this.store.trace(run.id, { event: 'run.steer', message: bound(message, 400) });
+        await this.save(run);
+        return this.public(run);
+      }
+      if (run.status === 'awaiting_approval') throw new Error('当前正等待审批，请先批准或拒绝待执行操作后再发补充指令');
+      if (run.status === 'cancelled') throw new Error('已取消的运行不能继续，请发起新任务');
+      if (run.status === 'budget_exceeded') throw new Error('该运行已达预算上限，请新建任务或调高预算');
+      if ([...this.active.keys()].some(other => other !== id && this.runs.get(other)?.projectId === run.projectId)) throw new Error('当前工程已有正在执行的智能体任务');
+      run.messages.push({ role: 'user', content: message });
+      delete run.final;
+      delete run.error;
+      run.reviewRounds = 0;
+      if (run.usage.steps >= run.budget.maxSteps) run.budget.maxSteps = Math.min(200, run.usage.steps + 12);
+      run.status = 'running';
+      run.message = '继续处理新指令';
+      await this.store.trace(run.id, { event: 'run.followup', message: bound(message, 400) });
+      await this.save(run);
+      this.launch(run);
+      return this.public(run);
+    });
+  }
   async cancel(id: string): Promise<PublicRun> {
     const run = await this.required(id);
     return this.projectCommand(run.projectId, async () => {
@@ -439,10 +469,52 @@ export class AgentService {
         // F06: budget is checked before *every* tool execution, not only before the next model turn.
         const limit = await this.budgetLimit(run, 'tool');
         if (limit) { run.status = 'budget_exceeded'; run.message = '已停止：' + limit; await this.store.trace(run.id, { event: 'budget', reason: limit, usage: run.usage, pendingCalls: run.queue.map(c => c.name) }); await this.save(run); return; }
+        // Run leading consecutive pure-read (non-vision) tools in bounded parallel batches, preserving exact tool_call order.
+        const activeToolsList = this.runTools(run, (await this.capabilities()).capabilities);
+        const batch: { call: ToolCall; tool: AgentTool }[] = [];
+        const remainingToolBudget = Math.max(0, run.budget.maxToolCalls - run.usage.toolCalls);
+        for (const queued of run.queue) {
+          if (batch.length >= Math.min(4, remainingToolBudget)) break;
+          const resolved = activeToolsList.find(t => t.name === queued.name);
+          if (!resolved || resolved.risk !== 'read' || (resolved.requires ?? []).includes('vision') || !run.policy.autoApprove.includes('read')) break;
+          batch.push({ call: queued, tool: resolved });
+        }
+        if (batch.length >= 2) {
+          run.message = '并行读取：' + batch.map(item => item.call.name).join('、');
+          await this.save(run);
+          const steps = await Promise.all(batch.map(item => this.step(run, { kind: 'tool', status: 'running', tool: item.call.name, callId: item.call.id, risk: 'read', arguments: bound(item.call.arguments, 2000) })));
+          const results = await Promise.all(batch.map(async (item, idx) => {
+            try {
+              const parsed = JSON.parse(item.call.arguments || '{}');
+              if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('参数须为对象');
+              const ctx = this.context(run.id, run.projectId, signal, run);
+              const out = await this.withRetry(run, steps[idx]!, () => item.tool.run({ ...parsed, __callId: item.call.execId ?? randomUUID() }, ctx), signal);
+              await this.finishStep(run, steps[idx]!, { status: 'complete', summary: bound(out.content, 300) });
+              return out.content;
+            } catch (error) {
+              if (signal.aborted) throw error;
+              const msg = errorText(error);
+              await this.finishStep(run, steps[idx]!, { status: 'failed', error: msg });
+              return JSON.stringify({ error: msg });
+            }
+          }));
+          for (let i = 0; i < batch.length; i++) {
+            chargeTool(run.usage, 0, 'read');
+            run.messages.push({ role: 'tool', tool_call_id: batch[i]!.call.id, content: results[i]! });
+          }
+          run.queue = run.queue.slice(batch.length);
+          await this.save(run);
+          continue;
+        }
         const call = run.queue[0];
         const outcome = await this.runCall(run, call, signal);
         if (outcome === 'suspend') return;
         continue;
+      }
+      if (run.pendingUserMessages?.length) {
+        for (const msg of run.pendingUserMessages) run.messages.push({ role: 'user', content: msg });
+        delete run.pendingUserMessages;
+        await this.save(run);
       }
       const limit = await this.budgetLimit(run, 'model');
       if (limit) { run.status = 'budget_exceeded'; run.message = '已停止：' + limit; await this.store.trace(run.id, { event: 'budget', reason: limit, usage: run.usage }); await this.save(run); return; }
@@ -457,14 +529,15 @@ export class AgentService {
       run.message = '模型思考中'; await this.save(run);
       const step = await this.step(run, { kind: 'model', status: 'running' });
       let turn;
+      const emitDelta = (text: string) => { this.emit({ type: 'delta', runId: run.id, text }); };
       try {
         turn = await this.withRetry(run, step, async () => {
-          try { return await chatTurn(model.config, systemPrompt(promptExtra), run.messages, tools, signal, this.options.fetch); }
+          try { return await chatTurn(model.config, systemPrompt(promptExtra), run.messages, tools, signal, this.options.fetch, emitDelta); }
           catch (error) {
             if (model.config.supportsTools && looksLikeNoToolSupport(error)) {
               model = { ...model, config: { ...model.config, supportsTools: false } }; run.model.mode = 'plan-json';
               await this.store.trace(run.id, { event: 'fallback', to: 'plan-json', error: errorText(error) });
-              return chatTurn(model.config, systemPrompt(promptExtra), run.messages, tools, signal, this.options.fetch);
+              return chatTurn(model.config, systemPrompt(promptExtra), run.messages, tools, signal, this.options.fetch, emitDelta);
             }
             throw error;
           }

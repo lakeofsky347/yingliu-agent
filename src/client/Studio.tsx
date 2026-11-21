@@ -25,6 +25,8 @@ import { StudioHeader, taskLabel, type MenuItem, type StageId, type StepInfo } f
 
 import { AgentPanel } from './AgentPanel.tsx';
 import { AgentRunFeed } from './agent-feed.ts';
+import { ProductionPolicySettings } from './ProductionPolicySettings.tsx';
+import { DirectorDocumentPanel } from './DirectorDocumentPanel.tsx';
 import type { PublicRun } from '../agent/contracts.ts';
 import { addPlacedShot } from './project-ui.ts';
 
@@ -43,6 +45,18 @@ export interface StudioProps {
   sceneConfigured:boolean;
   onConfigureVision:()=>void;
   conversationBusy:boolean;
+  onOnboarding?:()=>void;
+  onStyles?:()=>void;
+  onManageProject?:(action:'rename'|'duplicate'|'backup'|'archive')=>void;
+  onToggleCopilot?:()=>void;
+  copilotOpen?:boolean;
+  onOpenCopilot?:()=>void;
+  projects?:{id:string;title:string;archived?:boolean}[];
+  onSwitchProject?:(projectId:string)=>void;
+  externalAgentRuns?:PublicRun[];
+  externalAgentLive?:boolean;
+  externalAgentStream?:Record<string,string>;
+  onRefreshAgentRuns?:()=>Promise<void>|void;
 }
 export function FilmMark(){return <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3" stroke="currentColor" strokeWidth="1.6"/><path d="M8 4v16M16 4v16M3 9h5M3 15h5M16 9h5M16 15h5" stroke="currentColor" strokeWidth="1.4"/><path d="m11 9 4 3-4 3V9Z" fill="currentColor"/></svg>;}
 
@@ -64,7 +78,7 @@ function useLayout(ref:RefObject<HTMLElement>):StageLayout{
 
 export function Studio(props:StudioProps){return <ConfirmationScope><StudioContent {...props}/></ConfirmationScope>;}
 
-function StudioContent({controller,onHome,onNew,onOpen,onConfigure,onProjectUpdated,modelConfigured,visionReady,sceneModelName,sceneConfigured,onConfigureVision,conversationBusy}:StudioProps){
+function StudioContent({controller,onHome,onNew,onOpen,onConfigure,onProjectUpdated,modelConfigured,visionReady,sceneModelName,sceneConfigured,onConfigureVision,conversationBusy,onOnboarding,onStyles,onManageProject,onToggleCopilot,copilotOpen,onOpenCopilot,projects,onSwitchProject,externalAgentRuns,externalAgentLive,externalAgentStream,onRefreshAgentRuns}:StudioProps){
   const confirmAction=useConfirmAction(),cancelConfirmation=useCancelConfirmation();
   const [toasts]=useState(createToastStore),{toast}=toasts;
   useEffect(()=>controller.subscribe(toasts.dropUnavailableActions),[controller,toasts]);
@@ -87,11 +101,17 @@ function StudioContent({controller,onHome,onNew,onOpen,onConfigure,onProjectUpda
   const [zoom,setZoom]=useState(.9),[outputOpen,setOutputOpen]=useState(false),[keysOpen,setKeysOpen]=useState(false);
   const [wordOpen,setWordOpen]=useState(false),[instruction,setInstruction]=useState(''),[editScope,setEditScope]=useState<'shot'|'film'>('film');
   const [dismissedTask,setDismissedTask]=useState('');
-  const [agentRuns,setAgentRuns]=useState<PublicRun[]>([]),[agentLive,setAgentLive]=useState(false);
+  const [internalAgentRuns,setInternalAgentRuns]=useState<PublicRun[]>([]),[internalAgentLive,setInternalAgentLive]=useState(false);
+  const [internalAgentStream,setInternalAgentStream]=useState<Record<string,string>>({});
   const agentFeedRef=useRef<AgentRunFeed|null>(null);
+  const hasExternalAgent=externalAgentRuns!==undefined;
+  const agentRuns=hasExternalAgent?externalAgentRuns:internalAgentRuns;
+  const agentLive=hasExternalAgent?Boolean(externalAgentLive):internalAgentLive;
+  const agentStream=hasExternalAgent?(externalAgentStream??{}):internalAgentStream;
   useEffect(()=>{
+    if(hasExternalAgent)return;
     const projectId=project?.id;
-    setAgentRuns([]);setAgentLive(false);
+    setInternalAgentRuns([]);setInternalAgentLive(false);setInternalAgentStream({});
     if(!projectId)return;
     let active=true,refreshNeeded=false,refreshing=false;
     let versions=new Map<string,string>();
@@ -111,17 +131,19 @@ function StudioContent({controller,onHome,onNew,onOpen,onConfigure,onProjectUpda
       connect:signal=>fetch('/events/agent?projectId='+encodeURIComponent(projectId),{method:'POST',headers:token?{'X-Yingliu-Token':token}:{},signal}),
       onRuns:list=>{
         if(!active)return;
-        setAgentRuns(list);
+        setInternalAgentRuns(list);
+        setInternalAgentStream(prev=>{const next={...prev};for(const item of list)if(item.status!=='running')delete next[item.id];return next;});
         const nextVersions=new Map(list.map(run=>[run.id,`${run.status}:${run.steps.length}:${run.updatedAt??''}`]));
         if([...nextVersions].some(([id,version])=>versions.get(id)!==version))refreshNeeded=true;
         versions=nextVersions;
         void refreshProject();
       },
-      onLive:setAgentLive,
+      onDelta:(runId,text)=>{if(active)setInternalAgentStream(prev=>({...prev,[runId]:((prev[runId]??'')+text).slice(-2000)}));},
+      onLive:setInternalAgentLive,
     });
     agentFeedRef.current=subscription;subscription.start();
     return()=>{active=false;unsubscribe();subscription.stop();if(agentFeedRef.current===subscription)agentFeedRef.current=null;};
-  },[controller,project?.id]);
+  },[controller,project?.id,hasExternalAgent]);
   const selectedShot=project?.shots.find(s=>s.id===state.selected),selectedAsset=project?.assets.find(a=>a.id===state.selected);
   const graphCheck=useMemo(()=>project?validateGraph(project):null,[project]);
   const spec=useMemo(()=>{try{return project?compileSpec(project):null;}catch{return null;}},[project]);
@@ -306,27 +328,33 @@ function StudioContent({controller,onHome,onNew,onOpen,onConfigure,onProjectUpda
   })():[];
   const menu:MenuItem[]=project?[
     {id:'output',label:"输出设定",icon:'film',onSelect:()=>setOutputOpen(true)},
+    ...(onStyles?[{id:'styles',label:"视频风格库",icon:'spark',onSelect:onStyles}]:[]),
     {id:'reveal',label:"打开项目文件夹",icon:'folder',disabled:!snapshot?.root,onSelect:()=>{if(snapshot?.root)void controller.action('reveal',{path:snapshot.root});}},
     {id:'media',label:"媒体模型",icon:'spark',separatorBefore:true,onSelect:()=>openPanel('media')},
-    {id:'environment',label:"运行环境",icon:'settings',onSelect:()=>openPanel('environment')},
+    {id:'environment',label:"运行环境（含 Blender）",icon:'settings',onSelect:()=>openPanel('environment')},
     {id:'theme',label:state.scheme==='dark'?'切换到浅色工作台':'切换到深色工作台',icon:'monitor',onSelect:()=>{
       const scheme=state.scheme==='dark'?'light':'dark';
       controller.setScheme(scheme);
       try{localStorage.setItem('yingliu-agent-workbench-scheme',scheme);}catch{/* Keep current theme for this session. */}
     }},
     {id:'keys',label:"快捷键",icon:'keyboard',hint:'?',onSelect:()=>setKeysOpen(true)},
+    ...(onManageProject?[
+      {id:'duplicate',label:'复制工程',icon:'copy',separatorBefore:true,disabled:busy,onSelect:()=>onManageProject('duplicate')},
+      {id:'backup',label:'备份工程包',icon:'download',disabled:busy,onSelect:()=>onManageProject('backup')},
+      {id:'archive',label:'归档工程',icon:'trash',danger:true,disabled:busy,onSelect:()=>onManageProject('archive')},
+    ]:[]),
     {id:'new',label:'新建影片',icon:'plus',separatorBefore:true,disabled:busy,onSelect:onNew},
     {id:'open',label:'打开工程目录',icon:'folder',disabled:busy,onSelect:onOpen},
   ]:[];
   const agentStatus=useMemo(()=>{
     const approval=agentRuns.find(run=>run.status==='awaiting_approval'||(run.status==='paused'&&Boolean(run.visionConsentRequired)));
-    if(approval)return {state:'approval' as const,label:'智能体待批准',onClick:()=>{openPanel('agent');}};
+    if(approval)return {state:'approval' as const,label:'智能体待批准',onClick:()=>{if(onOpenCopilot)onOpenCopilot();else openPanel('agent');}};
     const activeRun=agentRuns.find(run=>['running','waiting_task'].includes(run.status));
-    if(activeRun)return {state:'running' as const,label:'智能体运行中',onClick:()=>{openPanel('agent');}};
+    if(activeRun)return {state:'running' as const,label:'智能体运行中',onClick:()=>{if(onOpenCopilot)onOpenCopilot();else openPanel('agent');}};
     return null;
-  },[agentRuns]);
+  },[agentRuns,onOpenCopilot]);
   const drawerTabs:DrawerTab<PanelTab>[]=[
-    {id:'agent',label:'智能体',icon:'spark',badge:agentStatus?.state==='approval'?<i className="vs-tab-dot is-warn" aria-hidden="true"/>:agentStatus?.state==='running'?<i className="vs-tab-dot is-busy" aria-hidden="true"/>:undefined},
+    ...(onOpenCopilot?[]:[{id:'agent' as const,label:'智能体',icon:'spark',badge:agentStatus?.state==='approval'?<i className="vs-tab-dot is-warn" aria-hidden="true"/>:agentStatus?.state==='running'?<i className="vs-tab-dot is-busy" aria-hidden="true"/>:undefined}]),
     {id:'audio',label:"声音与配音",icon:'music'},{id:'media',label:"模型与素材生成",icon:'spark'},{id:'source',label:"前端源码",icon:'code'},
     {id:'workflow',label:"协作制作",icon:'users'},{id:'spec',label:"制作要求",icon:'doc'},{id:'history',label:"修改历史",icon:'history'},
     {id:'tasks',label:"任务记录",icon:'tasks',badge:task?.status==='failed'?<i className="vs-tab-dot is-danger"/>:task?.status==='running'?<i className="vs-tab-dot is-busy"/>:undefined},
@@ -340,6 +368,8 @@ function StudioContent({controller,onHome,onNew,onOpen,onConfigure,onProjectUpda
   return <main ref={studioRef} className="vs-studio" data-scheme={state.scheme} data-layout={layout} lang="zh-CN">
     {project&&<StudioHeader project={project} state={state} steps={steps} task={task} agentStatus={agentStatus} busy={busy} graphOk={!!graphCheck?.ok} canExport={!!graphCheck?.ok&&!state.sourceDraft&&!state.panelDraft&&!state.conflict}
       sceneModelName={sceneModelName} sceneConfigured={sceneConfigured} onConfigure={onConfigure}
+      onOnboarding={onOnboarding} onToggleCopilot={onToggleCopilot} copilotOpen={copilotOpen}
+      projects={projects} onSwitchProject={onSwitchProject}
       onHome={onHome} onRename={title=>void controller.action('rename',{title},'影片名称已保存。').then(ok=>{if(ok)onProjectUpdated?.();})}
       onStep={onStep} onGenerate={kind=>void generate(kind)} onExport={()=>{
         if(!canHidePanel())return;
@@ -378,7 +408,7 @@ function StudioContent({controller,onHome,onNew,onOpen,onConfigure,onProjectUpda
         <BottomDrawer tabs={drawerTabs} active={panel} open={effectiveDrawerOpen} height={drawerHeight} flash={flash}
           onSelect={tab=>openPanel(tab,false)} onToggle={()=>{if(!effectiveDrawerOpen||canHidePanel())setDrawerOpen(!effectiveDrawerOpen);}} onResize={height=>{setDrawerHeight(height);store.set('yingliu-agent-drawer-height',height);}}>
           <fieldset className="vs-panel-fields" disabled={conversationBusy}>
-            {panel==='agent'&&<AgentPanel key={project.id} controller={controller} project={project} externalRuns={agentRuns} externalLive={agentLive} onExternalRefresh={()=>agentFeedRef.current?.refresh()}/>}
+            {panel==='agent'&&<AgentPanel key={project.id} controller={controller} project={project} assetUrl={assetUrl} onConfigure={onConfigure} externalRuns={agentRuns} externalLive={agentLive} externalStreamText={agentStream} onExternalRefresh={()=>onRefreshAgentRuns?onRefreshAgentRuns():agentFeedRef.current?.refresh()}/>}
             {panel==='workflow'&&<WorkflowPanel key={project.id} controller={controller} project={project} selectedShot={selectedShot} visionReady={visionReady} onConfigure={onConfigureVision}/>}
             {panel==='media'&&<MediaPanel controller={controller} project={project} selectedShot={selectedShot}/>}
             {panel==='history'&&<HistoryPanel controller={controller}/>}
@@ -386,6 +416,8 @@ function StudioContent({controller,onHome,onNew,onOpen,onConfigure,onProjectUpda
             {panel==='exports'&&<ExportPanel project={project} controller={controller}/>}
             {panel==='audio'&&<AudioPanel project={project} snapshot={snapshot!} controller={controller} assetUrl={assetUrl} selectedShot={selectedShot} busy={busy}/>}
             {panel==='spec'&&<div className="vs-spec-view">
+              <ProductionPolicySettings project={project} controller={controller}/>
+              <DirectorDocumentPanel project={project} controller={controller} disabled={busy} onDirtyChange={dirty=>controller.setPanelDraftDirty(`director:${project.id}`,'导演计划',dirty)}/>
               {spec?<><div className="vs-spec-meta">
                 <span>{spec.shots.length} 个镜头</span><span>{spec.durationSeconds.toFixed(1)} 秒</span>
                 <Button size="sm" icon="copy" onClick={()=>void navigator.clipboard.writeText(specMarkdown(spec)).then(()=>controller.notify('制作要求已复制。')).catch(()=>controller.notify('复制失败，可以在下方选择文本。'))}>复制</Button>

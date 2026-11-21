@@ -6,7 +6,14 @@ import { writeDurableFile } from './durable-file.ts';
 
 export interface StoryStyle { look: string; palette: string; typography: string; motion: string; negative: string }
 export interface StoryCharacter { id: string; name: string; description: string; features: string[]; referenceAssetIds: string[]; voice?: string }
-export interface StoryShot { id: string; shotId?: string; summary: string; shotType: string; camera: string; durationSeconds: number; dialogue: string; characters: string[]; continueFromPrevious: boolean }
+export interface StoryPreviz {
+  status: 'none' | 'rendered' | 'approved' | 'skipped';
+  imageAssetId?: string;
+  videoAssetId?: string;
+  note?: string;
+  updatedAt?: string;
+}
+export interface StoryShot { id: string; shotId?: string; summary: string; shotType: string; camera: string; durationSeconds: number; dialogue: string; characters: string[]; continueFromPrevious: boolean; previz?: StoryPreviz }
 export interface ConsistencyScore { shotId: string; score: number; notes: string; at: string }
 export interface Story {
   version: number; projectId: string; status: 'empty' | 'approved'; title: string; logline: string; targetSeconds: number;
@@ -53,8 +60,14 @@ export function anchorPrompt(story: Story | null, characterIds: string[] = []): 
 }
 export function storyBrief(story: Story | null): string {
   if (!story || story.status !== 'approved') return '';
-  const shots = story.shots.map((s, i) => `${i + 1}. [${s.id}${s.shotId ? '→' + s.shotId : ''}] ${s.shotType} ${s.camera} ${s.durationSeconds}s ${s.summary}${s.characters.length ? '（角色 ' + s.characters.join(',') + '）' : ''}${s.continueFromPrevious ? '（承接上一镜）' : ''}`).join('\n');
-  return `已批准的创作计划（按此执行，偏离前先用 plan_shots 更新）：\n《${story.title}》${story.logline}\n风格：${JSON.stringify(story.style)}\n角色：${story.characters.map(c => `${c.id}=${c.name}（${c.features.join('，')}）`).join('；') || '无'}\n分镜：\n${shots}`.slice(0, 6000);
+  const shots = story.shots.map((s, i) => {
+    const pv = s.previz;
+    const previzTag = pv && pv.status !== 'none'
+      ? ` [预演:${pv.status}${pv.imageAssetId ? ' frame=' + pv.imageAssetId : ''}${pv.videoAssetId ? ' video=' + pv.videoAssetId : ''}]`
+      : '';
+    return `${i + 1}. [${s.id}${s.shotId ? '→' + s.shotId : ''}] ${s.shotType} ${s.camera} ${s.durationSeconds}s ${s.summary}${s.characters.length ? '（角色 ' + s.characters.join(',') + '）' : ''}${s.continueFromPrevious ? '（承接上一镜）' : ''}${previzTag}`;
+  }).join('\n');
+  return `已批准的创作计划（按此执行，偏离前先用 plan_shots 更新）：\n《${story.title}》${story.logline}\n风格：${JSON.stringify(story.style)}\n角色：${story.characters.map(c => `${c.id}=${c.name}（${c.features.join('，')}）`).join('；') || '无'}\n分镜：\n${shots}`.slice(0, 6500);
 }
 
 /** Per-project JSON documents (story, ledger) with atomic writes and optimistic versioning. */

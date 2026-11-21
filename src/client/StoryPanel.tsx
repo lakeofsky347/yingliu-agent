@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import type { VideoProject } from '../shared/types.ts';
+import type { Asset, VideoProject } from '../shared/types.ts';
 import type { Ledger, QcReport, Story, StoryCharacter } from '../agent/story.ts';
 import { StudioController } from './controller.ts';
 
 const checkNames: Record<QcReport['issues'][number]['check'], string> = { black: '黑帧/空白', silence: '静音', subtitle: '字幕/配音', duration: '时长', consistency: '一致性' };
 const severityNames = { low: '提示', medium: '注意', high: '严重' } as const;
+const previzLabels: Record<string, string> = { none: '未预演', rendered: '待审阅', approved: '已通过', skipped: '已跳过' };
 
-/** Structured rendering of a pending plan_story / plan_shots call so the user reviews a plan, not raw JSON. */
-export function PlanReview({ tool, args }: { tool: string; args: string }) {
+/** Structured rendering of a pending plan_story / plan_shots / submit_previz_review call so the user reviews a plan or whitebox previz, not raw JSON. */
+export function PlanReview({ tool, args, project, assetUrl }: { tool: string; args: string; project?: VideoProject; assetUrl?: (asset: Asset) => string }) {
   let value: Record<string, any>; try { value = JSON.parse(args); } catch { return <pre>{args}</pre>; }
   if (tool === 'plan_story') return <div className="vs-plan-review" aria-label="计划审阅">
     <h4>《{String(value.title ?? '')}》{value.targetSeconds ? ` · ${value.targetSeconds} 秒` : ''}</h4>
@@ -18,6 +19,23 @@ export function PlanReview({ tool, args }: { tool: string; args: string }) {
   if (tool === 'plan_shots' && Array.isArray(value.shots)) return <table className="vs-plan-shots" aria-label="分镜审阅"><thead><tr><th>#</th><th>景别/运镜</th><th>时长</th><th>画面</th><th>台词</th><th>角色</th></tr></thead>
     <tbody>{value.shots.map((s: any, i: number) => <tr key={i}><td>{i + 1}{s.continueFromPrevious ? ' ↩' : ''}</td><td>{[s.shotType, s.camera].filter(Boolean).join(' · ')}</td><td>{s.durationSeconds}s</td><td>{s.summary}</td><td>{s.dialogue}</td><td>{(s.characters ?? []).join('、')}</td></tr>)}</tbody>
     <tfoot><tr><td colSpan={6}>共 {value.shots.length} 镜，{value.shots.reduce((n: number, s: any) => n + (Number(s.durationSeconds) || 0), 0).toFixed(1)} 秒（↩ 表示承接上一镜尾帧）</td></tr></tfoot></table>;
+  if (tool === 'submit_previz_review' && Array.isArray(value.shots)) return <div className="vs-plan-review vs-previz-review" aria-label="Blender 白模预演审阅">
+    <h4>Blender 白模预演审阅</h4>
+    {value.summary && <p>{String(value.summary)}</p>}
+    <div className="vs-previz-grid">
+      {value.shots.map((item: any, i: number) => {
+        const imgAsset = project?.assets.find(a => a.id === item.imageAssetId);
+        const vidAsset = item.videoAssetId ? project?.assets.find(a => a.id === item.videoAssetId) : undefined;
+        const imgSrc = imgAsset && assetUrl ? assetUrl(imgAsset) : '';
+        const vidSrc = vidAsset && assetUrl ? assetUrl(vidAsset) : '';
+        return <article key={i} className="vs-previz-card">
+          <div className="vs-previz-card-head"><strong>镜头 {String(item.shotId ?? i + 1)}</strong><small>批准后将输入创作模型呈现</small></div>
+          {vidSrc ? <video controls muted loop preload="metadata" src={vidSrc} poster={imgSrc || undefined}/> : imgSrc ? <img src={imgSrc} alt={`白模预演 ${item.shotId ?? i + 1}`}/> : <p className="vs-muted">参考帧 ID：{String(item.imageAssetId ?? '—')}</p>}
+          {item.cameraNote && <p className="vs-muted">{String(item.cameraNote)}</p>}
+        </article>;
+      })}
+    </div>
+  </div>;
   return <pre>{args}</pre>;
 }
 
@@ -67,8 +85,8 @@ function ProjectStoryPanel({ controller, project }: { controller: StudioControll
       {story.status === 'approved' ? <>
         <p><strong>《{story.title}》</strong>{story.logline}</p>
         <p className="vs-muted">风格：{[story.style.look, story.style.palette, story.style.motion].filter(Boolean).join(' / ') || '未设定'}</p>
-        {story.shots.length > 0 && <table className="vs-plan-shots"><thead><tr><th>#</th><th>镜头</th><th>时长</th><th>画面</th><th>角色</th><th>一致性</th></tr></thead>
-          <tbody>{story.shots.map((s, i) => { const score = story.consistency[s.shotId ?? s.id]; return <tr key={s.id}><td>{i + 1}{s.continueFromPrevious ? ' ↩' : ''}</td><td>{s.shotId ?? '—'}</td><td>{s.durationSeconds}s</td><td>{s.summary}</td><td>{s.characters.join('、')}</td><td className={score ? (score.score < 75 ? 'is-low' : 'is-ok') : ''} title={score?.notes}>{score ? score.score : '—'}</td></tr>; })}</tbody></table>}
+        {story.shots.length > 0 && <table className="vs-plan-shots"><thead><tr><th>#</th><th>镜头</th><th>时长</th><th>画面</th><th>预演</th><th>一致性</th></tr></thead>
+          <tbody>{story.shots.map((s, i) => { const score = story.consistency[s.shotId ?? s.id]; const pvStatus = s.previz?.status ?? 'none'; return <tr key={s.id}><td>{i + 1}{s.continueFromPrevious ? ' ↩' : ''}</td><td>{s.shotId ?? '—'}</td><td>{s.durationSeconds}s</td><td>{s.summary}</td><td className={pvStatus === 'approved' ? 'is-ok' : pvStatus === 'rendered' ? 'is-warn' : ''}>{previzLabels[pvStatus] ?? pvStatus}</td><td className={score ? (score.score < 75 ? 'is-low' : 'is-ok') : ''} title={score?.notes}>{score ? score.score : '—'}</td></tr>; })}</tbody></table>}
         <button disabled={disabled || dirty} onClick={() => void act(() => controller.panelCommand('story.save', { projectId: project.id, expectedVersion: story.version, story: { status: 'empty' } }))}>撤销批准（让智能体重新规划）</button>
       </> : <p className="vs-muted">让智能体做多镜头或有角色的作品时，它会先提交计划给你审批。</p>}
     </section>

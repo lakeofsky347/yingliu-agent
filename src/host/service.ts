@@ -4,14 +4,17 @@ import {resolve,join,relative} from 'node:path';
 import {atomicRename} from './atomic-rename.ts';
 import {projectOpenPath} from './file-opener.ts';
 import {homedir} from 'node:os';
-import {createProject,compileSpec,defaultSceneSource,updateShot,updateTarget,validateProject,reorderShots} from '../core/index.ts';
-import type {VideoProject,StudioSnapshot,TaskState,EnvironmentSettings,ProviderGroup,RpcResult,SceneSource,Shot,ModelRoute,TtsSettings,AudioClip,VideoClip,Asset} from '../shared/types.ts';
+import {applyProductionPolicy,createProject,compileSpec,defaultProductionPolicy,defaultSceneSource,updateShot,updateTarget,validateProject,reorderShots} from '../core/index.ts';
+import type {VideoProject,StudioSnapshot,TaskState,EnvironmentSettings,ProviderGroup,RpcResult,SceneSource,Shot,ModelRoute,TtsSettings,AudioClip,VideoClip,Asset,ProductionMode,ProductionPolicy} from '../shared/types.ts';
+import {approveDirectorDocument,saveDirectorDocument} from '../director/document.ts';
+import {localExportQuality,localQualityFrames,type LocalQualityFrame,type LocalQualityReport} from '../workflows/local-quality.ts';
 import type {HostContext} from './platform.ts';
 import {ProjectStore,projectPath,validateStoredProject,validateSources} from './store.ts';
 import {VideoRenderer,detectEnvironment,renderCheckError} from './renderer.ts';
 import {sanitizeTaskFailure,taskFailure} from '../shared/task-diagnostic.ts';
 import {AppSceneGenerator,parseSceneSource,normalizeStoryboard} from './generator.ts';
 import {SpeechSynthesizer,extractVideoAudio} from './audio.ts';
+import {BlenderRunner,type PrevizSceneSpec} from './blender.ts';
 import {synthesizeLocalSfx} from '../media/local-sfx.ts';
 import type {MediaProjectPort} from '../jobs/contracts.ts';
 import {inspectGeneratedMedia,readProjectImage} from '../media/inspect.ts';
@@ -33,6 +36,7 @@ export class StudioService {
   private readonly baseDirectory:string;
   private readonly restoreRecent:boolean;
   private readonly speech=new SpeechSynthesizer();
+  private readonly blender=new BlenderRunner();
   private audioUrl:string|null=null;
   private currentExports?:{project:VideoProject;ids:Promise<string[]>};
   private tts:TtsSettings;
@@ -40,7 +44,7 @@ export class StudioService {
     this.baseDirectory=resolve(config.baseDirectory??process.env.YINGLIU_PROJECTS??join(homedir(),'Documents','YingliuAgentProjects'));
     this.restoreRecent=config.restoreRecent!==false;
     this.store=new ProjectStore({baseDirectory:this.baseDirectory,claimRoot:ctx.claimProjectRoot});
-    const env=detectEnvironment();this.settings={browserPath:env.browserPath,ffmpegPath:env.ffmpegPath,ffprobePath:env.ffprobePath};this.tts=defaultTtsSettings(env);
+    const env=detectEnvironment();this.settings={browserPath:env.browserPath,ffmpegPath:env.ffmpegPath,ffprobePath:env.ffprobePath,...(env.blenderPath?{blenderPath:env.blenderPath}:{})};this.tts=defaultTtsSettings(env);
     this.initialized=this.initialize();
   }
   private async initialize(){
@@ -299,7 +303,7 @@ export class StudioService {
   private async performRpc(endpoint:string,payload:unknown):Promise<RpcResult>{
     try{
       await this.initialized;if(this.disposed)throw new Error('应用服务已停止');const data=(payload??{}) as any;
-      if(['save','apply','saveSource','restoreSource','undo','redo','rename','retry','job.retry','import','audio','video.clip.save','video.clip.remove','video.clip.extract'].includes(endpoint))this.assertRevision(data,true);
+      if(['save','apply','saveSource','restoreSource','undo','redo','rename','retry','job.retry','import','audio','video.clip.save','video.clip.remove','video.clip.extract','production.set'].includes(endpoint))this.assertRevision(data,true);
       else if(['generate','export','preview'].includes(endpoint)&&data.expectedRevision!==undefined)this.assertRevision(data);
       switch(endpoint){
         case 'catalog':this.providers=await Promise.all(this.ctx.llm.listProviders().map(async p=>{try{return {...p,models:await this.ctx.llm.listModels(p.id)};}catch(error){return {...p,models:[],error:error instanceof Error?error.message:'模型目录读取失败'};}}));break;
@@ -312,6 +316,11 @@ export class StudioService {
             if(data.videoStyle!==undefined)project.videoStyle=normalizeVideoStyle(data.videoStyle);
             if(data.blank===true){project.shots=[];project.shotOrder=[];project.graph={positions:{'film-output':[375,140]},groups:[]};project.extensions.graphEdges=[];}
             project.extensions.brief={profile:String(data.profile??''),preset:String(data.preset??'')};
+            if(typeof data.productionMode==='string'&&['code_animation','model_video','hybrid'].includes(data.productionMode)){
+              const policy=defaultProductionPolicy(data.productionMode as ProductionMode);
+              if(policy.mode==='hybrid')policy.baseMode='code_animation';
+              project=applyProductionPolicy(project,policy);project.revision=0;
+            }
           }
           this.fitAudio(project);const created=await this.store.create({project,sources:data.sources??[],assetFiles:data.assetFiles??[]});this.root=created.root;this.project=created.project;this.task=null;
           if(!data.project)for(const shot of this.project.shots)await this.store.markSourceGood(this.root,shot).catch(()=>{});await this.refreshAfterCommit();break;
@@ -444,15 +453,109 @@ export class StudioService {
           return this.performRpc(task.request.endpoint,{...task.request.payload,expectedRevision:data.expectedRevision,_retryOf:task.id});
         }
         case 'cancel':this.controller?.abort(new Error('用户已取消'));break;
-        case 'environment':this.assertIdle();if(data.maxVideoBytes!==undefined){if(!Number.isSafeInteger(data.maxVideoBytes)||data.maxVideoBytes<1||data.maxVideoBytes>512*1024*1024)throw new Error('单个视频文件上限须为 1 字节至 512 MiB');this.settings.maxVideoBytes=data.maxVideoBytes;}for(const key of ['browserPath','ffmpegPath','ffprobePath'] as const)if(data[key]!==undefined){if(typeof data[key]!=='string')throw new Error('执行文件路径须为字符串');this.settings[key]=data[key];}await mkdir(this.baseDirectory,{recursive:true});await writeFile(join(this.baseDirectory,'environment.json'),JSON.stringify(this.settings,null,2));break;
+        case 'production.set':{
+          this.assertIdle();const current=this.required().project;
+          const mode=(data.mode??'unresolved') as ProductionMode;
+          const base=defaultProductionPolicy(mode);
+          const policy:ProductionPolicy={
+            ...base,
+            allowGeneratedImages:Boolean(data.allowGeneratedImages),
+            allowImportedVideo:Boolean(data.allowImportedVideo),
+            ...(mode==='hybrid'?{baseMode:(data.baseMode==='model_video'?'model_video':'code_animation') as 'code_animation'|'model_video'}:{}),
+            ...(mode==='hybrid'&&Array.isArray(data.shotIds)&&data.shotIds.length?{hybridGrants:[{id:randomUUID(),projectId:current.id,shotIds:data.shotIds.map(String),operations:(Array.isArray(data.operations)&&data.operations.length?data.operations:['code','video']) as ('code'|'video')[],confirmedAt:new Date().toISOString()}]}:{}),
+          };
+          const next=applyProductionPolicy(current,policy);
+          await this.persist(next,{},'更新制作策略');break;
+        }
+        case 'director.document.save':{
+          this.assertIdle();const current=this.required().project;
+          const document=saveDirectorDocument(current,data.plan,{expectedVersion:Number(data.expectedVersion??0)});
+          const next=structuredClone(current);next.extensions={...next.extensions,directorDocument:document};
+          await this.persist(next,{},'保存导演计划草稿');
+          return {ok:true,value:{document,snapshot:await this.snapshot()}};
+        }
+        case 'director.document.approve':{
+          this.assertIdle();const current=this.required().project;
+          const document=approveDirectorDocument(current,{expectedVersion:Number(data.expectedVersion),expectedHash:String(data.expectedHash??'')});
+          const next=structuredClone(current);next.extensions={...next.extensions,directorDocument:document};
+          await this.persist(next,{},'批准导演计划');
+          return {ok:true,value:{document,snapshot:await this.snapshot()}};
+        }
+        case 'quality.check':{
+          const {root,project}=this.required();
+          const sources:Record<string,SceneSource>={};
+          for(const shot of project.shots)sources[shot.id]=await this.store.readSource(root,shot).catch(()=>defaultSceneSource());
+          const requested=localQualityFrames(project,Number.isSafeInteger(data.maxFrames)?Number(data.maxFrames):12);
+          const samples:LocalQualityFrame[]=[];
+          for(const item of requested){
+            try{
+              const captured=await this.renderer.capture(root,project,this.settings,item.frame);
+              samples.push({shotId:item.shotId,frame:item.frame,bytes:await readFile(captured.path)});
+            }catch(error){
+              samples.push({shotId:item.shotId,frame:item.frame,error:error instanceof Error?error.message:String(error)});
+            }
+          }
+          const report=localExportQuality(project,sources,samples);
+          const reportFile=await projectPath(root,'.studio/local-quality.json');
+          await mkdir(join(root,'.studio'),{recursive:true});
+          await writeFile(reportFile,JSON.stringify(report,null,2)+'\n');
+          return {ok:true,value:report};
+        }
+        case 'quality.last':{
+          const {root}=this.required();
+          try{
+            const raw=await readFile(await projectPath(root,'.studio/local-quality.json'),'utf8');
+            return {ok:true,value:JSON.parse(raw) as LocalQualityReport};
+          }catch(error){
+            if((error as NodeJS.ErrnoException).code==='ENOENT')return {ok:true,value:null};
+            throw error;
+          }
+        }
+        case 'environment':this.assertIdle();if(data.maxVideoBytes!==undefined){if(!Number.isSafeInteger(data.maxVideoBytes)||data.maxVideoBytes<1||data.maxVideoBytes>512*1024*1024)throw new Error('单个视频文件上限须为 1 字节至 512 MiB');this.settings.maxVideoBytes=data.maxVideoBytes;}for(const key of ['browserPath','ffmpegPath','ffprobePath','blenderPath'] as const)if(data[key]!==undefined){if(typeof data[key]!=='string')throw new Error('执行文件路径须为字符串');this.settings[key]=data[key];}await mkdir(this.baseDirectory,{recursive:true});await writeFile(join(this.baseDirectory,'environment.json'),JSON.stringify(this.settings,null,2));break;
         case 'reveal':{const {root}=this.required(),target=await projectOpenPath(root,data.path==null?root:String(data.path));if(!this.ctx.reveal)throw new Error('当前运行器没有文件打开服务');await this.ctx.reveal(target);break;}
         default:throw new Error('未找到应用操作');
       }
       return {ok:true,value:await this.snapshot()};
     }catch(error){return {ok:false,error:{code:error instanceof Error&&'code' in error?String(error.code):'STUDIO_ERROR',message:error instanceof Error?error.message:String(error)}};}
   }
+  async renderPreviz(spec:PrevizSceneSpec,options:{shotId?:string;name?:string;bindPreviewClip?:boolean;signal?:AbortSignal}={}):Promise<{imageAssetId:string;videoAssetId?:string;width:number;height:number;fps:number;frameCount:number;revision:number}>{
+    await this.initialized;
+    const {root}=this.required();
+    const rendered=await this.blender.renderPreviz(root,spec,this.settings,{signal:options.signal});
+    options.signal?.throwIfAborted();
+    return this.enqueue(async()=>{
+      options.signal?.throwIfAborted();
+      const {root:currentRoot,project}=this.required();
+      const label=(options.name||'白模预演').trim().slice(0,80)||'白模预演';
+      const imageAsset=await this.store.importAsset(currentRoot,{name:`${label} · 预演帧.png`,description:'Blender 白模空间预演关键帧（参考用）',mime:'image/png',dataBase64:`data:image/png;base64,${Buffer.from(rendered.keyframePng).toString('base64')}`},this.settings);
+      imageAsset.provenance={origin:'code_render',usage:'reference_only'};
+      let videoAsset:Asset|undefined;
+      if(rendered.videoMp4){
+        videoAsset=await this.store.importAsset(currentRoot,{name:`${label} · 白模预演.mp4`,description:'Blender 白模动态预演视频（审阅用）',mime:'video/mp4',dataBase64:`data:video/mp4;base64,${Buffer.from(rendered.videoMp4).toString('base64')}`},this.settings);
+        videoAsset.provenance={origin:'code_render',usage:'reference_only'};
+      }
+      const next=structuredClone(project);
+      next.assets.push(imageAsset);
+      next.graph.positions[imageAsset.id]=[60,80+(next.assets.length-1)*180];
+      if(videoAsset){
+        next.assets.push(videoAsset);
+        next.graph.positions[videoAsset.id]=[60,80+(next.assets.length-1)*180];
+      }
+      if(options.shotId){
+        const shot=next.shots.find(item=>item.id===options.shotId);
+        if(shot){
+          if(!shot.referenceIds.includes(imageAsset.id))shot.referenceIds.push(imageAsset.id);
+          if(videoAsset&&options.bindPreviewClip&&next.schemaVersion!==3){
+            next.videoClips=[...(next.videoClips??[]).filter(item=>item.shotId!==shot.id),{id:randomUUID(),shotId:shot.id,assetId:videoAsset.id,trimStart:0,speed:1,fit:'cover',audio:'mute'}];
+          }
+        }
+      }
+      await this.persist(next,{},'Blender 白模预演');
+      return {imageAssetId:imageAsset.id,...(videoAsset?{videoAssetId:videoAsset.id}:{}),width:rendered.width,height:rendered.height,fps:rendered.fps,frameCount:rendered.frameCount,revision:this.required().project.revision};
+    });
+  }
   async dispose(){
     this.disposed=true;this.controller?.abort(new Error('应用已停止'));await Promise.allSettled([this.initialized,this.commands,this.job]);await this.commands.catch(()=>{});
-    const results=await Promise.allSettled([this.speech.close(),this.renderer.close()]);const failed=results.find(result=>result.status==='rejected');if(failed?.status==='rejected')throw failed.reason;
+    const results=await Promise.allSettled([this.speech.close(),this.blender.close(),this.renderer.close()]);const failed=results.find(result=>result.status==='rejected');if(failed?.status==='rejected')throw failed.reason;
   }
 }

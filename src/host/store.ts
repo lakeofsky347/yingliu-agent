@@ -63,7 +63,7 @@ async function atomicWrite(file:string,data:string|Buffer):Promise<void> {
 }
 function json(value:unknown):string { return JSON.stringify(value,null,2)+'\n'; }
 function assertProjectShape(project:VideoProject):void {
-  if(!project||![1,2].includes(project.schemaVersion)||typeof project.id!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(project.id)||!Array.isArray(project.assets)||!Array.isArray(project.shots)||!Array.isArray(project.shotOrder)||!Array.isArray(project.outputs)||!project.target||!project.graph)throw new Error('Unsupported or damaged project.json');
+  if(!project||![1,2,3].includes(project.schemaVersion)||typeof project.id!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(project.id)||!Array.isArray(project.assets)||!Array.isArray(project.shots)||!Array.isArray(project.shotOrder)||!Array.isArray(project.outputs)||!project.target||!project.graph)throw new Error('Unsupported or damaged project.json');
 }
 function assertSource(source:SceneSource):void {
   if(!source||!['html','css','js'].every(key=>typeof source[key as keyof SceneSource]==='string'))throw new Error('Scene source requires html, css and js strings');

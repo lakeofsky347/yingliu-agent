@@ -145,6 +145,8 @@ try{
   assert.equal(visionRequests,1);
   pass('协作制作按独立授权发送关键帧，导演与场景接口只接收文本');
   await page.screenshot({path:join(output,'workflow.png'),fullPage:true});
+  const chatTab=page.getByRole('tab',{name:'创作对话',exact:true});
+  if(await chatTab.count())await chatTab.click();
   const chat=page.getByRole('complementary',{name:'创作对话'});
   await chat.getByText('本次参考图',{exact:true}).click();
   const permission=chat.getByRole('checkbox',{name:'允许视觉模型处理本次选择的图片'});

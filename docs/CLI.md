@@ -52,7 +52,7 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 
 | 命令 | data |
 |---|---|
-| `doctor` | `{ok, checks:[{name:"node"|"ffmpeg"|"ffprobe"|"chromium", ok, detail}], dataDirectory, projectsDirectory}` |
+| `doctor` | `{ok, checks:[{name:"node"|"ffmpeg"|"ffprobe"|"chromium"|"blender", ok, detail, optional}], dataDirectory, projectsDirectory}`（`blender` 为可选预演项，缺失不影响 `ok`） |
 | `project create --title T [--topic T] [--style ID]` | `{id, title, root, revision, videoStyle?}` |
 | `styles list` | `[VideoStyle]`（风格库条目，可用作 `project create --style <id>`） |
 | `project list [--include-archived]` | `[{id, path, title, createdAt, updatedAt, archived?}]` |
@@ -62,6 +62,7 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 | `agent run --project ID --goal G [选项]` | Run（见下） |
 | `agent status <runId> [--trace]` | Run；加 `--trace` 时附带 `trace:[事件]` |
 | `agent resume <runId> [--upload-consent I \| --skip-upload]` | Run |
+| `agent send <runId> --message <补充指令>` | Run（多轮续聊或中途纠偏） |
 | `agent approve <runId> --call C --exec E [--args-hash H]` | Run（execId 必填；过期会返回 ERROR） |
 | `agent reject <runId> --call C --exec E [--reason R]` | Run |
 | `story show <projectId>` | Story |

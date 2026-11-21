@@ -12,6 +12,7 @@ interface AgentFeedOptions {
   connect:(signal:AbortSignal)=>Promise<Response>;
   onRuns:(runs:PublicRun[])=>void;
   onLive:(live:boolean)=>void;
+  onDelta?:(runId:string,text:string)=>void;
   pollMs?:number;
 }
 /** One project-scoped subscription. A closed stream falls back to non-overlapping polling. */
@@ -38,8 +39,12 @@ export class AgentRunFeed {
       void this.refresh().catch(()=>{});
       const decoder=new TextDecoder();let buffer='';
       while(this.active){const next=await reader.read();if(!this.active||next.done)break;buffer+=decoder.decode(next.value,{stream:true});const parsed=parseSse(buffer);buffer=parsed.rest;
-        for(const event of parsed.events)if(event.type==='run'){
-          this.revision++;this.publish([event.run,...this.runs.filter(run=>run.id!==event.run.id)].sort((a,b)=>b.createdAt.localeCompare(a.createdAt)));
+        for(const event of parsed.events){
+          if(event.type==='run'){
+            this.revision++;this.publish([event.run,...this.runs.filter(run=>run.id!==event.run.id)].sort((a,b)=>b.createdAt.localeCompare(a.createdAt)));
+          }else if(event.type==='delta'){
+            this.options.onDelta?.(event.runId,event.text);
+          }
         }
       }
     }catch{/* The list API remains available when streaming fails. */}

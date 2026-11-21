@@ -1,121 +1,133 @@
-# 映流智能体（Yingliu Agent）
+# 映流智能体（`yingliu-agent`）
 
-> 本仓库是映流的**智能体版**，源自 [yingliu-studio](https://github.com/lakeofsky347/yingliu-studio)（保留完整 git 历史，从其 `feat/story-consistency` 分支 0.5.0 拆出）。许可证：GPL-3.0-only（见 [LICENSE](LICENSE)）。
+**由导演智能体驱动的本地视频创作应用与无头命令行：自主规划、工具执行、人类审批、实时画布联动与本地 MP4 导出。**
 
-## 与「映流 Studio」固定流程工作台的区别
+`yingliu-agent`（当前版本 **1.1.0**）是映流系列的**智能体旗舰版**。它在完整独立桌面工作台（已对齐基座 1.0.0 全部工作台能力）之上，将**导演智能体循环**与**可视化分镜工作台**深度打通，并附带可供其他 AI 智能体和自动化脚本直接调用的 **`yingliu` Headless CLI**。
 
-| | 映流 Studio（yingliu-studio） | 映流智能体（本仓库） |
-| --- | --- | --- |
-| 定位 | 固定流程工作台：简报 → 分镜 → 画面 → 配音 → 导出，人手动推进 | 导演智能体在工具循环里规划、执行、自检，人负责审批与把关 |
-| 核心 | 节点图、对话导演、固定协作流程 | 创作计划（story.json）与计划审批、角色库与一致性打分、能力热切换的多模态工具、项目预算、导出前质检 |
-| 固定流程 | 主要工作方式 | 保留为智能体的宏工具 `run_workflow`（需审批），工作台界面仍可用 |
-| 包名 / 应用名 | `yingliu-studio` / 映流 Studio | `yingliu-agent` / 映流智能体 |
-| 数据目录 | 系统 appData 下 `映流 Studio`；工程默认 `~/Documents/YingliuProjects` | 系统 appData 下 `yingliu-agent`；工程默认 `~/Documents/YingliuAgentProjects` |
-| 浏览器开发端口 | 19440 | 19440 |
+> **映流三仓库对照（选哪个？）**
+>
+> | 仓库 | 形态 | 适合场景 |
+> | --- | --- | --- |
+> | `yingliu-video-studio` | DSH Desktop 插件（v1.0.0） | 已在使用 DSH，希望在会话旁直接打开工作台并联动 DSH 会话／子代理 |
+> | `yingliu-studio` | 独立 Electron 桌面应用（v0.5.0） | 不依赖 DSH，偏好由人一步步手动推进的独立桌面工作台 |
+> | **`yingliu-agent`（本仓库）** | 智能体独立桌面应用 + CLI（v1.1.0） | 希望导演智能体自主规划、执行、质检并与工作台实时联动，或用 `yingliu` CLI 自动化出片 |
+>
+> *与 `yingliu-studio` 可同时安装：数据目录（`yingliu-agent`）、默认工程目录（`~/Documents/YingliuAgentProjects`）与浏览器开发端口（`19440`）完全隔离，也可通过 `YINGLIU_DATA_DIR` / `YINGLIU_PROJECTS` 自定义。*
 
-两个应用可以同时安装，数据、凭据、工程互不共用（两边都可用 `YINGLIU_DATA_DIR` / `YINGLIU_PROJECTS` 显式指定目录，请勿指向同一位置）。
+---
 
-智能体设计见 [docs/AGENT.md](docs/AGENT.md)，0.5 方案见 [docs/ROADMAP-0.5.md](docs/ROADMAP-0.5.md)。以下为沿用自工作台的通用说明。
+## 快速开始
 
-2026-10-27 的本地与远端核对、缺陷清单、逐项施工和本轮验收见 [工作区施工计划](docs/DEVELOPMENT-PLAN-2026-10-27.md)。本轮以 `main@5ff743e` 为基线，完善同工程智能体互斥、项目预算执行边界、角色与预算草稿保护、素材/音轨版本检查，以及同步媒体产物恢复。
+### 环境要求
+- **运行源码 / CLI**：Node.js ≥ 22.18
+- **渲染预览与导出 MP4**：本机安装 Chrome / Chromium、FFmpeg 与 ffprobe（首页与 `yingliu doctor` 会自动探测，也可在工作台 **运行环境** 手填绝对路径）
+- **Blender 3D 白模预演（可选）**：本机安装 Blender（建议 ≥ 3.6）后，智能体自动激活白模预演能力，在分镜确认后先做 3D 白模场景/运镜预演供审阅，通过后再交给创作模型实际呈现
 
-剩余可靠性工作与三平台原生验收入口见 [2026-10-28 剩余施工计划](docs/REMAINING-PLAN-2026-10-28.md)。应用包版本为 `1.1.0`，版本记录见 [CHANGELOG.md](CHANGELOG.md)。
+### 方式 A：启动桌面应用或浏览器界面
 
-
-映流是一个本地视频创作应用。先填写影片简报，再与自己的模型讨论、构建初稿；也可以从空白节点图开始，亲手安排镜头、画面和声音。现在还可分别连接文本、生图、生视频和配音模型，在同一工程中混合代码场景与视频片段，随后预览、导出 MP4、备份和继续编辑。
-
-应用支持结构化创作计划与审批、角色库和一致性打分、项目预算、导出前质检、尾帧承接和配音对齐。异步任务模板支持通义万相、可灵、即梦/火山方舟、Runway、Replicate、ElevenLabs 等。应用拥有独立 Electron 窗口、项目首页、凭据、工程历史和制作任务。 [智能体使用说明](docs/AGENT.md)
-
-本轮功能、测试、打包结果及未验收范围见 [0.3.0 多模型验收](docs/ACCEPTANCE-MULTIMODAL.md)；完整本地成片验收可运行 `npm run verify:film`。
-
-## 打开应用
-
-源码运行需要 Node.js ≥ 22.18：
-
-```sh
+```bash
 npm ci
-npm start
+npm start        # 启动 Electron 桌面窗口（密钥经系统 safeStorage 加密保存）
+# 或
+npm run dev      # 启动本地浏览器服务，默认 http://127.0.0.1:19440（密钥仅存内存）
 ```
 
-`npm run package:app` 使用当前系统安装的 Electron，输出本机架构的独立应用：
+> 首次打开空工作区会自动弹出可跳过的 **新手引导**，引导快速配置文本与视觉理解模型（新工作区默认预填 OpenAI 兼容地址，已有 DeepSeek 与自定义配置继续保留）。
 
-| 系统 | 输出与启动入口 |
-| --- | --- |
-| macOS | `artifacts/映流智能体.app`，保留本机 ad-hoc 临时签名流程 |
-| Windows | `artifacts/yingliu-agent-win32-<arch>/yingliu-agent.exe` |
-| Linux | `artifacts/yingliu-agent-linux-<arch>/yingliu-agent.sh` |
+### 方式 B：用 `yingliu` CLI 无头调用（适合其他智能体与脚本）
 
-Windows/Linux 请移动或分发完整目录。应用包不包含工作区用户数据、模型密钥或开发依赖，不需要源码目录或系统 Node.js。Linux 需要桌面环境及 Electron 所需系统动态库；以普通用户启动，保留 Chromium sandbox。运行包内 `install-desktop-entry.sh` 可安装当前用户的应用菜单入口，移动目录后请重新运行该脚本。打包不会自行安装菜单入口。
+无需接入 MCP 或 IPC，安装依赖后即可用一行 JSON 和固定退出码驱动整条制片流水线：
 
-如需显式校验目标，例如 Linux x64：`npm run package:app -- --platform=linux --arch=x64`。目标必须与当前宿主及实际 Electron runtime 一致；Windows、macOS、Linux 和 x64/arm64 包分别在对应系统与架构上构建。
+```bash
+scripts/setup-cli.sh                              # 构建并检查本机渲染环境（可选 --link 装入 PATH）
+export YINGLIU_DATA_DIR=/tmp/yl-demo/data         # 建议用独立数据目录隔离测试与 --mock 运行
 
-应用包包含 Electron、界面、工程服务、ZIP 备份模块及浏览器驱动。逐帧捕获需要本机 Chrome/Chromium，编码需要 FFmpeg、ffprobe。首页显示检测结果；工程工作台的「运行环境」可选择或填写可执行文件绝对路径。缺少渲染工具时仍可编排分镜、导入素材和编辑源码。
+yingliu doctor --json                             # 检查 Node / Chromium / FFmpeg / ffprobe
+yingliu styles list --json                        # 查看风格库
+P=$(yingliu project create --title "10秒片头" --json | jq -r .data.id)
+# 也支持带风格创建：yingliu project create --title "纸艺短片" --style <styleId> --json
 
-浏览器开发入口：`npm run dev`，默认 `http://127.0.0.1:19440`。浏览器模式的模型密钥仅存在于服务进程内存，重启后需要重新填写；桌面模式通过 Electron safeStorage 加密保存。
+# 使用本地模拟导演跑通「规划 → 建镜 → 导出审批」（不走外网，遇导出审批返回 exit 4）
+yingliu agent run --project "$P" --goal "做一个 10 秒片头" --mock --json
+yingliu agent status <runId> --json               # 查看 pending.callId 与 pending.execId
+yingliu agent approve <runId> --call <callId> --exec <execId> --mock --json
+yingliu export mp4 "$P" --out ./out.mp4 --json
+```
 
-## 完整制作流程
+完整 CLI 参数、退出码表与安全约定见 [docs/CLI.md](docs/CLI.md)。
 
-1. 没有影片的工作区首次启动会打开「新手引导」，可直接配置模型或进入新建影片。引导可跳过，也可从应用顶部再次打开。在「我的影片」点击「新建影片」，填写名称、主题、目标片长、输出规格、创作方向与可选的**自定义视频制作风格**（支持从顶部或向导进入「风格库」导入 `.md` / `.txt` / `.json` / `.zip` 或文件夹，纯文本随工程保存）。「从空图开始」可手动制作，「让模型构建初稿」会先保留简报，再开始可取消的创作请求。
-2. 「模型设置」可分别配置文本和视觉理解接口。新工作区预填 OpenAI 的 `https://api.openai.com/v1` 和 `gpt-4.1-mini`。在应用内为所需接口填写 API Key。已有 DeepSeek／自定义配置继续按原设置使用。「高级模型中心」可以分配导演、场景代码、视觉检查、生图、生视频和配音等角色。文本和视觉连接检查只查询模型目录。
-3. 对话中「讨论」交流结构与方案；「构建初稿」生成分镜和可编辑场景；「修改」调整当前镜头或整片。失败、取消和意外中断有持久状态，可重试。模型先规划和校验整次修改，再提交一个工程版本。
-4. 在舞台切换「监视器」「分镜画布」或「分栏」，也可在顶部 `更多操作` 切换深色 / 浅色（Marble White）工作台主题。画布可连接镜头和素材，缩略导航用于查看全图。时间线按镜头时长显示片段，可拖动排序，按 Alt ← 或 Alt → 也可移动选中的片段。右侧属性面板用来编辑文字、颜色、运动、时长和素材关联。尚未连接完成的分镜也可保存，预览和导出时会提示缺少的连接；编辑后约 1.2 秒后台自动准备预览，不锁定输入框。
-5. 导入 PNG/JPEG/WebP 图片、文字、音频和视频。在镜头属性的「视频片段」中设置裁入、裁出、速度、画面适应和原声策略；在声音面板设置旁白、音乐、音效、增益和片段位置，或使用**本地合成音效**离线确定性生成提示音/扫频/风声并加入音轨。可直接编辑每镜 HTML/CSS/JS，**源码草稿会自动本地保留**并在未保存时阻止误触发预览/导出，「恢复上次可用」和持久撤销可用于修复。
-6. 监视器显示最新保存的预览，并与时间线共享播放位置。点击帧号可跳到指定帧，在预览菜单中可保存当前帧 PNG。工作台实时订阅当前工程的**智能体运行状态**，等待批准或运行中会在顶部显示状态胶囊，步骤提交后自动刷新分镜与预览；底部抽屉集中提供智能体、协作、素材、配音、源码、任务、历史和成片等面板，「导出成片」顶部展示导出前质检与版本核对及每份成片的质量摘要。
-7. 返回首页可搜索、打开、重命名、复制、归档和恢复影片。「修改历史」支持重启后的撤销、重做；「备份工程包」保存 `.yingliu`，导入时创建新的独立工程。也可用 `yingliu` CLI（含 `yingliu styles list` 与 `yingliu project create --style <id>`）无头编排与导出。
+---
 
-备份包含当前分镜、创作简报、场景源码与素材，不包含对话、完整撤销历史、任务日志或已导出视频。复制工程也不继承旧对话和导出。归档保留原文件，可以恢复。桌面工程包采用流式读写，媒体单文件上限 512 MiB，元数据单文件上限 24 MiB，包与解压总量须小于 4 GiB（预留 ZIP32 开销），最多 256 个条目，接口允许逐次下调单文件及总量限额。视频原件与规范化副本分别保存并计入包大小。浏览器传输工程包限 64 MiB；较大工程请用桌面文件入口。新工程包为 v2，仍可导入 v1。
+## 核心功能全景
 
-## 模型与素材生成
+### 1. 导演智能体：四阶段预演与创作闭环
+- **四阶段标准创作流水线**：**① 对话确认分镜**（`plan_story`/`plan_shots` 审阅批准）→ **② Blender 白模预演**（`blender_render_previz` 搭建白模人物站位、道具与机位运镜，无头渲染关键帧 PNG 与动态 MP4）→ **③ 用户审阅预演**（`submit_previz_review` 审批卡片直接看白模图/视频，不满意可零付费成本重调重渲）→ **④ 创作模型实际呈现**（预演通过后自动将白模参考帧输入生视频/生图/镜头代码模型完成最终呈现与质检导出）。详见 [docs/AGENT.md](docs/AGENT.md)。
+- **主位统一 AI 副驾驶**：将智能体从底部抽屉提升为主工作台左侧可折叠主副驾驶面板（与基座 1.0.0 Marble White / 深色美术风格 100% 对齐），内置 **「智能体 / 计划与预演 / 创作对话」** 分段切换；支持 **SSE 流式思考输出**、**多轮追问与运行中中途纠偏（`agent.message`）**、以及**只读非视觉工具安全有界并行**。
+- **结构化制片资产与风险审批**：支持创作计划审阅表、角色库与视觉一致性打分（最多 6 帧）、尾帧承接、配音时长对齐、视频片段裁剪/变速/抽原声、项目级费用账本与预算上限；收费生成、导出与计划/预演审阅默认须由人一次性批准（绑定 `execId` 与参数哈希）。
+- **能力热切换与兜底**：随模型中心与本地环境实时增减工具——未接入外部模型时由导演用代码动效与本地音效合成兜底；未安装 Blender 时自动平滑回退直出流程。
 
-打开工作台的 **模型与素材生成 → 配置模型连接**，选择协议、填写服务地址及认证，再添加模型并分配角色。首批协议包括 Chat Completions、Images Generations、映流媒体网关 v1 和 Speech；本地无认证服务可以显式选择无认证。不同协议由各自适配器处理，任意厂商地址不一定兼容。
+### 2. 全量对齐基座 1.0.0 的可视化工作台与美术设计
+- **统一 1.0.0 Marble White / 深色双主题**：彻底消除旧版暗黑双顶栏外壳；首页（`ProjectHome`）、新建影片向导、单顶栏工作台（`StudioHeader`）、左侧智能体副驾驶与全部弹窗全面使用 `--vs-*` 语义 Token。
+- **Schema v3 制作策略与导演计划文档**：支持显式制作模式隔离（`code_animation` / `model_video` / `hybrid` 单镜头授权）与结构化导演计划文档（角色、空间布局 `worldLayouts`、镜头要求与版本哈希防覆盖）。
+- **多视图舞台、后台自动预览与源码草稿持久化**：监视器 / 分镜画布 / 分栏切换、缩略图卡片与小地图、时间线拖拽与快捷键、1.2 秒防抖后台自动预览、按工程与镜头持久化的源码草稿与防误操作保护。
 
-- **图片／视频生成**：选择模型和目标镜头，填写描述及参数。图生视频还需选择当前工程／镜头的图片并允许本次上传。生成结果先下载、检查，成为「待采用」素材；点击采用后才写入工程。
-- **本地视频**：小文件可从素材导入选择视频；较大视频使用面板内的绝对路径入口。视频需 FFmpeg／ffprobe，文件路径导入默认及硬上限为 512 MiB，可通过环境设置下调；原件与规范化副本分别检查限额。浏览器内存视频导入上限 32 MiB。每镜头支持一段主视频，允许叠加代码文字和图形。
-- **协作制作**：选择代码、图片或视频画面路径，可启用配音和实际关键帧检查。已有镜头范围内生成候选结果后统一提交；空工程会先建立可编辑分镜，再制作画面。流程暂停或失败时保留已完成产物，版本冲突需明确采用。
+### 3. 自定义视频风格库
+- 在首页、顶栏或新建向导进入 **风格库**，支持新建／编辑／删除，或导入 **Markdown、TXT、JSON、ZIP 风格包与风格文件夹**（仅读取纯文本，绝不执行风格包里的任何代码）。
+- 选用风格新建影片后，风格快照随工程独立保存，并统一注入**创作对话、分镜与场景生成、协作制作工作流以及智能体**（支持 `styles_list` / `project_set_style` 工具与 `yingliu styles list` / `yingliu project create --style <id>`）。
 
-生视频服务须实现 [映流媒体网关 v1](docs/media-gateway-v1/README.md)。应用只提供客户端和协议文档，不附带公共网关。生成任务使用自己的持久 ID，重启可查询原任务；“停止等待”不代表云端取消，兼容生图提交回执丢失时也不会自动重投。
+### 4. 官方多厂商模型协议、音频生成与导出前质检
+- **官方多厂商协议直连 + 通用异步模板共存**：已全量接入基座 1.0.0 官方协议适配器（`openai-videos`、`kling-video` 含 `accessKey:secretKey` 自动签发 HS256 JWT、`minimax-video`、`volc-video` 火山方舟 Seedance、`dashscope-video` 百炼万相、`gemini-image`、`gemini-video` Veo、`images`、`video-gateway`、`speech`），支持**服务端模型目录自动发现（`models.discover`）**与**提交前能力强校验（`validateMediaRequest`）**；同时保留可配置 **`async-task` 通用模板**（支持 ElevenLabs TTS/SFX、Replicate MusicGen 等自定义接口）。
+- **完整音频链路与人工 UI 入口**：`speech` 角色绑定 `async-task` 时自动走模板适配器；**声音与配音** 面板新增 **「AI 音乐与音效生成」** 人工入口（`audio.generate`），与本地离线确定性合成音效（`audio.sfx`）及多轨混音无缝协作。
+- **双轨导出前质检与成片留证**：**导出成片** 面板同时集成 `agent.qc` 与基座 1.0.0 `LocalQualityPanel` / `ExportQualityReport`（本地抽样帧分析、音轨元数据与 SHA-256 成片报告留证）。
 
-详细使用方式、事务边界和当前限制见 [多模型与多模态制作](docs/MULTIMODAL.md)。
+### 5. 工程历史、打包与备份
+- **持久历史与 `.yingliu` 备份**：修改历史跨重启支持撤销／重做；支持重命名、复制、归档／恢复与 `.yingliu` 工程包流式导出／导入（含分镜、简报、源码、素材及智能体 `story` / `ledger` / `qc`，不含对话日志与大型导出成片）。
+- **单一数据所有者锁**：CLI、桌面应用与浏览器服务共用基于目录身份的本机 TCP listener 锁（v2 协议，支持多槽位防碰撞），进程异常退出由系统自动释放，桌面端遇占用时会明确提示重试、等待或退出。
 
-## 模型与创作方向
+---
 
-支持兼容 `/chat/completions` 的普通 JSON 和 SSE 响应，可设置温度、输出 token、超时和上下文预算。创作镜头数量按需求为 1–12，可添加、删除、重排并修改素材、音轨、输出参数与场景代码。普通对话不创建工程，也不触发预览。
+## 打包独立应用
 
-模型密钥保存在本应用的凭据服务。创作对话向导演或场景代码模型发送文本。在本轮明确选择图片并授权后，应用会把所选 PNG/JPEG/WebP 发送到已启用的视觉理解接口，让该接口的文字分析参与创作。图片发送受数量、尺寸、字节和镜头素材范围限制。
-
-工作包的六种创作方向保留 recipe 的配色、构图与运动说明，并保存选择、版本及输出 profile 到简报。recipe 保持 `design_proposal`：它们指导模型创作，不等同六套已验证的固定视觉模板。
-
-## 保存与恢复
-
-同一工程的写操作排队并检查 `expectedRevision`。工程及全部镜头源码组成不可变版本，以一个原子状态指针提交；`project.json` 与镜头文件是可修复的投影。请通过应用修改工程，不要直接覆盖已打开工程的投影文件。
-
-关闭前应用会请求编辑器保存，保存失败可继续编辑；运行中的模型或制作任务会询问是否取消后退出。重启将未完成的本地制作任务标记为中断，保留最后已提交版本；这些任务可从当前工程重试，没有逐帧断点续渲。媒体生成任务另行持久化，恢复时查询原远程任务或重取结果；协作流程恢复会复用已记录的完成步骤。场景代码失去响应会显示有界错误，原生「重新加载画面」可重置本应用的无特权画面进程。
-
-## 开发与验收
-
-```sh
-npm run typecheck
-npm test
-npm run build
-npm run verify:editor
-npm run verify
+```bash
 npm run package:app
-node scripts/verify-package.mjs
-node scripts/verify-package.mjs --layout-only
 ```
 
-`verify` 使用隔离数据目录和实际 localhost 模型测试网关，操作 Electron 界面、检查工程流转，实际捕帧、编码、完整解码并播放六秒带合成验收音的 MP4。真实供应商的创作与 TTS 质量需另行验证。设置 `YINGLIU_VERIFY_EXECUTABLE` 为搬迁后的应用可执行文件绝对路径时，会直接启动该打包应用并执行同一套成片验收。结果在 `artifacts/acceptance-v03/`；源码、测试和脱敏验收摘要提交远端，凭据、项目、日志和大型媒体不提交。
+| 平台 | 构建产物与入口 |
+| --- | --- |
+| macOS | `artifacts/映流智能体.app`（保留本机 ad-hoc 临时签名） |
+| Windows | `artifacts/yingliu-agent-win32-<arch>/yingliu-agent.exe`（请整目录移动） |
+| Linux | `artifacts/yingliu-agent-linux-<arch>/yingliu-agent.sh`（可运行包内 `install-desktop-entry.sh` 安装菜单入口） |
 
-`verify:editor` 使用真实 Chromium、临时工程和智能体回执 fixture，检查角色/预算草稿、跨工程隔离、关闭保护、保存失败及智能体执行入口。报告和截图保存在 `artifacts/acceptance-editor-safety/`；它不调用模型，也不替代原生 Electron 或真实供应商验收。
+> Electron 固定为 `44.9.3`（Node 侧 HTTP 请求通过 `src/host/http.ts` 统一安装 `undici@7.30.1` 以规避内置 Undici 漏洞）。实验性 Tauri 2 壳（`src-tauri/`）默认不启用、不参与打包，Electron 是当前唯一受支持的桌面壳。
 
-`node scripts/run-platform-acceptance.mjs` 对本机包执行完整平台验收：真实 Chrome、FFmpeg/ffprobe、Electron 桌面与系统钥匙环均为必需。脚本搬迁应用包后验证 GUI 和成片，随后验证本机源服务的模型界面、多模态制作及编辑器；只在 `artifacts/platform-acceptance/` 写出可上传的允许字段摘要。新 CI `Native and media acceptance` 为各系统安装这些环境后运行同一入口，失败或缺检查不算通过；干净机器安装和人工观片仍另行验收。
+---
 
-`verify-package` 将本机包复制到源码目录之外，检查平台入口、相对软链接、许可证和完整依赖，再用包内 Electron 的 Node 模式启动独立服务，验证界面文件、工程创建及 ZIP 备份恢复。有图形环境时继续验证真实桌面界面与渲染；`--layout-only` 或 Linux 缺少显示服务时明确记为 `SKIP`，报告为 `PARTIAL`，不会视作桌面验收。结果保存在 `artifacts/acceptance-v03/package-verification-<platform>-<arch>.json`；临时目录和测试数据验证后清理。
+## 开发与验证命令
 
-Electron 固定为 `44.9.3`。其内置 Undici 仍为 `7.29.1`，存在 [异常 Content-Encoding 导致进程退出的问题](https://github.com/nodejs/undici/security/advisories/GHSA-xjj6-f33q-929c)。应用的 Node 请求通过 `src/host/http.ts` 安装固定生产依赖 `undici@7.30.1` 的 Fetch API，覆盖桌面、CLI、开发服务的模型、媒体、配音与下载路径；运行包同时包含该依赖和许可证。此措施修复应用请求路径，未改写 Electron 二进制中的内置版本。渲染器继续使用 Chromium Fetch API，CLI `--mock` 的禁止外网规则继续生效。`tests/undici-security.test.ts` 在隔离进程验证异常响应、取消、SRI 校验、模拟模式和实际 Electron 运行时；CI 在测试前显式准备 Electron，避免原生回归因未安装二进制而跳过。
+```bash
+npm run typecheck          # TypeScript 类型检查
+npm run build              # 构建 UI、Web 服务、桌面主进程/预加载与 CLI
+npm test                   # 全量单元、智能体、CLI、存储与真实 Chromium 交互测试
+npm run verify:editor      # 真实 Chromium 编辑器草稿安全与智能体互斥验收
+npm run verify:models      # 多模型界面、费用试算与媒体流程验收（本地模拟服务）
+npm run verify:film        # 本地多模态成片闭环验收
+npm run verify             # Electron 桌面界面 + 6 秒合成音 MP4 渲染解码验收
+node scripts/verify-package.mjs --layout-only   # 应用包布局检查
+```
 
-已有 macOS arm64 本机原生验收，签名仍为临时签名、尚未公证。Windows/Linux 使用可携带目录打包，尚未签名或制作安装器；Linux 包已有布局和包外服务验证，各系统的原生及跨机器验收仍按具体版本记录。截至 2026-10-27 核对，主线 `5ff743e` 的 [Platform checks 40169024170](https://github.com/lakeofsky347/yingliu-agent/actions/runs/40169024170) 在 macOS、Windows、Ubuntu 均成功；该历史结果不替代后续提交的验证。Chrome/FFmpeg 由用户提供。Linux 无安全钥匙环时不保存新密钥，仍可手动制作和清除旧密钥。本地协议／媒体测试不等同真实供应商质量验收，也不延伸历史记录中的平台验收结论。没有云端成片渲染、多人实时编辑或通用节点市场。
+---
 
-本仓库自有代码及随仓提供的用户自有工作包数据采用 [GNU GPL 第 3 版](LICENSE)，仅限第 3 版（SPDX：`GPL-3.0-only`）。版权和来源说明见 [NOTICE](NOTICE)；历史 Apache-2.0 与 MIT 许可全文分别保留在 [licenses/Legacy-Apache-2.0.txt](licenses/Legacy-Apache-2.0.txt) 和 [licenses/Legacy-MIT.txt](licenses/Legacy-MIT.txt)。第三方组件继续适用各自的许可，详见[第三方声明](THIRD_PARTY_NOTICES.md)。
+## 安全边界与已知限制
 
-[多模型与多模态制作](docs/MULTIMODAL.md) · [媒体网关 v1](docs/media-gateway-v1/README.md) · [架构与恢复协议](docs/ARCHITECTURE.md) · [模型导演协议](docs/MODEL-PROTOCOL.md) · [验收证据](docs/ACCEPTANCE.md) · [平台适配进度](docs/PLATFORM-SUPPORT.md) · [提取来源](docs/ORIGIN.md) · [第三方许可](THIRD_PARTY_NOTICES.md)
+- **事务与沙箱**：同一工程写操作串行排队并校验 `expectedRevision`；文件定位严格限制在工程根目录内；场景代码运行在无 Node / IPC / 凭据权限的隔离环境中。
+- **凭据与隐私**：桌面密钥存系统安全存储，CLI 仅记录环境变量名（`--api-key-env`）而不落盘明文密钥；日志与轨迹自动脱敏；`--mock` 模式下拦截所有非本地模拟网关的外部网络请求。
+- **已知限制**：发行构建目前未签名、未公证且未提供系统安装器；本地 mock／协议验收不等同真实付费供应商画质与语音质量验收；不支持云端成片渲染或多人实时协同。
+
+---
+
+## 文档索引与许可
+
+- **智能体与 CLI**：[智能体使用说明](docs/AGENT.md) · [CLI 完整手册](docs/CLI.md) · [0.5 方案](docs/ROADMAP-0.5.md) · [工作台设计](docs/FRONTEND-REDESIGN.md)
+- **多模态与架构**：[多模型与多模态](docs/MULTIMODAL.md) · [媒体网关 v1](docs/media-gateway-v1/README.md) · [架构与恢复协议](docs/ARCHITECTURE.md) · [模型导演协议](docs/MODEL-PROTOCOL.md) · [工程包格式](docs/ARCHIVE.md)
+- **版本与验收**：[更新记录](CHANGELOG.md) · [v1.0.0 交付说明](docs/DELIVERY-v1.0.0.md) · [验收证据](docs/ACCEPTANCE.md) · [多模型验收](docs/ACCEPTANCE-MULTIMODAL.md) · [平台适配进度](docs/PLATFORM-SUPPORT.md) · [项目来源](docs/ORIGIN.md)
+- **许可证**：自有代码及随仓工作包数据采用 **GPL-3.0-only**（[LICENSE](LICENSE)）；版权与来源说明见 [NOTICE](NOTICE)，历史许可留存见 [Legacy-Apache-2.0](licenses/Legacy-Apache-2.0.txt) / [Legacy-MIT](licenses/Legacy-MIT.txt)，第三方声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -22,6 +22,7 @@ import { ROLE_OUTPUT, ROLE_PROTOCOLS } from '../models/contracts.ts';
 import { uploadDestination, type AuthorizeUpload } from '../models/upload-consent.ts';
 import { chatCompletionSupportsTools } from '../models/provider-defaults.ts';
 import { pollTemplate, submitTemplate } from '../models/adapters/template.ts';
+import { discoverProviderModels } from '../models/adapters/official.ts';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
@@ -34,7 +35,7 @@ for(const endpoint of ['workflows.run','workflows.list','workflows.get','workflo
 for(const endpoint of ['agent.start','agent.list','agent.get','agent.trace','agent.approve','agent.reject','agent.resume','agent.pause','agent.cancel','agent.tools','agent.capabilities','story.get','story.save','agent.qc','agent.qc.last','agent.ledger','agent.budget.set'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['app.onboarding.get','app.onboarding.complete'])ENDPOINTS.add(endpoint);
 ENDPOINTS.add('providers.vision.save');
-for(const endpoint of ['styles.list','styles.save','styles.delete','audio.sfx'])ENDPOINTS.add(endpoint);
+for(const endpoint of ['styles.list','styles.save','styles.delete','audio.sfx','audio.generate','models.discover','production.set','director.document.save','director.document.approve','quality.check','quality.last','agent.message'])ENDPOINTS.add(endpoint);
 export class MemorySecrets implements SecretStore {
   private values=new Map<string,string>();
   async get(ref:string){return this.values.get(ref);}
@@ -72,6 +73,14 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
       let release:(()=>void)|undefined;
       try{
         const {selected,key}=await (async()=>{const selected=await providers.registry.resolve('speech');release=providers.registry.acquire(selected.connection.id,selected.model.id);const key=await providers.registry.credential(selected.connection);return {selected,key};})().catch(error=>{throw Object.assign(error instanceof Error?error:new Error(String(error)),{submissionUncertain:false});});
+        if(selected.connection.protocol==='async-task'){
+          release?.();release=undefined;
+          const generated=await agentPort.generateAudio!(id,'speech',text,{signal,shotId});
+          const latest=(await backend.call('current',{projectId:id})).project;
+          const asset=latest?.assets.find(item=>item.id===generated.id);
+          if(!asset)throw new Error('异步配音素材已生成但未能在工程中读取');
+          return asset;
+        }
         return await backend.workflowVoice(id,shotId,text,signal,{endpoint:selected.connection.baseUrl,model:selected.model.model,voice:String(selected.model.parameters.voice??'alloy'),speed:Number(selected.model.parameters.speed??1),enabled:true,requestTimeoutMs:selected.connection.requestTimeoutMs,...(key?{apiKey:key}:{})});
       }finally{release?.();}
     },
@@ -121,6 +130,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         if(binding.role==='vision'&&!(await providers.requireVision().then(()=>true,()=>false)))continue;
         if(['image','video','speech','music','sfx','vision'].includes(binding.role)){roles.push(binding.role as GenRole);models[binding.role as GenRole]=model.name;}}
       if(!roles.includes('speech')){try{const snapshot=await backend.call('current');if(snapshot.ttsConfigured&&snapshot.tts?.enabled){roles.push('speech');models.speech='应用内配音设置';}}catch{}}
+      try{const snapshot=await backend.call('current');if(snapshot.environment?.blenderAvailable){roles.push('blender');models.blender='本机 Blender 白模预演';}}catch{}
       let director:string|undefined;try{director=(await providers.registry.resolve('director')).model.name;}catch{}
       return {roles,models,...(director?{director}:{})};
     },
@@ -187,6 +197,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
     vision:analyzeFrames,
     videoReferenceDestination:()=>workflowPort.uploadDestination('video-reference'),
     generateVideoReference:(request,authorizeUpload)=>media.generate(request,authorizeUpload),
+    renderPreviz:(id,spec,opts)=>backend.renderPreviz(id,spec,opts),
   };
   async function analyzeFrames(prompt:string,images:{mime:string;bytes:Uint8Array}[],signal:AbortSignal,authorizeUpload?:AuthorizeUpload):Promise<string>{
     if(!authorizeUpload)throw new Error('发送关键帧需要明确的上传授权');
@@ -230,6 +241,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         case 'agent.resume':value=await agent.resume(String(data.runId),typeof data.visionConsentId==='string'?data.visionConsentId:undefined,data.disableVision===true);break;
         case 'agent.pause':value=await agent.pause(String(data.runId));break;
         case 'agent.cancel':value=await agent.cancel(String(data.runId));break;
+        case 'agent.message':value=await agent.sendMessage(String(data.runId),String(data.message??''));break;
         case 'agent.tools':value={tools:agent.toolList.map(tool=>({name:tool.name,risk:tool.risk,description:tool.description}))};break;
         case 'agent.capabilities':value=await agent.capabilities();break;
         case 'story.get':value=await agent.story(String(data.projectId));break;
@@ -251,6 +263,37 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         case 'models.model.remove':await providers.registry.removeModel(String(data.id));value=await providers.registry.list();break;
         case 'models.role.bind':await providers.registry.bindRole(data.role as ModelRole,typeof data.modelId==='string'?data.modelId:null);await backend.call('catalog');value=await providers.registry.list();break;
         case 'models.check':value=await providers.check(typeof data.connectionId==='string'?data.connectionId:undefined);break;
+        case 'models.discover':{
+          const connectionId=String(data.connectionId??'');
+          const snapshot=providers.registry.snapshot();
+          const connection=snapshot.connections.find(item=>item.id===connectionId);
+          if(!connection)throw new Error('模型连接不存在');
+          const release=providers.registry.acquire(connection.id);
+          try{
+            const key=await providers.registry.credential(connection);
+            value=await discoverProviderModels({connection,key,signal:AbortSignal.timeout(Math.min(connection.requestTimeoutMs,15_000)),fetch:options.fetch});
+          }finally{release();}
+          break;
+        }
+        case 'audio.generate':{
+          const projectId=typeof data.projectId==='string'?data.projectId:(await backend.call('current')).project?.id;
+          if(!projectId)throw new Error('请先打开影片工程');
+          const role=data.role==='music'||data.role==='sfx'||data.role==='speech'?data.role:undefined;
+          if(!role)throw new Error('音频生成角色须为 speech、music 或 sfx');
+          const prompt=String(data.prompt??'').trim();
+          if(!prompt)throw new Error('请填写音频生成提示词');
+          const durationSeconds=data.durationSeconds!==undefined&&data.durationSeconds!==''?Number(data.durationSeconds):undefined;
+          const shotId=typeof data.shotId==='string'&&data.shotId?data.shotId:undefined;
+          const generated=await agentPort.generateAudio!(projectId,role,prompt,{durationSeconds,shotId,signal:AbortSignal.timeout(300_000)});
+          if(data.bindToTrack!==false){
+            const latest=await backend.call('current',{projectId});
+            if(latest.project){
+              await backend.call('audio',{projectId,expectedRevision:latest.project.revision,operation:'add',assetId:generated.id,role,...(shotId?{shotId}:{}),startSeconds:Number(data.startSeconds??0),trimStart:0,volume:role==='music'?0.25:1,fadeIn:role==='music'?0.5:0,fadeOut:role==='music'?0.5:0,...(role==='music'?{loop:true}:{})});
+            }
+          }
+          value={asset:generated,snapshot:await backend.call('current',{projectId})};
+          break;
+        }
         case 'media.generate':value=await media.generate(data as unknown as MediaRequest);break;
         case 'media.list':value={tasks:await media.list(typeof data.projectId==='string'?data.projectId:undefined)};break;
         case 'media.get':value=await media.get(String(data.taskId));break;

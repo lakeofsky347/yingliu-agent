@@ -214,6 +214,13 @@ async function dispatch(ctx: Ctx, pos: string[]): Promise<{ data: unknown; exit?
         const since = new Date().toISOString();
         return finishRun(ctx, await call(ctx, 'agent.resume', { runId: arg, ...(visionConsentId ? { visionConsentId } : {}), ...(skipUpload ? { disableVision: true } : {}) }), since);
       }
+      case 'send': {
+        if (!arg) throw new CliError('USAGE', '用法：agent send <runId> --message <补充指令>');
+        const message = str(f, 'message') ?? pos[3];
+        if (!message) throw new CliError('USAGE', '用法：agent send <runId> --message <补充指令>');
+        const since = new Date().toISOString();
+        return finishRun(ctx, await call(ctx, 'agent.message', { runId: arg, message }), since);
+      }
       case 'approve': case 'reject': {
         if (!arg) throw new CliError('USAGE', `用法：agent ${sub} <runId> --call <callId> --exec <execId>`);
         const payload = { runId: arg, callId: str(f, 'call', true), execId: str(f, 'exec', true), ...(sub === 'approve' && str(f, 'args-hash') ? { argsHash: str(f, 'args-hash') } : {}), ...(sub === 'reject' ? { reason: str(f, 'reason') ?? '' } : {}) };
@@ -288,12 +295,14 @@ async function dispatch(ctx: Ctx, pos: string[]): Promise<{ data: unknown; exit?
 function doctor() {
   const env = detectEnvironment({}), [major, minor] = process.versions.node.split('.').map(Number) as [number, number];
   const checks = [
-    { name: 'node', ok: major > 22 || (major === 22 && minor >= 18), detail: process.versions.node, required: '>=22.18' },
-    { name: 'ffmpeg', ok: env.ffmpegAvailable, detail: env.ffmpegPath ?? null },
-    { name: 'ffprobe', ok: env.ffprobeAvailable, detail: env.ffprobePath ?? null },
-    { name: 'chromium', ok: env.browserAvailable, detail: env.browserPath ?? null },
+    { name: 'node', ok: major > 22 || (major === 22 && minor >= 18), detail: process.versions.node, required: '>=22.18', optional: false },
+    { name: 'ffmpeg', ok: env.ffmpegAvailable, detail: env.ffmpegPath ?? null, optional: false },
+    { name: 'ffprobe', ok: env.ffprobeAvailable, detail: env.ffprobePath ?? null, optional: false },
+    { name: 'chromium', ok: env.browserAvailable, detail: env.browserPath ?? null, optional: false },
+    { name: 'blender', ok: Boolean(env.blenderAvailable), detail: env.blenderPath || null, optional: true },
   ];
-  return { data: { ok: checks.every(c => c.ok), checks, dataDirectory: dataDirectory(), projectsDirectory: process.env.YINGLIU_PROJECTS ? resolve(process.env.YINGLIU_PROJECTS) : null }, exit: checks.every(c => c.ok) ? EXIT.OK : EXIT.ENVIRONMENT };
+  const requiredOk = checks.filter(c => !c.optional).every(c => c.ok);
+  return { data: { ok: requiredOk, checks, dataDirectory: dataDirectory(), projectsDirectory: process.env.YINGLIU_PROJECTS ? resolve(process.env.YINGLIU_PROJECTS) : null }, exit: requiredOk ? EXIT.OK : EXIT.ENVIRONMENT };
 }
 
 export async function runCli(argv: string[], io: { out: (s: string) => void; err: (s: string) => void } = { out: s => process.stdout.write(s), err: s => process.stderr.write(s) }): Promise<number> {

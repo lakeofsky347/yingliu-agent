@@ -2,7 +2,7 @@
    Yingliu Studio — design tokens, base elements, studio shell.
    Panels below the shell section keep their own rules but share these tokens.
    ========================================================================== */
-.vs-studio,.yl-provider-modal{
+.vs-studio,.yl-app,.yl-provider-modal{
   --vs-font:-apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;
   --vs-mono:'SF Mono','SFMono-Regular',ui-monospace,Menlo,Consolas,monospace;
   --vs-fs-xs:11px;--vs-fs-sm:12px;--vs-fs-md:13px;--vs-fs-lg:15px;--vs-fs-xl:18px;--vs-fs-2xl:26px;
@@ -10,7 +10,7 @@
   --vs-ease-out:cubic-bezier(.2,.8,.2,1);--vs-ease-spring:cubic-bezier(.34,1.45,.64,1);
   --vs-dur-1:120ms;--vs-dur-2:200ms;--vs-dur-3:320ms;
 }
-.vs-studio{
+.vs-studio,.yl-app{
   /* dark (default) — Calibrated Neutral Graphite × Restrained Satin Jade */
   --vs-well:#111215;--vs-bg:#111215;--vs-surface:#181a1f;--vs-surface-2:#202329;--vs-surface-3:#282c34;--vs-field:#13151a;
   --vs-line:rgba(255,255,255,.068);--vs-line-strong:rgba(255,255,255,.13);--vs-highlight:rgba(255,255,255,.055);
@@ -38,10 +38,12 @@
   --vs-panel:var(--vs-surface);--vs-panel-alt:var(--vs-surface-2);--vs-border:var(--vs-line);--vs-muted:var(--vs-text-2);
   --vs-hover:var(--vs-surface-3);--vs-accent-text:var(--vs-on-accent);--vs-shadow:var(--vs-shadow-3);
   --vs-focus:0 0 0 2px var(--vs-bg),0 0 0 4px color-mix(in srgb,var(--vs-accent) 72%,transparent);
-  box-sizing:border-box;position:relative;width:100%;height:100%;min-height:0;display:flex;flex-direction:column;overflow:hidden;isolation:isolate;
-  background:var(--vs-well);color:var(--vs-text);font:var(--vs-fs-md)/1.5 var(--vs-font);-webkit-font-smoothing:antialiased;color-scheme:dark;
+  box-sizing:border-box;background:var(--vs-well);color:var(--vs-text);font:var(--vs-fs-md)/1.5 var(--vs-font);-webkit-font-smoothing:antialiased;color-scheme:dark;
 }
-.vs-studio[data-scheme=light]{
+.vs-studio{
+  position:relative;width:100%;height:100%;min-height:0;display:flex;flex-direction:column;overflow:hidden;isolation:isolate;
+}
+.vs-studio[data-scheme=light],.yl-app[data-scheme=light]{
   /* light — Marble White × Jade Emerald (大理石白 × 翡翠绿) */
   --vs-well:#eae9e4;--vs-bg:#eae9e4;--vs-surface:#fafaf8;--vs-surface-2:#ffffff;--vs-surface-3:#f1f0ec;--vs-field:#f2f1ed;
   --vs-line:rgba(20,24,30,.075);--vs-line-strong:rgba(20,24,30,.145);--vs-highlight:rgba(255,255,255,.94);
@@ -64,55 +66,55 @@
   --vs-g-link-asset:#2f6fd6;--vs-g-link-reference:#8468cc;--vs-g-link-shot:#0f8264;
   color-scheme:light;
 }
-.vs-studio *,.vs-studio *::before,.vs-studio *::after{box-sizing:border-box}
-.vs-studio h1,.vs-studio h2,.vs-studio h3,.vs-studio h4,.vs-studio p{margin:0}
-.vs-studio button,.vs-studio input,.vs-studio select,.vs-studio textarea{font:inherit;color:inherit}
-.vs-studio{scrollbar-width:thin;scrollbar-color:var(--vs-line-strong) transparent}
-.vs-studio svg{width:16px;height:16px;flex-shrink:0}
-.vs-studio kbd{font:500 10.5px/1 var(--vs-mono);padding:3px 5px;border-radius:5px;border:1px solid var(--vs-line);background:var(--vs-surface-2);color:var(--vs-text-2)}
+:is(.vs-studio,.yl-app) *,:is(.vs-studio,.yl-app) *::before,:is(.vs-studio,.yl-app) *::after{box-sizing:border-box}
+:is(.vs-studio,.yl-app) h1,:is(.vs-studio,.yl-app) h2,:is(.vs-studio,.yl-app) h3,:is(.vs-studio,.yl-app) h4,:is(.vs-studio,.yl-app) p{margin:0}
+:is(.vs-studio,.yl-app) button,:is(.vs-studio,.yl-app) input,:is(.vs-studio,.yl-app) select,:is(.vs-studio,.yl-app) textarea{font:inherit;color:inherit}
+.vs-studio,.yl-app{scrollbar-width:thin;scrollbar-color:var(--vs-line-strong) transparent}
+:is(.vs-studio,.yl-app) svg{width:16px;height:16px;flex-shrink:0}
+:is(.vs-studio,.yl-app) kbd{font:500 10.5px/1 var(--vs-mono);padding:3px 5px;border-radius:5px;border:1px solid var(--vs-line);background:var(--vs-surface-2);color:var(--vs-text-2)}
 
 /* Buttons ------------------------------------------------------------------ */
-.vs-studio button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:30px;padding:0 12px;cursor:pointer;white-space:nowrap;
+:is(.vs-studio,.yl-app) button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:30px;padding:0 12px;cursor:pointer;white-space:nowrap;
   border:1px solid var(--vs-line);border-radius:var(--vs-radius-sm);background:var(--vs-surface-2);color:var(--vs-text);font-size:var(--vs-fs-md);box-shadow:var(--vs-shadow-1);
   transition:background var(--vs-dur-1),border-color var(--vs-dur-1),color var(--vs-dur-1),box-shadow var(--vs-dur-1),transform var(--vs-dur-1) var(--vs-ease-out),opacity var(--vs-dur-1)}
-.vs-studio button:hover:not(:disabled){background:var(--vs-surface-3);border-color:var(--vs-line-strong)}
-.vs-studio button:active:not(:disabled){transform:scale(.97)}
-.vs-studio button:disabled{cursor:default;opacity:.42;box-shadow:none}
-.vs-studio :is(button,input,select,textarea,summary,[tabindex]):focus-visible{outline:none;box-shadow:var(--vs-focus)}
-.vs-studio .vs-primary{background:linear-gradient(180deg,var(--vs-accent-btn-top),var(--vs-accent-btn-bot));border-color:color-mix(in srgb,var(--vs-accent-btn-bot) 80%,#000);color:var(--vs-on-accent);font-weight:600;box-shadow:0 2px 8px -2px var(--vs-accent-ring),inset 0 1px 0 rgba(255,255,255,.22)}
-.vs-studio .vs-primary:hover:not(:disabled){filter:brightness(1.06);border-color:color-mix(in srgb,var(--vs-accent-btn-bot) 80%,#000)}
-.vs-studio .vs-primary:disabled{opacity:1;background:var(--vs-surface-3);border-color:var(--vs-line);color:var(--vs-text-3);box-shadow:none;filter:none}
-.vs-studio .vs-btn-ghost,.vs-studio .vs-iconbutton{background:transparent;border-color:transparent;box-shadow:none}
-.vs-studio .vs-iconbutton{width:30px;min-width:30px;padding:0;color:var(--vs-text-2)}
-.vs-studio .vs-iconbutton:hover:not(:disabled){background:var(--vs-surface-3);border-color:transparent;color:var(--vs-text)}
-.vs-studio .vs-iconbutton.is-active{background:var(--vs-accent-soft);color:var(--vs-accent)}
-.vs-studio .vs-btn-sm{min-height:26px;padding:0 9px;font-size:var(--vs-fs-sm);gap:5px}
-.vs-studio .vs-btn-sm svg{width:14px;height:14px}
-.vs-studio .vs-danger,.vs-studio .vs-btn-danger{color:var(--vs-danger)}
-.vs-studio .vs-danger:hover:not(:disabled){background:var(--vs-danger-bg);border-color:color-mix(in srgb,var(--vs-danger) 40%,transparent)}
-.vs-studio .vs-btn-danger-solid{background:var(--vs-danger);border-color:transparent;color:#fff;font-weight:600}
-.vs-studio .vs-btn-danger-solid:hover:not(:disabled){background:color-mix(in srgb,var(--vs-danger) 85%,#000);border-color:transparent}
-.vs-studio .vs-link-button{min-height:24px;padding:0 6px 0 8px;border:0;background:transparent;box-shadow:none;color:var(--vs-text-2);font-size:var(--vs-fs-xs);gap:2px}
-.vs-studio .vs-link-button svg{width:13px;height:13px}
-.vs-studio .vs-link-button:hover:not(:disabled){background:var(--vs-surface-3);color:var(--vs-text)}
+:is(.vs-studio,.yl-app) button:hover:not(:disabled){background:var(--vs-surface-3);border-color:var(--vs-line-strong)}
+:is(.vs-studio,.yl-app) button:active:not(:disabled){transform:scale(.97)}
+:is(.vs-studio,.yl-app) button:disabled{cursor:default;opacity:.42;box-shadow:none}
+:is(.vs-studio,.yl-app) :is(button,input,select,textarea,summary,[tabindex]):focus-visible{outline:none;box-shadow:var(--vs-focus)}
+:is(.vs-studio,.yl-app) .vs-primary{background:linear-gradient(180deg,var(--vs-accent-btn-top),var(--vs-accent-btn-bot));border-color:color-mix(in srgb,var(--vs-accent-btn-bot) 80%,#000);color:var(--vs-on-accent);font-weight:600;box-shadow:0 2px 8px -2px var(--vs-accent-ring),inset 0 1px 0 rgba(255,255,255,.22)}
+:is(.vs-studio,.yl-app) .vs-primary:hover:not(:disabled){filter:brightness(1.06);border-color:color-mix(in srgb,var(--vs-accent-btn-bot) 80%,#000)}
+:is(.vs-studio,.yl-app) .vs-primary:disabled{opacity:1;background:var(--vs-surface-3);border-color:var(--vs-line);color:var(--vs-text-3);box-shadow:none;filter:none}
+:is(.vs-studio,.yl-app) .vs-btn-ghost,:is(.vs-studio,.yl-app) .vs-iconbutton{background:transparent;border-color:transparent;box-shadow:none}
+:is(.vs-studio,.yl-app) .vs-iconbutton{width:30px;min-width:30px;padding:0;color:var(--vs-text-2)}
+:is(.vs-studio,.yl-app) .vs-iconbutton:hover:not(:disabled){background:var(--vs-surface-3);border-color:transparent;color:var(--vs-text)}
+:is(.vs-studio,.yl-app) .vs-iconbutton.is-active{background:var(--vs-accent-soft);color:var(--vs-accent)}
+:is(.vs-studio,.yl-app) .vs-btn-sm{min-height:26px;padding:0 9px;font-size:var(--vs-fs-sm);gap:5px}
+:is(.vs-studio,.yl-app) .vs-btn-sm svg{width:14px;height:14px}
+:is(.vs-studio,.yl-app) .vs-danger,:is(.vs-studio,.yl-app) .vs-btn-danger{color:var(--vs-danger)}
+:is(.vs-studio,.yl-app) .vs-danger:hover:not(:disabled){background:var(--vs-danger-bg);border-color:color-mix(in srgb,var(--vs-danger) 40%,transparent)}
+:is(.vs-studio,.yl-app) .vs-btn-danger-solid{background:var(--vs-danger);border-color:transparent;color:#fff;font-weight:600}
+:is(.vs-studio,.yl-app) .vs-btn-danger-solid:hover:not(:disabled){background:color-mix(in srgb,var(--vs-danger) 85%,#000);border-color:transparent}
+:is(.vs-studio,.yl-app) .vs-link-button{min-height:24px;padding:0 6px 0 8px;border:0;background:transparent;box-shadow:none;color:var(--vs-text-2);font-size:var(--vs-fs-xs);gap:2px}
+:is(.vs-studio,.yl-app) .vs-link-button svg{width:13px;height:13px}
+:is(.vs-studio,.yl-app) .vs-link-button:hover:not(:disabled){background:var(--vs-surface-3);color:var(--vs-text)}
 
 /* Fields ------------------------------------------------------------------- */
-.vs-studio :where(input,select,textarea){min-width:0;border:1px solid var(--vs-line);background:var(--vs-field);color:var(--vs-text);border-radius:var(--vs-radius-sm);font-size:var(--vs-fs-md);box-shadow:inset 0 1px 2px rgba(0,0,0,.05);
+:is(.vs-studio,.yl-app) :where(input,select,textarea){min-width:0;border:1px solid var(--vs-line);background:var(--vs-field);color:var(--vs-text);border-radius:var(--vs-radius-sm);font-size:var(--vs-fs-md);box-shadow:inset 0 1px 2px rgba(0,0,0,.05);
   transition:border-color var(--vs-dur-1),box-shadow var(--vs-dur-1),background var(--vs-dur-1)}
-.vs-studio :where(input:not([type=checkbox],[type=radio],[type=range],[type=color]),select){height:32px;padding:0 10px}
-.vs-studio :where(textarea){padding:8px 10px;line-height:1.6;resize:vertical}
-.vs-studio :is(input,select,textarea):hover:not(:disabled):not(:focus){border-color:var(--vs-line-strong)}
-.vs-studio :is(input,select,textarea):focus{outline:none;border-color:var(--vs-accent);background:var(--vs-surface-2);box-shadow:0 0 0 3px var(--vs-accent-soft)}
-.vs-studio :is(input,textarea)::placeholder{color:var(--vs-text-3);opacity:1}
-.vs-studio :is(input,select,textarea):disabled{opacity:.6;cursor:not-allowed}
-.vs-studio .is-invalid,.vs-studio [aria-invalid=true]{border-color:var(--vs-danger)!important}
-.vs-studio select{appearance:none;padding-right:28px;cursor:pointer;
+:is(.vs-studio,.yl-app) :where(input:not([type=checkbox],[type=radio],[type=range],[type=color]),select){height:32px;padding:0 10px}
+:is(.vs-studio,.yl-app) :where(textarea){padding:8px 10px;line-height:1.6;resize:vertical}
+:is(.vs-studio,.yl-app) :is(input,select,textarea):hover:not(:disabled):not(:focus){border-color:var(--vs-line-strong)}
+:is(.vs-studio,.yl-app) :is(input,select,textarea):focus{outline:none;border-color:var(--vs-accent);background:var(--vs-surface-2);box-shadow:0 0 0 3px var(--vs-accent-soft)}
+:is(.vs-studio,.yl-app) :is(input,textarea)::placeholder{color:var(--vs-text-3);opacity:1}
+:is(.vs-studio,.yl-app) :is(input,select,textarea):disabled{opacity:.6;cursor:not-allowed}
+:is(.vs-studio,.yl-app) .is-invalid,:is(.vs-studio,.yl-app) [aria-invalid=true]{border-color:var(--vs-danger)!important}
+:is(.vs-studio,.yl-app) select{appearance:none;padding-right:28px;cursor:pointer;
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238a9199' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='m7 10 5 5 5-5'/%3E%3C/svg%3E");
   background-repeat:no-repeat;background-position:right 8px center;background-size:14px}
-.vs-studio input[type=range]{accent-color:var(--vs-accent);width:100%;height:18px;padding:0;border:0;background:none;box-shadow:none}
-.vs-studio input[type=checkbox],.vs-studio input[type=radio]{accent-color:var(--vs-accent);width:14px;height:14px;box-shadow:none}
-.vs-studio input[type=color]{padding:2px;height:30px;width:100%;cursor:pointer}
-.vs-studio input[type=number]{font-variant-numeric:tabular-nums}
+:is(.vs-studio,.yl-app) input[type=range]{accent-color:var(--vs-accent);width:100%;height:18px;padding:0;border:0;background:none;box-shadow:none}
+:is(.vs-studio,.yl-app) input[type=checkbox],:is(.vs-studio,.yl-app) input[type=radio]{accent-color:var(--vs-accent);width:14px;height:14px;box-shadow:none}
+:is(.vs-studio,.yl-app) input[type=color]{padding:2px;height:30px;width:100%;cursor:pointer}
+:is(.vs-studio,.yl-app) input[type=number]{font-variant-numeric:tabular-nums}
 .vs-field{display:flex;flex-direction:column;gap:5px;margin-bottom:10px;min-width:0}
 .vs-field:last-child{margin-bottom:0}
 .vs-field>span{font-size:var(--vs-fs-xs);font-weight:500;color:var(--vs-text-2)}
@@ -130,12 +132,12 @@
 
 /* Segmented control -------------------------------------------------------- */
 .vs-segmented{display:inline-flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--vs-line);border-radius:9px;background:var(--vs-field);box-shadow:inset 0 1px 2px rgba(0,0,0,.05)}
-.vs-studio .vs-segmented>button{min-height:25px;padding:0 10px;border:0;border-radius:6px;background:transparent;box-shadow:none;color:var(--vs-text-2);font-size:var(--vs-fs-sm)}
-.vs-studio .vs-segmented>button svg{width:14px;height:14px}
-.vs-studio .vs-segmented>button:hover:not(:disabled){background:color-mix(in srgb,var(--vs-surface-2) 60%,transparent);color:var(--vs-text)}
-.vs-studio .vs-segmented>button.is-active{background:var(--vs-surface-2);color:var(--vs-text);font-weight:500;box-shadow:var(--vs-shadow-1)}
-.vs-studio .vs-segmented>button.is-active.is-reference{color:var(--vs-g-link-reference)}
-.vs-studio .vs-segmented.is-compact>button{min-height:22px;padding:0 8px;font-size:var(--vs-fs-xs)}
+:is(.vs-studio,.yl-app) .vs-segmented>button{min-height:25px;padding:0 10px;border:0;border-radius:6px;background:transparent;box-shadow:none;color:var(--vs-text-2);font-size:var(--vs-fs-sm)}
+:is(.vs-studio,.yl-app) .vs-segmented>button svg{width:14px;height:14px}
+:is(.vs-studio,.yl-app) .vs-segmented>button:hover:not(:disabled){background:color-mix(in srgb,var(--vs-surface-2) 60%,transparent);color:var(--vs-text)}
+:is(.vs-studio,.yl-app) .vs-segmented>button.is-active{background:var(--vs-surface-2);color:var(--vs-text);font-weight:500;box-shadow:var(--vs-shadow-1)}
+:is(.vs-studio,.yl-app) .vs-segmented>button.is-active.is-reference{color:var(--vs-g-link-reference)}
+:is(.vs-studio,.yl-app) .vs-segmented.is-compact>button{min-height:22px;padding:0 8px;font-size:var(--vs-fs-xs)}
 .vs-prop-group .vs-segmented,.vs-prop-fold .vs-segmented:not(.is-compact){display:flex}
 .vs-prop-group .vs-segmented>button,.vs-prop-fold .vs-segmented:not(.is-compact)>button{flex:1}
 
@@ -932,10 +934,10 @@
 .vs-studio .yl-task-status{background:var(--vs-accent-soft);border-color:transparent;color:var(--vs-accent)}
 .vs-studio .yl-task-record.is-failed .yl-task-status,.vs-studio .yl-task-record.is-interrupted .yl-task-status{background:var(--vs-danger-bg);color:var(--vs-danger)}
 .vs-studio .yl-task-error{color:var(--vs-danger)}
-.vs-studio .vs-agent-approval{border-color:var(--vs-warning);background:var(--vs-warning-bg)}
-.vs-studio .vs-agent-steps li.is-failed,.vs-studio .vs-agent-steps li.is-rejected{color:var(--vs-danger)}
-.vs-studio .vs-agent-steps li.is-pending{color:var(--vs-warning)}
-.vs-studio .vs-agent-tools span.is-cost,.vs-studio .vs-agent-tools span.is-export{color:var(--vs-warning)}
+:is(.vs-studio,.yl-app) .vs-agent-approval{border-color:var(--vs-warning);background:var(--vs-warning-bg)}
+:is(.vs-studio,.yl-app) .vs-agent-steps li.is-failed,:is(.vs-studio,.yl-app) .vs-agent-steps li.is-rejected{color:var(--vs-danger)}
+:is(.vs-studio,.yl-app) .vs-agent-steps li.is-pending{color:var(--vs-warning)}
+:is(.vs-studio,.yl-app) .vs-agent-tools span.is-cost,:is(.vs-studio,.yl-app) .vs-agent-tools span.is-export{color:var(--vs-warning)}
 .vs-modal-backdrop.is-leaving{animation:vs-fade-out .15s ease-out forwards}
 .vs-modal.is-leaving{animation:vs-modal-out .15s var(--vs-ease-out) forwards}
 @keyframes vs-fade-out{to{opacity:0}}

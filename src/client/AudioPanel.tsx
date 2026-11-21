@@ -1,6 +1,7 @@
 import {defaultTtsSettings,ttsCapability} from '../shared/tts-capability.ts';
 import { useEffect, useState, type ReactNode } from 'react';
 import type { Asset, AudioClip, Shot, StudioSnapshot, TtsSettings, VideoProject } from '../shared/types.ts';
+import type { RegistrySnapshot } from '../models/contracts.ts';
 import type { StudioController } from './controller.ts';
 import { LocalSfxPanel } from './LocalSfxPanel.tsx';
 function Field({label,children}:{label:string;children:ReactNode}){return <label className="vs-field"><span>{label}</span>{children}</label>;}
@@ -8,19 +9,63 @@ function numeric(value:string):number{return Number(value)||0;}
 export function AudioPanel({project,snapshot,controller,assetUrl,selectedShot,busy}:{project:VideoProject;snapshot:StudioSnapshot;controller:StudioController;assetUrl:(asset:Asset)=>string;selectedShot?:Shot;busy:boolean}){
   const assets=project.assets.filter(a=>a.kind==='audio'),clips=project.audioClips||[];
   const [assetId,setAssetId]=useState(''),[role,setRole]=useState<AudioClip['role']>('voice'),[shotId,setShotId]=useState(selectedShot?.id||''),[settingsOpen,setSettingsOpen]=useState(false);
+  const [aiRole,setAiRole]=useState<'music'|'sfx'>('music'),[aiPrompt,setAiPrompt]=useState(''),[aiDuration,setAiDuration]=useState('10'),[aiBusy,setAiBusy]=useState(false),[aiError,setAiError]=useState(''),[aiNotice,setAiNotice]=useState('');
+  const [boundAudio,setBoundAudio]=useState<Record<'speech'|'music'|'sfx',string>>({speech:'',music:'',sfx:''});
   useEffect(()=>{if(selectedShot)setShotId(selectedShot.id);},[selectedShot?.id]);
   useEffect(()=>{if(!assets.some(a=>a.id===assetId))setAssetId(assets[0]?.id||'');},[assets.map(a=>a.id).join(','),assetId]);
+  useEffect(()=>{
+    let active=true;
+    const load=()=>{
+      void controller.api.call<RegistrySnapshot>('models.list').then(catalog=>{
+        if(!active||!catalog?.roles)return;
+        const nameOf=(r:'speech'|'music'|'sfx')=>{
+          const id=catalog.roles.find(b=>b.role===r)?.modelId;
+          const m=catalog.models.find(item=>item.id===id&&item.enabled);
+          const c=catalog.connections.find(item=>item.id===m?.connectionId&&item.enabled);
+          return m&&c?`${c.name} · ${m.name}`:'';
+        };
+        setBoundAudio({speech:nameOf('speech'),music:nameOf('music'),sfx:nameOf('sfx')});
+      }).catch(()=>{});
+    };
+    load();
+    window.addEventListener('yingliu-models-changed',load);
+    return()=>{active=false;window.removeEventListener('yingliu-models-changed',load);};
+  },[controller]);
   function edit(next:AudioClip[]){controller.edit({...project,audioClips:next,target:{...project.target,audioMode:next.length?'mixed':'none'},revision:project.revision+1,updatedAt:new Date().toISOString()});}
   function patch(id:string,value:Partial<AudioClip>){edit(clips.map(c=>c.id===id?{...c,...value}:c));}
   function add(){if(!assetId)return;const clip:AudioClip={id:`audio-${crypto.randomUUID()}`,assetId,role,startSeconds:0,trimStart:0,volume:role==='music'?.25:1,fadeIn:role==='music'?.5:0,fadeOut:role==='music'?.5:0,...(shotId?{shotId}:{}),...(role==='music'?{loop:true}:{})};void controller.audio({operation:'add',...clip,fitDuration:project.extensions.lockDuration!==true});}
+  async function generateAiAudio(){
+    if(busy||aiBusy||!aiPrompt.trim())return;
+    setAiBusy(true);setAiError('');setAiNotice('');
+    try{
+      await controller.mediaCommand('audio.generate',{projectId:project.id,role:aiRole,prompt:aiPrompt.trim(),durationSeconds:Number(aiDuration)||undefined,shotId:aiRole==='sfx'&&shotId?shotId:undefined,bindToTrack:true});
+      setAiPrompt('');setAiNotice(aiRole==='music'?'已生成背景音乐并加入音轨。':'已生成 AI 音效并加入音轨。');
+    }catch(cause){setAiError(cause instanceof Error?cause.message:String(cause));}
+    finally{setAiBusy(false);}
+  }
   const tts=snapshot.tts,capability=ttsCapability(tts,snapshot.environment);
   return <div className="vs-audio-panel">
-    <div className="vs-audio-heading"><div><h3>配音、音乐与音效</h3><p>导入音频后绑定镜头；全片音乐可循环。刷新预览会生成与成片相同的混音。</p></div><button onClick={()=>setSettingsOpen(!settingsOpen)}>配音模型设置</button></div>
+    <div className="vs-audio-heading"><div><h3>配音、音乐与音效</h3><p>导入音频或调用模型生成；全片音乐可循环。刷新预览会生成与成片相同的混音。</p></div><button onClick={()=>setSettingsOpen(!settingsOpen)}>配音模型设置</button></div>
+    {boundAudio.speech&&<p className="vs-media-help">智能体与协作流程当前优先使用模型中心已绑定的配音角色：<strong>{boundAudio.speech}</strong>（支持 OpenAI Speech 与通用异步模板）。</p>}
     {settingsOpen&&<TtsConfig snapshot={snapshot} controller={controller} busy={busy}/>}
     <div className="vs-audio-add"><Field label="音频资产"><select aria-label="音频资产" value={assetId} onChange={e=>setAssetId(e.target.value)}><option value="">选择音频</option>{assets.map(a=><option key={a.id} value={a.id}>{a.name} · {(a.duration||0).toFixed(1)}s</option>)}</select></Field><Field label="用途"><select aria-label="音频用途" value={role} onChange={e=>{const next=e.target.value as AudioClip['role'];setRole(next);if(next==='music')setShotId('');}}><option value="voice">配音</option><option value="music">背景音乐</option><option value="sfx">音效</option></select></Field><Field label="绑定范围"><select aria-label="音频绑定范围" value={shotId} onChange={e=>setShotId(e.target.value)}><option value="">整部影片</option>{project.shots.map(s=><option key={s.id} value={s.id}>{s.title}</option>)}</select></Field><button disabled={busy||!assetId} onClick={add}>添加声音片段</button></div>
-    {assets.length===0&&<p className="vs-audio-empty">先在资产库导入 WAV、MP3、M4A、AAC、FLAC 或 OGG；也可以填写镜头旁白并生成配音。</p>}
+    {assets.length===0&&<p className="vs-audio-empty">先在资产库导入 WAV、MP3、M4A、AAC、FLAC 或 OGG；也可以填写镜头旁白或使用下方 AI 音乐/音效生成。</p>}
     <label className="vs-audio-duration-lock"><input type="checkbox" checked={project.extensions.lockDuration===true} onChange={e=>controller.edit({...project,extensions:{...project.extensions,lockDuration:e.target.checked},revision:project.revision+1,updatedAt:new Date().toISOString()})}/>锁定镜头时长<small>解除锁定时，较长旁白可自动延长对应镜头。</small></label>
     <div className="vs-audio-narration"><Field label={selectedShot?`「${selectedShot.title}」旁白`:'镜头旁白'}><textarea aria-label="镜头旁白" rows={2} value={selectedShot?.narration||''} disabled={!selectedShot||busy} placeholder="选中镜头后填写配音文案…" onChange={e=>{if(selectedShot)controller.edit({...project,shots:project.shots.map(s=>s.id===selectedShot.id?{...s,narration:e.target.value}:s),revision:project.revision+1,updatedAt:new Date().toISOString()});}}/></Field><button disabled={busy||!selectedShot?.narration?.trim()||!tts?.enabled||!capability.available} onClick={()=>selectedShot&&void controller.action('audio',{operation:'synthesize',shotId:selectedShot.id,text:selectedShot.narration,fitDuration:project.extensions.lockDuration!==true,replaceVoice:true})}>生成镜头配音</button>{!capability.available?<small>{capability.message}</small>:!tts?.enabled&&<small>在配音模型设置中启用配音服务。</small>}</div>
+    <section className="vs-audio-ai-gen" aria-label="AI 音乐与音效生成">
+      <div className="vs-audio-heading"><div><h4>AI 音乐与音效生成</h4><p>直接调用「高级模型中心」已绑定的音乐 / 音效模型，生成后自动导入并加入音轨。</p></div></div>
+      <div className="vs-field-pair">
+        <Field label="生成类型"><select aria-label="AI 音频类型" value={aiRole} disabled={busy||aiBusy} onChange={e=>setAiRole(e.target.value as 'music'|'sfx')}><option value="music">背景音乐{boundAudio.music?` · ${boundAudio.music}`:'（未绑定模型）'}</option><option value="sfx">AI 音效{boundAudio.sfx?` · ${boundAudio.sfx}`:'（未绑定模型）'}</option></select></Field>
+        <Field label="目标时长（秒）"><input aria-label="AI 音频时长" type="number" min="1" max="120" step="1" value={aiDuration} disabled={busy||aiBusy} onChange={e=>setAiDuration(e.target.value)}/></Field>
+      </div>
+      <Field label="音频提示词"><input aria-label="AI 音频提示词" value={aiPrompt} disabled={busy||aiBusy} placeholder={aiRole==='music'?'例如：温暖舒缓的钢琴与大提琴铺底，90 BPM，无鼓点':'例如：清脆的快门声加柔和空气过渡'} onChange={e=>setAiPrompt(e.target.value)}/></Field>
+      <div className="vs-media-actions">
+        <button type="button" className="vs-primary" disabled={busy||aiBusy||!aiPrompt.trim()||!boundAudio[aiRole]} onClick={()=>void generateAiAudio()}>{aiBusy?'正在生成音频…':aiRole==='music'?'生成背景音乐':'生成 AI 音效'}</button>
+        {!boundAudio[aiRole]&&<small className="vs-media-help">请先在「模型设置 → 高级模型中心」添加通用模板连接并绑定「{aiRole==='music'?'音乐':'音效'}」角色。</small>}
+      </div>
+      {aiError&&<p className="vs-inline-error" role="alert">{aiError}</p>}
+      {aiNotice&&<p className="vs-media-success" role="status">{aiNotice}</p>}
+    </section>
     <LocalSfxPanel controller={controller} busy={busy}/>
     <div className="vs-audio-clips">{clips.map(c=>{const asset=assets.find(a=>a.id===c.assetId),shot=project.shots.find(s=>s.id===c.shotId);return <article className="vs-audio-clip" key={c.id}>
       <div className="vs-audio-clip-heading"><span className="vs-audio-role">{({voice:'配音',music:'音乐',sfx:'音效'})[c.role]}</span><strong>{asset?.name||'音频素材已移除'}</strong><span>{shot?shot.title:'全片'}</span><button aria-label={`删除声音片段 ${asset?.name||c.id}`} onClick={()=>edit(clips.filter(v=>v.id!==c.id))}>删除</button></div>

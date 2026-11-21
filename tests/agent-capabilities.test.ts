@@ -98,7 +98,7 @@ test('app integration: capabilities follow the registry; async music template ge
     await call('models.role.bind', { role: 'director', modelId: m.id });
     const created = await call<StudioSnapshot>('create', { blank: true, title: '配乐' });
     const before = await call<{ capabilities: Capabilities; tools: { name: string }[] }>('agent.capabilities');
-    assert.deepEqual(before.capabilities.roles, []); assert.ok(before.tools.some(t => t.name === 'synthesize_sfx'));
+    assert.deepEqual(before.capabilities.roles.filter(r => r !== 'blender'), []); assert.ok(before.tools.some(t => t.name === 'synthesize_sfx'));
     const run = await call<PublicRun>('agent.start', { projectId: created.project!.id, goal: '加音效和音乐', maxReviewRounds: 0 });
     let current = run;
     for (let i = 0; i < 300 && phase < 1; i++) await new Promise(r => setTimeout(r, 10));

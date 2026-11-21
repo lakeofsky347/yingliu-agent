@@ -14,6 +14,6 @@ async function inspectTool(path:string,args:string[]){
   });
 }
 export async function applicationHealth(environment:EnvironmentInfo,model:{hasKey:boolean;ready?:boolean;config:{model:string};credentialStatus?:SecretStoreStatus},dataDirectory:string){
-  const [browser,ffmpeg,ffprobe]=await Promise.all([inspectTool(environment.browserPath,['--version']),inspectTool(environment.ffmpegPath,['-version']),inspectTool(environment.ffprobePath,['-version'])]);
-  return {dataDirectory,model:{configured:model.ready??model.hasKey,model:model.config.model,credentialStatus:model.credentialStatus},tools:{browser:{path:environment.browserPath,...browser},ffmpeg:{path:environment.ffmpegPath,...ffmpeg},ffprobe:{path:environment.ffprobePath,...ffprobe}},canRender:browser.available&&ffmpeg.available&&ffprobe.available};
+  const [browser,ffmpeg,ffprobe,blender]=await Promise.all([inspectTool(environment.browserPath,['--version']),inspectTool(environment.ffmpegPath,['-version']),inspectTool(environment.ffprobePath,['-version']),inspectTool(environment.blenderPath??'',['--version'])]);
+  return {dataDirectory,model:{configured:model.ready??model.hasKey,model:model.config.model,credentialStatus:model.credentialStatus},tools:{browser:{path:environment.browserPath,...browser},ffmpeg:{path:environment.ffmpegPath,...ffmpeg},ffprobe:{path:environment.ffprobePath,...ffprobe},blender:{path:environment.blenderPath??'',optional:true,...blender}},canRender:browser.available&&ffmpeg.available&&ffprobe.available,canPreviz:blender.available};
 }
