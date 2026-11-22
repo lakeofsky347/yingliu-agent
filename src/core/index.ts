@@ -109,7 +109,26 @@ export function validateProject(project:VideoProject,options:{portablePaths?:boo
     if(typeof shot.title!=='string'||!shot.title.trim())errors.push(`镜头 ${shot.id} 缺少标题`);
     if(!Number.isInteger(shot.durationFrames)||shot.durationFrames<=0||shot.durationFrames>1000000)errors.push(`镜头 ${shot.id} 时长须为正整数帧`);
     if(typeof shot.sourcePath!=='string'||!safeRelativePath(shot.sourcePath))errors.push(`镜头 ${shot.id} 源码路径无效`);
-    if(!['cut','fade'].includes(shot.transition))errors.push(`镜头 ${shot.id} 转场无效`);
+    if(!['cut','fade','dissolve','wipe_left','flash_white'].includes(shot.transition))errors.push(`镜头 ${shot.id} 转场无效`);
+    if(shot.transitionFrames!==undefined&&(!Number.isInteger(shot.transitionFrames)||shot.transitionFrames<1||shot.transitionFrames>shot.durationFrames))errors.push(`镜头 ${shot.id} 转场帧数无效`);
+    if(shot.colorGrade!==undefined){
+      if(!plainObject(shot.colorGrade))errors.push(`镜头 ${shot.id} 调色参数须为对象`);
+      else{
+        const g=shot.colorGrade,inRange=(v:unknown,min:number,max:number)=>typeof v==='number'&&Number.isFinite(v)&&v>=min&&v<=max;
+        if(g.exposure!==undefined&&!inRange(g.exposure,-2,2))errors.push(`镜头 ${shot.id} 曝光须在 -2 至 2 之间`);
+        if(g.contrast!==undefined&&!inRange(g.contrast,0.2,3))errors.push(`镜头 ${shot.id} 对比度须在 0.2 至 3 之间`);
+        if(g.saturation!==undefined&&!inRange(g.saturation,0,3))errors.push(`镜头 ${shot.id} 饱和度须在 0 至 3 之间`);
+        if(g.temperature!==undefined&&!inRange(g.temperature,-100,100))errors.push(`镜头 ${shot.id} 色温须在 -100 至 100 之间`);
+        if(g.tint!==undefined&&!inRange(g.tint,-100,100))errors.push(`镜头 ${shot.id} 色调须在 -100 至 100 之间`);
+        if(g.vignette!==undefined&&!inRange(g.vignette,0,1))errors.push(`镜头 ${shot.id} 暗角须在 0 至 1 之间`);
+      }
+    }
+    if(shot.takes!==undefined){
+      if(!Array.isArray(shot.takes))errors.push(`镜头 ${shot.id} 候选条 takes 须为数组`);
+      else for(const take of shot.takes){
+        if(!plainObject(take)||typeof take.id!=='string'||!take.id||!assetIds.has(take.assetId)||!['video','image'].includes(take.kind))errors.push(`镜头 ${shot.id} 候选条引用无效`);
+      }
+    }
     for(const field of ['assetIds','referenceIds'] as const) {
       if(!Array.isArray(shot[field])) {errors.push(`镜头 ${shot.id} 的 ${field} 须为数组`);continue;}
       assertUnique(shot[field],`镜头 ${shot.id} 的 ${field}`,errors);
@@ -154,6 +173,37 @@ export function validateProject(project:VideoProject,options:{portablePaths?:boo
       if(!Number.isFinite(clip.speed)||clip.speed<.25||clip.speed>4)errors.push('视频速度须为 0.25–4 倍');
       if(!['cover','contain'].includes(clip.fit))errors.push('视频适应方式无效');
       if(!['mute','keep','extract'].includes(clip.audio))errors.push('视频原声策略无效');
+    }
+  }
+  if(project.overlayClips!==undefined){
+    if(!Array.isArray(project.overlayClips))errors.push('叠加图层须为数组');
+    else{
+      assertUnique(project.overlayClips.map(item=>item?.id),'叠加图层',errors);
+      for(const ov of project.overlayClips){
+        if(!plainObject(ov)||!shotIds.has(ov.shotId)){errors.push('叠加图层镜头引用无效');continue;}
+        const asset=project.assets.find(a=>a.id===ov.assetId&&(a.kind==='image'||a.kind==='video'));
+        if(!asset||ov.kind!==asset.kind){errors.push(`叠加图层 ${ov.id} 资产引用无效`);continue;}
+        if(![ov.x,ov.y,ov.width,ov.height,ov.opacity,ov.startSeconds].every(Number.isFinite)||ov.width<=0||ov.height<=0||ov.opacity<0||ov.opacity>1||ov.startSeconds<0)errors.push(`叠加图层 ${ov.id} 几何或时间参数无效`);
+      }
+    }
+  }
+  if(project.subtitles!==undefined){
+    if(!Array.isArray(project.subtitles))errors.push('字幕轨须为数组');
+    else{
+      assertUnique(project.subtitles.map(cue=>cue?.id),'字幕条目',errors);
+      for(const cue of project.subtitles){
+        if(!plainObject(cue)||typeof cue.text!=='string'||!cue.text.trim()||!Number.isFinite(cue.startSeconds)||!Number.isFinite(cue.endSeconds)||cue.startSeconds<0||cue.endSeconds<=cue.startSeconds)errors.push(`字幕条目 ${cue?.id??'?'} 时间或文本无效`);
+        if(cue.shotId!==undefined&&!shotIds.has(cue.shotId))errors.push(`字幕条目 ${cue.id} 关联镜头不存在`);
+      }
+    }
+  }
+  if(project.audioMix!==undefined){
+    if(!plainObject(project.audioMix))errors.push('混音母带参数须为对象');
+    else{
+      const m=project.audioMix;
+      if(m.duckingDb!==undefined&&(typeof m.duckingDb!=='number'||!Number.isFinite(m.duckingDb)||m.duckingDb<0||m.duckingDb>30))errors.push('人声闪避衰减须在 0–30 dB 之间');
+      if(m.targetLufs!==undefined&&(typeof m.targetLufs!=='number'||!Number.isFinite(m.targetLufs)||m.targetLufs<-36||m.targetLufs>-8))errors.push('目标响度须在 -36 至 -8 LUFS 之间');
+      if(m.voiceReverb!==undefined&&(typeof m.voiceReverb!=='string'||!['none','room','hall','phone'].includes(m.voiceReverb)))errors.push('人声空间混响预设无效');
     }
   }
   const graph=validateGraph(project);warnings.push(...graph.errors.map(e=>`主链草稿：${e}`));
@@ -211,11 +261,13 @@ export function compileSpec(project:VideoProject):VideoSpec {
   const shots=project.shotOrder.map(sid=>{
     const shot=copy(shotOf(project,sid));const startFrame=frame;frame+=shot.durationFrames;
     const videoClip=project.videoClips?.find(clip=>clip.shotId===shot.id);
-    return {...shot,startFrame,endFrame:frame,assets:project.assets.filter(a=>shot.assetIds.includes(a.id)||a.id===videoClip?.assetId).map(copy),...(videoClip?{videoClip:copy(videoClip)}:{})};
+    const overlays=project.overlayClips?.filter(item=>item.shotId===shot.id).map(copy);
+    const overlayAssetIds=new Set((overlays??[]).map(item=>item.assetId));
+    return {...shot,startFrame,endFrame:frame,assets:project.assets.filter(a=>shot.assetIds.includes(a.id)||a.id===videoClip?.assetId||overlayAssetIds.has(a.id)).map(copy),...(videoClip?{videoClip:copy(videoClip)} : {}),...(overlays?.length?{overlays}:{})};
   });
   if(frame>1000000)throw new Error('全片超过 1,000,000 帧限制');
   return {projectId:project.id,title:project.title,topic:project.topic,target:copy(project.target),
-    durationFrames:frame,durationSeconds:frame*project.target.fps.den/project.target.fps.num,shots,...(project.productionPolicy?{productionPolicy:copy(project.productionPolicy)}:{})};
+    durationFrames:frame,durationSeconds:frame*project.target.fps.den/project.target.fps.num,shots,...(project.productionPolicy?{productionPolicy:copy(project.productionPolicy)} : {}),...(project.subtitles?.length?{subtitles:copy(project.subtitles)}:{})};
 }
 
 /** Allocate an exact integer frame budget, preserving relative duration weights. */
@@ -301,7 +353,10 @@ export function addShot(project:VideoProject,shot=defaultShot(project.shots.leng
 }
 export function deleteShot(project:VideoProject,shotId:string):VideoProject {
   shotOf(project,shotId);const next=changed(project);next.shots=next.shots.filter(s=>s.id!==shotId);next.shotOrder=next.shotOrder.filter(s=>s!==shotId);
-  delete next.graph.positions[shotId];next.audioClips=next.audioClips?.filter(c=>c.shotId!==shotId);next.videoClips=next.videoClips?.filter(c=>c.shotId!==shotId);syncEdges(next);return next;
+  delete next.graph.positions[shotId];next.audioClips=next.audioClips?.filter(c=>c.shotId!==shotId);next.videoClips=next.videoClips?.filter(c=>c.shotId!==shotId);
+  if(next.overlayClips)next.overlayClips=next.overlayClips.filter(c=>c.shotId!==shotId);
+  if(next.subtitles)next.subtitles=next.subtitles.filter(c=>c.shotId!==shotId);
+  syncEdges(next);return next;
 }
 export function duplicateShot(project:VideoProject,shotId:string):VideoProject {
   const original=shotOf(project,shotId),shot=copy(original);shot.id=id('shot');shot.title+= '（副本）';shot.sourcePath=`shots/${shot.id}`;
@@ -330,8 +385,12 @@ export function unbindAsset(project:VideoProject,shotId:string,assetId:string,ki
 export function deleteAsset(project:VideoProject,assetId:string):VideoProject {
   if(!project.assets.some(a=>a.id===assetId))throw new Error(`找不到资产：${assetId}`);
   const next=changed(project);next.assets=next.assets.filter(a=>a.id!==assetId);delete next.graph.positions[assetId];
-  for(const shot of next.shots){shot.assetIds=shot.assetIds.filter(a=>a!==assetId);shot.referenceIds=shot.referenceIds.filter(a=>a!==assetId);}
+  for(const shot of next.shots){
+    shot.assetIds=shot.assetIds.filter(a=>a!==assetId);shot.referenceIds=shot.referenceIds.filter(a=>a!==assetId);
+    if(shot.takes)shot.takes=shot.takes.filter(t=>t.assetId!==assetId);
+  }
   next.audioClips=next.audioClips?.filter(c=>c.assetId!==assetId);next.videoClips=next.videoClips?.filter(c=>c.assetId!==assetId);
+  if(next.overlayClips)next.overlayClips=next.overlayClips.filter(c=>c.assetId!==assetId);
   return next;
 }
 export function addAsset(project:VideoProject,asset:Asset):VideoProject {

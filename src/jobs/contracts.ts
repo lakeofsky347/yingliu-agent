@@ -1,6 +1,6 @@
 import type { ModelSelection, ProviderConnection, ModelDefinition, ResolvedModel } from '../models/contracts.ts';
 
-export type MediaOperation='text-to-image'|'text-to-video'|'image-to-video';
+export type MediaOperation='text-to-image'|'image-compose'|'text-to-video'|'image-to-video'|'first-last-frame-video'|'lip-sync-video';
 export type RemoteStatus='queued'|'running'|'succeeded'|'failed'|'cancelled';
 export type MediaPhase='pending'|'submitting'|'queued'|'running'|'downloading'|'validating'|'ready'|'applying'|'complete'|'failed'|'cancelled'|'unknown';
 export interface MediaUsage { inputTokens?:number;outputTokens?:number;cost?:number;currency?:string;[key:string]:unknown }

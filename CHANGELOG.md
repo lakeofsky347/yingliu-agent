@@ -2,6 +2,13 @@
 
 ## 未发布
 
+- 升级智能体至 **v2.0 全链路虚拟影视剧组架构（Full-Spectrum Virtual Film Crew）**：
+  - **分层剧组编排**：以 `AgentService` 作为总导演（Showrunner），新增 6 大专业部门子代理（`screenwriter`、`art_director`、`cinematographer`、`scene_coder`、`sound_director`、`post_editor_qc`）与 `delegate_crew` / `delegate_scene_code` 委派机制，收费与导出门禁统一收口至总导演。
+  - **统一制片圣经与百镜分镜容量**：双向打通 `Story` 与专业契约 `DirectorDocument`（`project.extensions.directorDocument`），单轮分镜上限由 12 镜提升至 120 镜；新增固定场景母版库（`locations`）、关键道具库（`props`）、三维世界坐标（`worldLayouts`）与 180° 轴线场记日志（`continuityLog`）。
+  - **Blender 3D 预演升级与防白模污染桥梁**：预演支持关节化人物 6 种姿态、起止走位动画、物理光圈景深 `fStop`、5 套电影布光预设及归一化 Z-Depth 深度图导出；新增 `stylize_keyframe`（`image-compose` 多图融合重绘）生成正式画风首尾帧。
+  - **多模态扩展原语与场次并发池**：新增 `image-compose`、`first-last-frame-video`（适配网关、可灵、火山 Seedance、百炼万相、Gemini Veo 首尾帧字段）与 `lip-sync-video`（含 `replicate-lipsync` 预设）；新增 `batch_generate_media` 支持单次审批并发生成多镜头并自动入轨。
+  - **分角色表演与专业闪避混音**：`generate_voice` 支持按角色专属 `voice` 路由，`align_to_voice` 支持同镜多句对白顺序话轮排布与全局字幕同步；`synthesize_sfx` 扩充至 12 种电影拟音；`AudioMixer` 新增 `sidechaincompress` 自动闪避、人声空间混响与 `-14 LUFS` `loudnorm` 标准化；新增 `audio.analyze`（`ebur128` 实测响度/削波）与 `media.deconstruct`（`scdet` 视觉拉片切镜拆解）。
+  - **后期精剪 NLE、时序审片与工业交换交付**：渲染运行时支持双镜真实叠化 `dissolve`、`wipe_left`、`flash_white`、逐镜调色 `colorGrade`、画中画 `overlayClips` 与全局字幕 `subtitles`；新增 `shot_take_manage` 多候选条管理、`reframe_project` 多画幅智能重构图、`temporal_video_review` 5 帧时序宫格审片及 `export_delivery_bundle`（导出 `.srt` / `.ass` / `.otio` / `.fcpxml` / `.edl`）。
 - 迁移 `yingliu-video-studio 1.0.0` 工作台视觉与交互能力：补全 Marble White 浅色工作台与全部抽屉面板主题令牌、工作台菜单主题切换（持久保存）、资源拖拽/空分类回退到「全部」、导出前与草稿/冲突防呆、画布 1.2 秒防抖后台自动刷新预览、窗口/标签卸载前冲刷源码草稿。
 - 源码草稿按工程与镜头持久化。桌面端存入应用数据目录，浏览器端存入 `localStorage`，保留版本基准并支持对照旧版草稿和从清单跳转。
 - 新增自定义视频制作风格库（支持 Markdown/TXT、JSON、ZIP 风格包与风格文件夹纯文本导入，风格副本随工程保存并注入创作对话、分镜/场景生成、协作工作流与智能体工程摘要）；CLI 新增 `yingliu styles list` 与 `yingliu project create --style <id>`。

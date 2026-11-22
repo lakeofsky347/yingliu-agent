@@ -14,7 +14,18 @@ export function PlanReview({ tool, args, project, assetUrl }: { tool: string; ar
     <h4>《{String(value.title ?? '')}》{value.targetSeconds ? ` · ${value.targetSeconds} 秒` : ''}</h4>
     <p>{String(value.logline ?? '')}</p>
     {value.style && <dl className="vs-plan-style">{Object.entries(value.style).filter(([, v]) => v).map(([k, v]) => <div key={k}><dt>{({ look: '画风', palette: '配色', typography: '字体', motion: '运动', negative: '避免' } as Record<string, string>)[k] ?? k}</dt><dd>{String(v)}</dd></div>)}</dl>}
-    {Array.isArray(value.characters) && value.characters.length > 0 && <ul className="vs-plan-characters">{value.characters.map((c: any, i: number) => <li key={i}><strong>{c.name}</strong>{c.id ? `（${c.id}）` : ''}：{[c.description, ...(c.features ?? [])].filter(Boolean).join('，')}</li>)}</ul>}
+    {Array.isArray(value.characters) && value.characters.length > 0 && <ul className="vs-plan-characters">{value.characters.map((c: any, i: number) => <li key={i}><strong>{c.name}</strong>{c.id ? `（${c.id}）` : ''}{c.voice ? ` · 音色 ${c.voice}` : ''}：{[c.description, ...(c.features ?? [])].filter(Boolean).join('，')}</li>)}</ul>}
+    {Array.isArray(value.locations) && value.locations.length > 0 && <ul className="vs-plan-characters">{value.locations.map((l: any, i: number) => <li key={i}><strong>场景：{l.name}</strong>{l.setting ? `（${l.setting}${l.timeOfDay ? '·' + l.timeOfDay : ''}）` : ''}：{String(l.description ?? '')}</li>)}</ul>}
+    {Array.isArray(value.props) && value.props.length > 0 && <ul className="vs-plan-characters">{value.props.map((p: any, i: number) => <li key={i}><strong>道具：{p.name}</strong>：{String(p.description ?? '')}</li>)}</ul>}
+  </div>;
+  if (tool === 'request_production_policy') return <div className="vs-plan-review" aria-label="制作策略审阅">
+    <h4>确认制作策略：{String(value.mode ?? '')}</h4>
+    <p className="vs-muted">允许生图：{value.allowGeneratedImages !== false ? '是' : '否'} · 允许导入视频：{value.allowImportedVideo !== false ? '是' : '否'}{value.baseMode ? ` · 基础方式：${value.baseMode}` : ''}</p>
+  </div>;
+  if (tool === 'bible_save_plan' && value.plan) return <div className="vs-plan-review" aria-label="专业导演计划审阅">
+    <h4>《{String(value.plan.title ?? '专业导演计划')}》 · {Array.isArray(value.plan.shots) ? value.plan.shots.length : 0} 镜</h4>
+    {value.plan.logline && <p>{String(value.plan.logline)}</p>}
+    <p className="vs-muted">片型：{String(value.plan.filmKind ?? 'general')} · 角色 {(value.plan.characters ?? []).length} 名 · 世界布局 {(value.plan.worldLayouts ?? []).length} 组 · 节拍 {(value.plan.storyBeats ?? []).length} 拍</p>
   </div>;
   if (tool === 'plan_shots' && Array.isArray(value.shots)) return <table className="vs-plan-shots" aria-label="分镜审阅"><thead><tr><th>#</th><th>景别/运镜</th><th>时长</th><th>画面</th><th>台词</th><th>角色</th></tr></thead>
     <tbody>{value.shots.map((s: any, i: number) => <tr key={i}><td>{i + 1}{s.continueFromPrevious ? ' ↩' : ''}</td><td>{[s.shotType, s.camera].filter(Boolean).join(' · ')}</td><td>{s.durationSeconds}s</td><td>{s.summary}</td><td>{s.dialogue}</td><td>{(s.characters ?? []).join('、')}</td></tr>)}</tbody>
@@ -85,6 +96,11 @@ function ProjectStoryPanel({ controller, project }: { controller: StudioControll
       {story.status === 'approved' ? <>
         <p><strong>《{story.title}》</strong>{story.logline}</p>
         <p className="vs-muted">风格：{[story.style.look, story.style.palette, story.style.motion].filter(Boolean).join(' / ') || '未设定'}</p>
+        {((story.locations?.length ?? 0) > 0 || (story.props?.length ?? 0) > 0) && <p className="vs-muted">
+          {story.locations?.length ? `场景母版：${story.locations.map(l => l.name).join('、')}` : ''}
+          {story.locations?.length && story.props?.length ? ' · ' : ''}
+          {story.props?.length ? `关键道具：${story.props.map(p => p.name).join('、')}` : ''}
+        </p>}
         {story.shots.length > 0 && <table className="vs-plan-shots"><thead><tr><th>#</th><th>镜头</th><th>时长</th><th>画面</th><th>预演</th><th>一致性</th></tr></thead>
           <tbody>{story.shots.map((s, i) => { const score = story.consistency[s.shotId ?? s.id]; const pvStatus = s.previz?.status ?? 'none'; return <tr key={s.id}><td>{i + 1}{s.continueFromPrevious ? ' ↩' : ''}</td><td>{s.shotId ?? '—'}</td><td>{s.durationSeconds}s</td><td>{s.summary}</td><td className={pvStatus === 'approved' ? 'is-ok' : pvStatus === 'rendered' ? 'is-warn' : ''}>{previzLabels[pvStatus] ?? pvStatus}</td><td className={score ? (score.score < 75 ? 'is-low' : 'is-ok') : ''} title={score?.notes}>{score ? score.score : '—'}</td></tr>; })}</tbody></table>}
         <button disabled={disabled || dirty} onClick={() => void act(() => controller.panelCommand('story.save', { projectId: project.id, expectedVersion: story.version, story: { status: 'empty' } }))}>撤销批准（让智能体重新规划）</button>

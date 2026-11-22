@@ -52,7 +52,7 @@ export class ProjectHub {
     };
   }
   async stageWorkflowMedia(projectId:string,task:MediaTask,files:GeneratedFile[],signal:AbortSignal){await this.initialized;return (await this.service(projectId)).stageWorkflowMedia(task,files,signal);}
-  async workflowVoice(projectId:string,shotId:string,text:string,signal:AbortSignal,settings?:TtsSettings){await this.initialized;return (await this.service(projectId)).workflowVoice(shotId,text,signal,settings);}
+  async workflowVoice(projectId:string,shotId:string,text:string,signal:AbortSignal,settings?:TtsSettings,speakerLabel?:string){await this.initialized;return (await this.service(projectId)).workflowVoice(shotId,text,signal,settings,speakerLabel);}
   async workflowCapture(projectId:string,frame:number,signal:AbortSignal,candidate?:import('../workflows/contracts.ts').WorkflowCandidate){await this.initialized;return (await this.service(projectId)).workflowCapture(frame,signal,candidate);}
   async renderPreviz(projectId:string,spec:import('./blender.ts').PrevizSceneSpec,options:{shotId?:string;name?:string;bindPreviewClip?:boolean;signal?:AbortSignal}={}){await this.initialized;const service=await this.service(projectId);const result=await service.renderPreviz(spec,options);await this.remember(await service.snapshot());return result;}
   private async initialize(){
@@ -234,7 +234,7 @@ export class ProjectHub {
         return {ok:true,value:await this.decorate(service,sessionId)};
       }
       const result=await service.rpc(endpoint,data);if(!result.ok)return result;
-      if(['source','inspect','thumbnails','history','tasks','jobs','quality.check','quality.last'].includes(endpoint))return result;
+      if(['source','inspect','thumbnails','history','tasks','jobs','quality.check','quality.last','media.deconstruct','audio.analyze','delivery.export','media.assetDataUrl'].includes(endpoint))return result;
       if(['director.document.save','director.document.approve'].includes(endpoint)){await this.remember(await service.snapshot());return result;}
       if(endpoint==='catalog')this.providers=(result.value as StudioSnapshot).providers;
       if(endpoint==='tts'){const snapshot=result.value as StudioSnapshot;this.tts=snapshot.tts;}

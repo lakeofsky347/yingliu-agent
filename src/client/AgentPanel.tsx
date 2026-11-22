@@ -8,7 +8,7 @@ export { parseSse } from './agent-feed.ts';
 
 export const runStatusNames:Record<PublicRun['status'],string>={running:'进行中',awaiting_approval:'等待你批准',waiting_task:'等待生成任务',paused:'已暂停',complete:'已完成',failed:'需要处理',cancelled:'已取消',budget_exceeded:'预算用尽'};
 export const riskNames:Record<ToolRisk,string>={read:'只读',write:'修改工程',plan:'计划/预演审阅',cost:'收费生成',export:'导出'};
-const roleNames:Record<string,string>={image:'生图',video:'生视频',speech:'配音',music:'音乐',sfx:'音效',vision:'视觉检查',blender:'Blender 白模预演'};
+const roleNames:Record<string,string>={scene:'场景代码',image:'生图',video:'生视频',speech:'配音',music:'音乐',sfx:'音效',vision:'视觉检查',blender:'Blender 3D 预演'};
 const stepKinds:Record<RunStep['kind'],string>={model:'思考',tool:'工具',approval:'审批',review:'自检',compress:'整理上下文'};
 
 export function AgentPanel({controller,project,externalRuns,externalLive,externalStreamText,onExternalRefresh,onConfigure,assetUrl,compact=false,hideStory=false}:{
@@ -120,7 +120,7 @@ export function AgentPanel({controller,project,externalRuns,externalLive,externa
         {run.pending&&<div className="vs-agent-approval" role="group" aria-label="待批准">
           <p className="vs-agent-approval-head"><strong>{run.pending.tool}</strong><span className="vs-risk-tag">{riskNames[run.pending.risk]}</span></p>
           <p className="vs-muted">{run.pending.reason}</p>
-          {run.pending.risk==='plan'?<PlanReview tool={run.pending.tool} args={run.pending.arguments} project={project} assetUrl={assetUrl}/>:<pre>{run.pending.arguments}</pre>}
+          {run.pending.risk==='plan'?<PlanReview tool={run.pending.tool} args={run.pending.arguments} project={project} assetUrl={assetUrl}/>:run.pending.tool==='batch_generate_media'?(()=>{try{const b=JSON.parse(run.pending!.arguments);return Array.isArray(b.items)?<div className="vs-plan-review"><h4>场次并发生成清单（共 {b.items.length} 项）</h4><ul className="vs-plan-characters">{b.items.map((it:any,idx:number)=><li key={idx}><strong>[{String(it.kind)}] 镜头 {String(it.shotId)}</strong>：{String(it.prompt??'').slice(0,120)}</li>)}</ul></div>:<pre>{run.pending!.arguments}</pre>;}catch{return <pre>{run.pending!.arguments}</pre>;}})():<pre>{run.pending.arguments}</pre>}
           <div className="vs-agent-approval-actions">
             <button type="button" className="vs-primary" disabled={disabled} onClick={()=>void act(()=>controller.mediaCommand('agent.approve',{runId:run.id,callId:run.pending!.callId,execId:run.pending!.execId,argsHash:run.pending!.argsHash}))}>{run.pending.tool==='submit_previz_review'?'批准预演并进入正式呈现':'批准'}</button>
             <button type="button" disabled={disabled} onClick={()=>void act(()=>controller.mediaCommand('agent.reject',{runId:run.id,callId:run.pending!.callId,execId:run.pending!.execId,reason:''}))}>拒绝</button>

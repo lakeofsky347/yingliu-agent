@@ -2,7 +2,7 @@ import { fetch } from '../host/http.ts';
 import { AppBackend } from './backend.ts';
 import { ProviderManager, type ModelContent } from './model.ts';
 import { ConversationService } from './conversation.ts';
-import type { RpcResult } from '../shared/types.ts';
+import type { RpcResult, StudioSnapshot } from '../shared/types.ts';
 import type { ChatInput, SecretStore } from './contracts.ts';
 import { foundationPacks } from './packs.ts';
 import { applicationHealth } from './health.ts';
@@ -23,6 +23,9 @@ import { uploadDestination, type AuthorizeUpload } from '../models/upload-consen
 import { chatCompletionSupportsTools } from '../models/provider-defaults.ts';
 import { pollTemplate, submitTemplate } from '../models/adapters/template.ts';
 import { discoverProviderModels } from '../models/adapters/official.ts';
+import { parseSceneSource } from '../host/generator.ts';
+import { readDirectorDocument } from '../director/document.ts';
+import type { DirectorPlan } from '../director/contracts.ts';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
@@ -35,7 +38,7 @@ for(const endpoint of ['workflows.run','workflows.list','workflows.get','workflo
 for(const endpoint of ['agent.start','agent.list','agent.get','agent.trace','agent.approve','agent.reject','agent.resume','agent.pause','agent.cancel','agent.tools','agent.capabilities','story.get','story.save','agent.qc','agent.qc.last','agent.ledger','agent.budget.set'])ENDPOINTS.add(endpoint);
 for(const endpoint of ['app.onboarding.get','app.onboarding.complete'])ENDPOINTS.add(endpoint);
 ENDPOINTS.add('providers.vision.save');
-for(const endpoint of ['styles.list','styles.save','styles.delete','audio.sfx','audio.generate','models.discover','production.set','director.document.save','director.document.approve','quality.check','quality.last','agent.message'])ENDPOINTS.add(endpoint);
+for(const endpoint of ['styles.list','styles.save','styles.delete','audio.sfx','audio.generate','models.discover','production.set','director.document.save','director.document.approve','quality.check','quality.last','agent.message','media.deconstruct','audio.analyze','delivery.export','media.assetDataUrl'])ENDPOINTS.add(endpoint);
 export class MemorySecrets implements SecretStore {
   private values=new Map<string,string>();
   async get(ref:string){return this.values.get(ref);}
@@ -68,8 +71,15 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
     capture:(id,frame,signal,candidate)=>backend.workflowCapture(id,frame,signal,candidate),
     uploadDestination:async purpose=>uploadDestination(purpose==='review'?(await providers.requireVision()).route:await providers.registry.resolve('video')),
     text:async(role,prompt,signal,_request,images,authorizeUpload)=>role==='vision'?analyzeFrames(prompt,images??[],signal,authorizeUpload):providers.complete([{role:'user',content:prompt}],'你是视频制作团队的'+role+'。依据提供的工程文本执行任务。',signal,undefined,role),
-    voice:async(id,shotId,text,signal)=>{
-      const state=providers.registry.snapshot();if(!state.roles.some(binding=>binding.role==='speech'))return backend.workflowVoice(id,shotId,text,signal);
+    voice:async(id,shotId,text,signal,voiceOpts?:{voice?:string;speed?:number;speaker?:string})=>{
+      const state=providers.registry.snapshot();
+      if(!state.roles.some(binding=>binding.role==='speech')){
+        const baseSettings=(await backend.call('current',{projectId:id})).tts;
+        const overridden=baseSettings&&(voiceOpts?.voice||voiceOpts?.speed!==undefined)
+          ?{...baseSettings,...(voiceOpts.voice?{voice:voiceOpts.voice}:{}),...(voiceOpts.speed!==undefined?{speed:voiceOpts.speed}:{})}
+          :undefined;
+        return backend.workflowVoice(id,shotId,text,signal,overridden,voiceOpts?.speaker);
+      }
       let release:(()=>void)|undefined;
       try{
         const {selected,key}=await (async()=>{const selected=await providers.registry.resolve('speech');release=providers.registry.acquire(selected.connection.id,selected.model.id);const key=await providers.registry.credential(selected.connection);return {selected,key};})().catch(error=>{throw Object.assign(error instanceof Error?error:new Error(String(error)),{submissionUncertain:false});});
@@ -81,7 +91,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
           if(!asset)throw new Error('异步配音素材已生成但未能在工程中读取');
           return asset;
         }
-        return await backend.workflowVoice(id,shotId,text,signal,{endpoint:selected.connection.baseUrl,model:selected.model.model,voice:String(selected.model.parameters.voice??'alloy'),speed:Number(selected.model.parameters.speed??1),enabled:true,requestTimeoutMs:selected.connection.requestTimeoutMs,...(key?{apiKey:key}:{})});
+        return await backend.workflowVoice(id,shotId,text,signal,{endpoint:selected.connection.baseUrl,model:selected.model.model,voice:String(voiceOpts?.voice??selected.model.parameters.voice??'alloy'),speed:Number(voiceOpts?.speed??selected.model.parameters.speed??1),enabled:true,requestTimeoutMs:selected.connection.requestTimeoutMs,...(key?{apiKey:key}:{})},voiceOpts?.speaker);
       }finally{release?.();}
     },
   };
@@ -89,14 +99,14 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
   cleanups.push(()=>workflows.dispose());
   async function knownKeys():Promise<string[]>{const keys:string[]=[];for(const connection of providers.registry.snapshot().connections){try{const key=await providers.registry.credential(connection);if(key)keys.push(key);}catch{}}return keys;}
   /** F05: synthesize, then register the asset in the project (CAS commit) so the returned assetId is usable. Idempotent per requestId. */
-  async function agentVoice(id:string,shotId:string,text:string,signal:AbortSignal,options:{expectedRevision?:number;requestId?:string}={}):Promise<{id:string;name:string;revision?:number}>{
+  async function agentVoice(id:string,shotId:string,text:string,signal:AbortSignal,options:{expectedRevision?:number;requestId?:string;voice?:string;speed?:number;speaker?:string}={}):Promise<{id:string;name:string;revision?:number}>{
     const ledgerKey='agentVoice';
     const before=(await backend.call('current',{projectId:id})).project;if(!before)throw new Error('工程不存在或未打开');
     const done=options.requestId?((before.extensions[ledgerKey]??{}) as Record<string,{assetId:string}>)[options.requestId]:undefined;
     if(done){const asset=before.assets.find(item=>item.id===done.assetId);if(asset)return {id:asset.id,name:asset.name,revision:before.revision};}
     if(options.expectedRevision!==undefined&&options.expectedRevision!==before.revision)throw withSubmission(Object.assign(new Error('工程版本已变化（当前 '+before.revision+'），没有提交配音'),{code:'REVISION_CONFLICT'}),'preflight_failed');
     if(!before.shots.some(item=>item.id===shotId))throw withSubmission(new Error('配音目标镜头不存在'),'preflight_failed');
-    const asset=await workflowPort.voice(id,shotId,text,signal).catch(error=>{throw withSubmission(error,(error as {submissionUncertain?:unknown})?.submissionUncertain===false?'preflight_failed':signal.aborted?'unknown':sendOutcome(error));});
+    const asset=await (workflowPort.voice as (id:string,shotId:string,text:string,signal:AbortSignal,v?:{voice?:string;speed?:number;speaker?:string})=>Promise<import('../shared/types.ts').Asset>)(id,shotId,text,signal,{voice:options.voice,speed:options.speed,speaker:options.speaker}).catch(error=>{throw withSubmission(error,(error as {submissionUncertain?:unknown})?.submissionUncertain===false?'preflight_failed':signal.aborted?'unknown':sendOutcome(error));});
     for(let attempt=0;;attempt++){
       const latest=(await backend.call('current',{projectId:id})).project!;const next=structuredClone(latest);
       if(!next.assets.some(item=>item.id===asset.id))next.assets.push(asset);
@@ -131,8 +141,10 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         if(['image','video','speech','music','sfx','vision'].includes(binding.role)){roles.push(binding.role as GenRole);models[binding.role as GenRole]=model.name;}}
       if(!roles.includes('speech')){try{const snapshot=await backend.call('current');if(snapshot.ttsConfigured&&snapshot.tts?.enabled){roles.push('speech');models.speech='应用内配音设置';}}catch{}}
       try{const snapshot=await backend.call('current');if(snapshot.environment?.blenderAvailable){roles.push('blender');models.blender='本机 Blender 白模预演';}}catch{}
-      let director:string|undefined;try{director=(await providers.registry.resolve('director')).model.name;}catch{}
-      return {roles,models,...(director?{director}:{})};
+      let director:string|undefined,scene:string|undefined;
+      try{director=(await providers.registry.resolve('director')).model.name;}catch{}
+      try{scene=(await providers.registry.resolve('scene')).model.name;}catch{}
+      return {roles,models,...(director?{director}:{}),...(scene?{scene}:{})};
     },
     importImage:async(id,name,bytes,mime)=>{if(!/^image\/(png|jpeg|webp)$/.test(mime))throw new Error('不支持的图片格式');return importAsset(id,name,'智能体截取的尾帧',bytes,mime,'图片导入失败');},
     importAudio:async(id,name,bytes,mime)=>importAsset(id,name,'智能体本地合成',bytes,mime,'音频导入失败'),
@@ -195,9 +207,30 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
     },
     visionDestination:()=>workflowPort.uploadDestination('review'),
     vision:analyzeFrames,
+    imageReferenceDestination:async()=>uploadDestination(await providers.registry.resolve('image')),
+    generateImageReference:(request,authorizeUpload)=>media.generate(request,authorizeUpload),
     videoReferenceDestination:()=>workflowPort.uploadDestination('video-reference'),
     generateVideoReference:(request,authorizeUpload)=>media.generate(request,authorizeUpload),
     renderPreviz:(id,spec,opts)=>backend.renderPreviz(id,spec,opts),
+    generateSceneCode:async(id,shotId,instruction,signal)=>{
+      const current=await backend.call('current',{projectId:id});
+      const project=current.project;if(!project)throw new Error('没有打开的工程');
+      const shot=project.shots.find(item=>item.id===shotId);if(!shot)throw new Error('目标镜头不存在：'+shotId);
+      const oldSource=await backend.call('source',{projectId:id,shotId});
+      const prompt=JSON.stringify({
+        shot:{id:shot.id,title:shot.title,intent:shot.intent,composition:shot.composition,action:shot.action,params:shot.params,hasVideo:Boolean(project.videoClips?.some(c=>c.shotId===shot.id))},
+        target:project.target,
+        videoStyle:project.videoStyle?{name:project.videoStyle.name,prompt:project.videoStyle.prompt}:null,
+        currentSource:oldSource,
+        instruction,
+        contract:'只输出严格 JSON：{"html":"...","css":"...","js":"export function render(ctx) { ... }"}。动画必须仅依赖 ctx.time 与 ctx.helpers，禁止 Date.now/setTimeout/requestAnimationFrame 或外链。若 hasVideo=true，底图透明不要遮挡底层视频。',
+      });
+      const raw=await providers.complete([{role:'user',content:prompt}],'你是映流智能体的专精动态图形与场景代码工程师（scene 角色）。只返回合法 JSON 对象 {html,css,js}。',signal,undefined,'scene').catch(()=>providers.complete([{role:'user',content:prompt}],'你是映流智能体的专精动态图形与场景代码工程师。只返回合法 JSON 对象 {html,css,js}。',signal,undefined,'director'));
+      const parsed=parseSceneSource(raw);
+      const latest=await backend.call('current',{projectId:id});
+      const saved=await backend.call('saveSource',{projectId:id,shotId,expectedRevision:latest.project?.revision,source:{html:parsed.html,css:parsed.css,js:parsed.js}});
+      return {shotId,revision:saved.project?.revision??0,summary:`已由专精场景模型更新镜头 ${shot.title} 源码`};
+    },
   };
   async function analyzeFrames(prompt:string,images:{mime:string;bytes:Uint8Array}[],signal:AbortSignal,authorizeUpload?:AuthorizeUpload):Promise<string>{
     if(!authorizeUpload)throw new Error('发送关键帧需要明确的上传授权');
@@ -215,6 +248,12 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
     redact:async text=>{let value=text;for(const key of await knownKeys())value=redactKey(value,key);return value;},
     resolveModel:async()=>{
       const resolved=await providers.resolveText('director'),parameters=resolved.model.parameters as Record<string,unknown>;
+      return {connectionId:resolved.connection.id,parameters,config:{baseUrl:resolved.connection.baseUrl,model:resolved.model.model,key:await providers.registry.credential(resolved.connection),
+        timeoutMs:Number(resolved.connection.requestTimeoutMs)||120000,maxTokens:Number(parameters.maxTokens)||4096,...(typeof parameters.temperature==='number'?{temperature:parameters.temperature}:{}),supportsTools:parameters.supportsTools!==false&&chatCompletionSupportsTools(resolved.connection.baseUrl,resolved.model.model)}};
+    },
+    resolveSubModel:async(preferRole)=>{
+      const resolved=await providers.resolveText(preferRole).catch(()=>providers.resolveText('director'));
+      const parameters=resolved.model.parameters as Record<string,unknown>;
       return {connectionId:resolved.connection.id,parameters,config:{baseUrl:resolved.connection.baseUrl,model:resolved.model.model,key:await providers.registry.credential(resolved.connection),
         timeoutMs:Number(resolved.connection.requestTimeoutMs)||120000,maxTokens:Number(parameters.maxTokens)||4096,...(typeof parameters.temperature==='number'?{temperature:parameters.temperature}:{}),supportsTools:parameters.supportsTools!==false&&chatCompletionSupportsTools(resolved.connection.baseUrl,resolved.model.model)}};
     },
@@ -322,6 +361,17 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         case 'chat.history':value=await conversation.history(typeof data.projectId==='string'?data.projectId:undefined);break;
         case 'chat.send':value=await conversation.send(data as unknown as ChatInput);break;
         case 'chat.cancel':value=await conversation.cancel();break;
+        case 'director.document.save':
+        case 'director.document.approve':{
+          const routed=await backend.route(endpoint,payload);
+          if(routed.ok){
+            const docVal=routed.value as {document?:{status?:string;plan?:DirectorPlan};snapshot?:StudioSnapshot}|undefined;
+            const pid=docVal?.snapshot?.project?.id??(typeof data.projectId==='string'?data.projectId:undefined);
+            const plan=docVal?.document?.plan??(docVal?.snapshot?.project?readDirectorDocument(docVal.snapshot.project)?.plan:undefined);
+            if(pid&&plan)await agent.syncFromDirectorPlan(pid,plan,docVal?.document?.status==='approved').catch(()=>{});
+          }
+          return routed;
+        }
         default:return backend.route(endpoint,payload);
       }
       return {ok:true,value};

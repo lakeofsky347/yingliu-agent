@@ -43,7 +43,10 @@ async function init() {
     images.set(asset.id,image);
   }));
   const videoAssets=new Map();
-  for(const shot of data.spec.shots)if(shot.videoClip){const asset=shot.assets.find(asset=>asset.id===shot.videoClip.assetId);if(!asset||asset.kind!=='video')throw new Error('Video asset missing');videoAssets.set(asset.id,asset);}
+  for(const shot of data.spec.shots){
+    if(shot.videoClip){const asset=shot.assets.find(asset=>asset.id===shot.videoClip.assetId);if(!asset||asset.kind!=='video')throw new Error('Video asset missing');videoAssets.set(asset.id,asset);}
+    for(const ov of shot.overlays||[])if(ov.kind==='video'){const asset=shot.assets.find(a=>a.id===ov.assetId);if(asset)videoAssets.set(asset.id,asset);}
+  }
   await Promise.all([...videoAssets.values()].map(async asset=>{
     const video=document.createElement('video');video.preload='auto';video.muted=true;video.playsInline=true;
     const pending=mediaEvent(video,'loadeddata',()=>video.readyState>=2);video.src=assetUrl(asset);video.load();await pending;
@@ -99,42 +102,140 @@ function contextFor(shot,frame,root,canvas) {
     frame,localFrame,progress:localFrame/Math.max(1,shot.durationFrames-1),time:localFrame/fps,
     duration:shot.durationFrames/fps,width:data.spec.target.width,height:data.spec.target.height,seed,helpers:helpers(seed)};
 }
+function gradeFilter(grade) {
+  if(!grade)return '';
+  const parts=[];
+  if(typeof grade.exposure==='number'&&grade.exposure!==0)parts.push('brightness('+Math.pow(2,grade.exposure).toFixed(4)+')');
+  if(typeof grade.contrast==='number'&&grade.contrast!==1)parts.push('contrast('+grade.contrast.toFixed(4)+')');
+  if(typeof grade.saturation==='number'&&grade.saturation!==1)parts.push('saturate('+grade.saturation.toFixed(4)+')');
+  if(typeof grade.temperature==='number'&&grade.temperature!==0){
+    if(grade.temperature>0)parts.push('sepia('+(Math.min(0.35,grade.temperature/260)).toFixed(4)+')');
+    else parts.push('hue-rotate('+(Math.max(-28,grade.temperature*0.24)).toFixed(2)+'deg)');
+  }
+  if(typeof grade.tint==='number'&&grade.tint!==0)parts.push('hue-rotate('+(grade.tint*0.18).toFixed(2)+'deg)');
+  return parts.join(' ');
+}
+async function renderOverlays(shot,localTime,container) {
+  if(!shot.overlays||!shot.overlays.length)return;
+  for(const ov of shot.overlays){
+    const end=ov.durationSeconds!==undefined?ov.startSeconds+ov.durationSeconds:Infinity;
+    if(localTime<ov.startSeconds||localTime>=end)continue;
+    const box=document.createElement('div');
+    box.style.cssText='position:absolute;overflow:hidden;pointer-events:none;left:'+ov.x+'%;top:'+ov.y+'%;width:'+ov.width+'%;height:'+ov.height+'%;opacity:'+ov.opacity+';border-radius:'+(ov.borderRadius||0)+'px;';
+    if(ov.kind==='image'){
+      const img=images.get(ov.assetId);
+      if(img){const clone=img.cloneNode();clone.style.cssText='width:100%;height:100%;object-fit:cover;display:block;';box.append(clone);}
+    }else if(ov.kind==='video'){
+      const entry=videos.get(ov.assetId);
+      if(entry){
+        const {video,asset}=entry,fps=asset.fps.num/asset.fps.den;
+        const t=Math.min(Math.max(0,localTime-ov.startSeconds),Math.max(0,video.duration-0.001));
+        await seekVideo(video,t);entry.frame=-1;
+        const c=document.createElement('canvas');c.width=Math.max(2,Math.round(data.spec.target.width*ov.width/100));c.height=Math.max(2,Math.round(data.spec.target.height*ov.height/100));
+        c.style.cssText='width:100%;height:100%;display:block;';
+        c.getContext('2d').drawImage(video,0,0,c.width,c.height);box.append(c);
+      }
+    }
+    container.append(box);
+  }
+}
+async function renderShotContainer(shot,frame,useScopedStyle) {
+  const source=data.sources.find(s=>s.id===shot.id);
+  const wrapper=document.createElement('div');
+  wrapper.style.cssText='position:absolute;inset:0;overflow:hidden;';
+  if(useScopedStyle){const st=document.createElement('style');st.textContent=source.css;wrapper.append(st);}
+  else sceneStyle.textContent=source.css;
+  let videoInfo;
+  if(shot.videoClip){
+    const layer=document.createElement('canvas');layer.className='video-background';layer.width=data.spec.target.width;layer.height=data.spec.target.height;
+    wrapper.append(layer);videoInfo=await videoFrame(shot,frame,layer);
+  }
+  const canvas=document.createElement('canvas');canvas.width=data.spec.target.width;canvas.height=data.spec.target.height;
+  canvas.className='video-canvas';canvas.setAttribute('aria-hidden','true');wrapper.append(canvas);
+  const root=document.createElement('div');root.className='scene-root';root.innerHTML=source.html;wrapper.append(root);
+  const context=contextFor(shot,frame,root,canvas);context.video=videoInfo;
+  const module=modules.get(shot.id);
+  if(module.ready)await module.ready(context);
+  await document.fonts.ready;
+  await module.render(context);
+  await renderOverlays(shot,context.time,wrapper);
+  const filter=gradeFilter(shot.colorGrade);
+  if(filter)wrapper.style.filter=filter;
+  if(shot.colorGrade&&typeof shot.colorGrade.vignette==='number'&&shot.colorGrade.vignette>0){
+    const vig=document.createElement('div');
+    vig.style.cssText='position:absolute;inset:0;pointer-events:none;background:radial-gradient(circle,transparent 52%,rgba(0,0,0,'+Math.min(0.9,shot.colorGrade.vignette).toFixed(3)+') 100%);';
+    wrapper.append(vig);
+  }
+  return {wrapper,context};
+}
 async function draw(input) {
   await ready();
   const frame=typeof input==='number'?input:input.frame;
   if(!Number.isSafeInteger(frame)||frame<0||frame>=data.spec.durationFrames)throw new Error('Frame outside project: '+frame);
-  const shot=data.spec.shots.find(s=>frame>=s.startFrame&&frame<s.endFrame);
+  const shotIdx=data.spec.shots.findIndex(s=>frame>=s.startFrame&&frame<s.endFrame);
+  const shot=data.spec.shots[shotIdx];
   if(!shot)throw new Error('No shot owns frame '+frame);
-  const source=data.sources.find(s=>s.id===shot.id);
   try {
     // Recreate the stage each frame: DOM and Canvas state never leak across seek order.
-    stage.replaceChildren();sceneStyle.textContent=source.css;
-    let videoInfo;if(shot.videoClip){const layer=document.createElement('canvas');layer.className='video-background';layer.width=data.spec.target.width;layer.height=data.spec.target.height;stage.append(layer);videoInfo=await videoFrame(shot,frame,layer);}
-    const canvas=document.createElement('canvas');canvas.width=data.spec.target.width;canvas.height=data.spec.target.height;
-    canvas.className='video-canvas';canvas.setAttribute('aria-hidden','true');stage.append(canvas);
-    const root=document.createElement('div');root.className='scene-root';root.innerHTML=source.html;stage.append(root);
-    const context=contextFor(shot,frame,root,canvas);context.video=videoInfo;
-    const module=modules.get(shot.id);
-    if(module.ready)await module.ready(context);
-    await document.fonts.ready;
-    await module.render(context);
-    // render() may introduce text and change font families/sizes. Force layout
-    // before taking the new FontFaceSet.ready promise, so a frame never reports
-    // completion while fonts first used by this draw are still loading.
+    stage.replaceChildren();stage.style.opacity='1';
+    const fps=data.spec.target.fps.num/data.spec.target.fps.den;
+    const localFrame=frame-shot.startFrame;
+    const defaultTransFrames=Math.min(Math.max(1,Math.round(.25*fps)),Math.floor(shot.durationFrames/2));
+    const transFrames=shot.transitionFrames?Math.min(shot.transitionFrames,Math.floor(shot.durationFrames/2)):defaultTransFrames;
+    const prevShot=shotIdx>0?data.spec.shots[shotIdx-1]:null;
+    const next=data.spec.shots[shotIdx+1];
+    const dualTransition=(shot.transition==='dissolve'||shot.transition==='wipe_left')&&prevShot&&transFrames>0&&localFrame<transFrames;
+    if(dualTransition){
+      sceneStyle.textContent='';
+      const under=await renderShotContainer(prevShot,prevShot.endFrame-1,true);
+      stage.append(under.wrapper);
+      const over=await renderShotContainer(shot,frame,true);
+      const p=over.context.helpers.smoothstep((localFrame+1)/(transFrames+1));
+      if(shot.transition==='dissolve')over.wrapper.style.opacity=String(p);
+      else if(shot.transition==='wipe_left')over.wrapper.style.clipPath='inset(0 '+((1-p)*100).toFixed(2)+'% 0 0)';
+      stage.append(over.wrapper);
+    }else{
+      const main=await renderShotContainer(shot,frame,false);
+      stage.append(main.wrapper);
+    }
+    const subtitleTexts=[];
+    if(Array.isArray(data.spec.subtitles)&&data.spec.subtitles.length){
+      const globalTime=frame/fps;
+      const activeCues=data.spec.subtitles.filter(c=>globalTime>=c.startSeconds&&globalTime<c.endSeconds);
+      if(activeCues.length){
+        const subBar=document.createElement('div');
+        const fontSize=Math.max(22,Math.round(Math.min(data.spec.target.width,data.spec.target.height)*0.042));
+        const bottomPct=data.spec.target.height>data.spec.target.width?9:6.5;
+        subBar.style.cssText='position:absolute;left:7%;right:7%;bottom:'+bottomPct+'%;text-align:center;pointer-events:none;z-index:50;';
+        subBar.innerHTML=activeCues.map(c=>{
+          const txt=(c.speaker?c.speaker+'：':'')+c.text;subtitleTexts.push(txt);
+          const safe=txt.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+          return '<span style="display:inline-block;padding:0.22em 0.65em;border-radius:0.3em;background:rgba(10,12,18,0.68);color:#fff;font-size:'+fontSize+'px;line-height:1.42;text-shadow:0 2px 6px rgba(0,0,0,0.85);">'+safe+'</span>';
+        }).join('<br/>');
+        stage.append(subBar);
+      }
+    }
+    if(shot.transition==='flash_white'&&transFrames>0&&localFrame<transFrames){
+      const flashAlpha=Math.max(0,1-localFrame/transFrames)*0.85;
+      const flash=document.createElement('div');
+      flash.style.cssText='position:absolute;inset:0;pointer-events:none;z-index:60;background:rgba(255,255,255,'+flashAlpha.toFixed(3)+');';
+      stage.append(flash);
+    }
+    // Force layout before taking FontFaceSet.ready so dynamically added fonts settle.
     stage.getBoundingClientRect();
     await document.fonts.ready;
-    // The business transition belongs to the runtime, independently of AI scene motion.
-    const fps=data.spec.target.fps.num/data.spec.target.fps.den;
-    const fadeFrames=Math.min(Math.max(1,Math.round(.25*fps)),Math.floor(shot.durationFrames/2));
-    const next=data.spec.shots[data.spec.shots.indexOf(shot)+1];let opacity=1;
-    if(fadeFrames>0){
-      if(shot.transition==='fade')opacity=Math.min(opacity,context.localFrame/fadeFrames);
-      if(next?.transition==='fade')opacity=Math.min(opacity,(shot.durationFrames-1-context.localFrame)/fadeFrames);
+    let opacity=1;
+    if(defaultTransFrames>0){
+      if(shot.transition==='fade')opacity=Math.min(opacity,localFrame/transFrames);
+      if(next?.transition==='fade'){
+        const nextTrans=next.transitionFrames?Math.min(next.transitionFrames,Math.floor(shot.durationFrames/2)):defaultTransFrames;
+        opacity=Math.min(opacity,(shot.durationFrames-1-localFrame)/nextTrans);
+      }
     }
     stage.style.opacity=String(Math.max(0,Math.min(1,opacity)));
     // Freeze accidental CSS animations so the capture is controlled exclusively by frame.
     for(const animation of document.getAnimations())animation.pause();
-    return {frame,sceneId:shot.id,declaredTexts:[shot.params.text,shot.params.subtitle].filter(Boolean)};
+    return {frame,sceneId:shot.id,declaredTexts:[shot.params.text,shot.params.subtitle,...subtitleTexts].filter(Boolean)};
   }catch(error){throw decorateError(error,shot,frame);}
 }
 function renderFrame(input) {

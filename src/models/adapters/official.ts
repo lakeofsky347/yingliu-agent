@@ -154,11 +154,14 @@ function dataImage(dataUrl: string): { mime: string; base64: string } {
   if (!match?.[1] || !match[2]) throw new Error('参考图片必须是 PNG、JPEG 或 WebP');
   return { mime: match[1], base64: match[2] };
 }
-function firstImage(input: AdapterInput): { mime: string; base64: string; dataUrl: string } | undefined {
-  const image = input.inputs[0];
+function nthImage(input: AdapterInput, index: number): { mime: string; base64: string; dataUrl: string } | undefined {
+  const image = input.inputs[index];
   if (!image) return undefined;
   const parsed = dataImage(image.dataUrl);
   return { ...parsed, dataUrl: image.dataUrl };
+}
+function firstImage(input: AdapterInput): { mime: string; base64: string; dataUrl: string } | undefined {
+  return nthImage(input, 0);
 }
 function artifact(connection: ProviderConnection, url: string, mimeType: string): MediaArtifact {
   let sameOrigin = false;
@@ -188,9 +191,13 @@ function stringParam(input: AdapterInput, key: string): string | undefined {
 }
 
 async function geminiImage(context: AdapterContext, input: AdapterInput): Promise<RemoteJob> {
-  if (input.operation !== 'text-to-image') throw new Error('Gemini 图像协议当前只支持文生图');
+  if (!['text-to-image', 'image-compose'].includes(input.operation)) throw new Error('Gemini 图像协议当前只支持文生图与多图融合重绘');
+  const refParts = input.inputs.map(item => {
+    const parsed = dataImage(item.dataUrl);
+    return { inlineData: { mimeType: parsed.mime, data: parsed.base64 } };
+  });
   const data = record(await call(context, '/models/' + encodeURIComponent(input.model.model) + ':generateContent', {
-    contents: [{ role: 'user', parts: [{ text: input.prompt }] }],
+    contents: [{ role: 'user', parts: [...refParts, { text: input.prompt }] }],
     generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
   }), 'Gemini 图像接口返回无效对象');
   const candidates = Array.isArray(data.candidates) ? data.candidates : [];
@@ -248,7 +255,7 @@ async function openaiVideoPoll(context: AdapterContext, jobId: string): Promise<
 }
 
 async function klingSubmit(context: AdapterContext, input: AdapterInput): Promise<RemoteJob> {
-  const image = firstImage(input);
+  const image = firstImage(input), tail = nthImage(input, 1);
   const path = image ? '/v1/videos/image2video' : '/v1/videos/text2video';
   const duration = numberParam(input, 'durationSeconds');
   const body = record(await call(context, path, {
@@ -258,6 +265,7 @@ async function klingSubmit(context: AdapterContext, input: AdapterInput): Promis
     ...(stringParam(input, 'aspectRatio') ? { aspect_ratio: stringParam(input, 'aspectRatio') } : {}),
     ...(duration ? { duration: String(duration) } : {}),
     ...(image ? { image: image.base64 } : {}),
+    ...(tail ? { image_tail: tail.base64 } : {}),
   }), '可灵接口返回无效对象');
   const data = record(body.data ?? body, '可灵接口没有返回任务');
   const id = text(data.task_id);
@@ -303,9 +311,10 @@ async function minimaxPoll(context: AdapterContext, jobId: string): Promise<Remo
 }
 
 async function volcSubmit(context: AdapterContext, input: AdapterInput): Promise<RemoteJob> {
-  const image = firstImage(input);
+  const image = firstImage(input), tail = nthImage(input, 1);
   const content: Json[] = [{ type: 'text', text: input.prompt }];
   if (image) content.push({ type: 'image_url', image_url: { url: image.dataUrl }, role: 'first_frame' });
+  if (tail) content.push({ type: 'image_url', image_url: { url: tail.dataUrl }, role: 'last_frame' });
   const duration=numberParam(input,'durationSeconds'),ratio=stringParam(input,'aspectRatio'),seed=numberParam(input,'seed');
   const body = record(await call(context, '/contents/generations/tasks', { model: input.model.model, content,...(duration!==undefined?{duration}:{}),...(ratio!==undefined?{ratio}:{}),...(seed!==undefined?{seed}:{}) }), '火山方舟接口返回无效对象');
   return job(text(body.id), 'queued');
@@ -320,11 +329,15 @@ async function volcPoll(context: AdapterContext, jobId: string): Promise<RemoteJ
 }
 
 async function dashscopeSubmit(context: AdapterContext, input: AdapterInput): Promise<RemoteJob> {
-  const image = firstImage(input);
+  const image = firstImage(input), tail = nthImage(input, 1);
   const duration = numberParam(input, 'durationSeconds');
   const body = record(await call(context, '/services/aigc/video-generation/video-synthesis', {
     model: input.model.model,
-    input: { prompt: input.prompt, ...(image ? { img_url: image.dataUrl } : {}),...(stringParam(input,'negativePrompt')?{negative_prompt:stringParam(input,'negativePrompt')}:{}) },
+    input: {
+      prompt: input.prompt,
+      ...(tail && image ? { first_frame_url: image.dataUrl, last_frame_url: tail.dataUrl } : image ? { img_url: image.dataUrl } : {}),
+      ...(stringParam(input,'negativePrompt')?{negative_prompt:stringParam(input,'negativePrompt')}:{}),
+    },
     parameters: { ...(duration!==undefined ? { duration } : {}), ...(numberParam(input,'width')!==undefined?{size:numberParam(input,'width')+'*'+numberParam(input,'height')} : {}),...(numberParam(input,'seed')!==undefined?{seed:numberParam(input,'seed')}:{}) },
   }, { extraHeaders: { 'X-DashScope-Async': 'enable' } }), '百炼接口返回无效对象');
   const output = record(body.output, '百炼接口没有返回任务');
@@ -340,11 +353,15 @@ async function dashscopePoll(context: AdapterContext, jobId: string): Promise<Re
 }
 
 async function geminiVideoSubmit(context: AdapterContext, input: AdapterInput): Promise<RemoteJob> {
-  const image = firstImage(input);
+  const image = firstImage(input), tail = nthImage(input, 1);
   const duration = numberParam(input, 'durationSeconds');
   const body = record(await call(context, '/models/' + encodeURIComponent(input.model.model) + ':predictLongRunning', {
     instances: [{ prompt: input.prompt, ...(image ? { image: { bytesBase64Encoded: image.base64, mimeType: image.mime } } : {}) }],
-    parameters: { ...(stringParam(input, 'aspectRatio') ? { aspectRatio: stringParam(input, 'aspectRatio') } : {}), ...(duration ? { durationSeconds: duration } : {}) },
+    parameters: {
+      ...(stringParam(input, 'aspectRatio') ? { aspectRatio: stringParam(input, 'aspectRatio') } : {}),
+      ...(duration ? { durationSeconds: duration } : {}),
+      ...(tail ? { lastFrame: { bytesBase64Encoded: tail.base64, mimeType: tail.mime } } : {}),
+    },
   }), 'Gemini Veo 返回无效对象');
   const name = text(body.name);
   return job(name, 'queued');

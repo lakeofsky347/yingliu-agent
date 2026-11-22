@@ -29,12 +29,52 @@ export interface ShotParams {
   fontSize:number; motion:'fade'|'slide'|'zoom'|'none';
   [key:string]:string|number|boolean;
 }
+export type ShotTransition = 'cut'|'fade'|'dissolve'|'wipe_left'|'flash_white';
+export interface ShotColorGrade {
+  /** Exposure stops (-2 to +2, default 0). */
+  exposure?:number;
+  /** Contrast multiplier (0.2 to 3, default 1). */
+  contrast?:number;
+  /** Saturation multiplier (0 to 3, default 1). */
+  saturation?:number;
+  /** Color temperature shift (-100 cool to +100 warm, default 0). */
+  temperature?:number;
+  /** Green-magenta tint shift (-100 to +100, default 0). */
+  tint?:number;
+  /** Edge vignette strength (0 to 1, default 0). */
+  vignette?:number;
+}
+export interface ShotTake {
+  id:string; assetId:string; kind:'video'|'image'; score?:number; notes?:string; createdAt:string;
+}
+export interface OverlayClip {
+  id:string; shotId:string; assetId:string; kind:'image'|'video';
+  /** Normalized 0..100 stage percentage coordinates and size. */
+  x:number; y:number; width:number; height:number; opacity:number;
+  startSeconds:number; durationSeconds?:number; borderRadius?:number;
+}
+export interface SubtitleCue {
+  id:string; startSeconds:number; endSeconds:number; text:string;
+  speaker?:string; shotId?:string; style?:'default'|'cinema'|'minimal';
+}
+export interface AudioMixSettings {
+  /** Automatically duck BGM when voice clips are active. */
+  autoDucking?:boolean;
+  /** Ducking attenuation in dB (e.g. 8 means -8 dB on music during speech). */
+  duckingDb?:number;
+  /** Target integrated loudness in LUFS (e.g. -14 for web, -16 for mobile, -23 for broadcast). */
+  targetLufs?:number;
+  /** Acoustic space preset applied to dialogue voice bus. */
+  voiceReverb?:'none'|'room'|'hall'|'phone';
+}
 export interface Shot {
   id:string; title:string; intent:string; composition:string; action:string;
   durationFrames:number; assetIds:string[]; referenceIds:string[];
-  transition:'cut'|'fade'; params:ShotParams; sourcePath:string;
+  transition:ShotTransition; transitionFrames?:number; params:ShotParams; sourcePath:string;
   narration?:string;
   visual?:ShotVisual;
+  colorGrade?:ShotColorGrade;
+  takes?:ShotTake[];
 }
 export interface GraphLayout {
   positions:Record<string,[number,number]>;
@@ -48,6 +88,7 @@ export interface VideoStyle {
 export interface AudioClip {
   id:string;assetId:string;role:'voice'|'music'|'sfx';shotId?:string;
   startSeconds:number;trimStart:number;trimEnd?:number;volume:number;fadeIn:number;fadeOut:number;loop?:boolean;
+  characterId?:string;speaker?:string;
 }
 /** One deterministic source-video layer per shot; time values are source seconds. */
 export interface VideoClip {
@@ -66,12 +107,16 @@ export interface VideoProject {
   outputs:ExportResult[]; extensions:Record<string,unknown>;
   sessionIds?:string[];audioClips?:AudioClip[];videoClips?:VideoClip[];videoStyle?:VideoStyle;
   productionPolicy?:ProductionPolicy;
+  overlayClips?:OverlayClip[];
+  subtitles?:SubtitleCue[];
+  audioMix?:AudioMixSettings;
 }
-export interface SpecShot extends Shot { startFrame:number; endFrame:number; assets:Asset[]; videoClip?:VideoClip }
+export interface SpecShot extends Shot { startFrame:number; endFrame:number; assets:Asset[]; videoClip?:VideoClip; overlays?:OverlayClip[] }
 export interface VideoSpec {
   projectId:string; title:string; topic:string; target:VideoTarget;
   durationFrames:number; durationSeconds:number; shots:SpecShot[];
   productionPolicy?:ProductionPolicy;
+  subtitles?:SubtitleCue[];
 }
 export interface SceneSource { html:string; css:string; js:string; shotPatch?:Partial<Shot> }
 export interface TaskState {

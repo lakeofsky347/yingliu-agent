@@ -1,20 +1,22 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { AgentEvent, AgentMessage, AgentPort, AgentRun, AgentStartInput, AgentTool, PublicRun, RunStep, ToolCall, ToolResult, ToolRisk, ToolSuccessReceipt } from './contracts.ts';
+import type { AgentEvent, AgentMessage, AgentPort, AgentRun, AgentStartInput, AgentTool, CrewDepartment, PublicRun, RunStep, ToolCall, ToolResult, ToolRisk, ToolSuccessReceipt } from './contracts.ts';
 import { chatTurn, looksLikeNoToolSupport, type ChatConfig } from './model-client.ts';
 import { backoff, budgetFrom, chargeModel, chargeTool, classify, emptyUsage, needsApproval, overBudget, tokenCost } from './budget.ts';
 import { bound, capabilityPrompt, compressMessages, summarizeProject, systemPrompt } from './context.ts';
 import { RunStore } from './run-store.ts';
-import { activeTools, createTools } from './tools.ts';
+import { activeTools, createTools, qualityCheck } from './tools.ts';
+import { runCrewSubagent } from './subagents.ts';
 import type { AgentDocs, Capabilities, ToolContext } from './contracts.ts';
 import { join } from 'node:path';
 import { submissionOf } from './submission.ts';
-import { emptyLedger, emptyStory, normalizeCharacter, normalizeStyle, ProjectDocs, storyBrief, anchorPrompt, type Ledger, type QcReport, type Story } from './story.ts';
-import { qualityCheck } from './tools.ts';
+import { emptyLedger, emptyStory, mergeDirectorPlanIntoStory, normalizeCharacter, normalizeLocation, normalizeProp, normalizeStyle, ProjectDocs, storyBrief, anchorPrompt, type Ledger, type QcReport, type Story } from './story.ts';
+import type { DirectorPlan } from '../director/contracts.ts';
 import { consentChallenge, UploadConsentRequired } from '../models/upload-consent.ts';
 
 export interface ResolvedAgentModel { config: ChatConfig; parameters: Record<string, unknown>; connectionId?: string }
 export interface AgentServiceOptions {
   resolveModel(): Promise<ResolvedAgentModel>;
+  resolveSubModel?(role: 'scene' | 'director'): Promise<ResolvedAgentModel>;
   fetch?: typeof fetch; tools?: AgentTool[]; redact?: (text: string) => Promise<string>;
   contextChars?: number; pollMs?: number;
   /** C01: false opens the store read-only (no settling of in-flight receipts, no status rewrite). Default true. */
@@ -29,11 +31,7 @@ function canonical(value: unknown): string {
   if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonical((value as Record<string, unknown>)[key])).join(',') + '}';
   return JSON.stringify(value) ?? 'null';
 }
-/** PR1-R06: Story import contract shared by validation and import.
- *  Required (absent or mistyped -> reject): version; character id/name/features/referenceAssetIds; shot id/summary/durationSeconds/characters
- *  (each referencing a defined character). Defaultable fields of older documents (status, title, logline, targetSeconds, style.*,
- *  consistency, character description, shot shotType/camera/dialogue/continueFromPrevious) are migrated to their empty values.
- *  The migrated document is exercised by every consumer (storyBrief, anchorPrompt) before it is accepted. Returns null when invalid. */
+/** PR1-R06: Story / Production Bible import contract shared by validation and import. */
 export function migrateStory(v: Record<string, unknown>): Story | null {
   const obj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
   const str = (x: unknown): x is string => typeof x === 'string';
@@ -51,20 +49,44 @@ export function migrateStory(v: Record<string, unknown>): Story | null {
   for (const c of (v.characters ?? []) as unknown[]) {
     if (!obj(c) || !str(c.id) || !c.id || !str(c.name) || !strs(c.features) || !strs(c.referenceAssetIds)) return null;
     const description = opt(c.description, ''); if (description === null || c.voice !== undefined && !str(c.voice)) return null;
-    characters.push({ id: c.id, name: c.name, description, features: c.features, referenceAssetIds: c.referenceAssetIds, ...(str(c.voice) ? { voice: c.voice } : {}) });
+    characters.push({
+      id: c.id, name: c.name, description, features: c.features, referenceAssetIds: c.referenceAssetIds,
+      ...(str(c.objective) ? { objective: c.objective } : {}),
+      ...(str(c.baselineEmotion) ? { baselineEmotion: c.baselineEmotion } : {}),
+      ...(str(c.voice) ? { voice: c.voice } : {}),
+    });
   }
+  const locations = Array.isArray(v.locations) ? (v.locations as unknown[]).filter(obj).map((l, i) => normalizeLocation(l, i)) : undefined;
+  const props = Array.isArray(v.props) ? (v.props as unknown[]).filter(obj).map((p, i) => normalizeProp(p, i)) : undefined;
   const known = new Set(characters.map(c => c.id)); const shots: Story['shots'] = [];
   for (const sh of (v.shots ?? []) as unknown[]) {
     if (!obj(sh) || !str(sh.id) || !sh.id || !str(sh.summary) || !num(sh.durationSeconds) || !strs(sh.characters) || sh.characters.some(id => !known.has(id))) return null;
     const shotType = opt(sh.shotType, ''), camera = opt(sh.camera, ''), dialogue = opt(sh.dialogue, '');
     if (shotType === null || camera === null || dialogue === null || sh.shotId !== undefined && !str(sh.shotId) || sh.continueFromPrevious !== undefined && typeof sh.continueFromPrevious !== 'boolean') return null;
-    shots.push({ id: sh.id, ...(str(sh.shotId) ? { shotId: sh.shotId } : {}), summary: sh.summary, shotType, camera, durationSeconds: sh.durationSeconds, dialogue, characters: sh.characters, continueFromPrevious: sh.continueFromPrevious === true });
+    shots.push({
+      id: sh.id, ...(str(sh.shotId) ? { shotId: sh.shotId } : {}), summary: sh.summary, shotType, camera,
+      durationSeconds: sh.durationSeconds, dialogue, characters: sh.characters, continueFromPrevious: sh.continueFromPrevious === true,
+      ...(str(sh.locationId) ? { locationId: sh.locationId } : {}),
+      ...(strs(sh.propIds) ? { propIds: sh.propIds } : {}),
+      ...(obj(sh.previz) && ['none', 'rendered', 'approved', 'skipped'].includes(String(sh.previz.status)) ? { previz: sh.previz as unknown as Story['shots'][number]['previz'] } : {}),
+    });
   }
   if (v.consistency !== undefined && !(obj(v.consistency) && Object.values(v.consistency).every(c => obj(c) && num(c.score)))) return null;
   const title = opt(v.title, ''), logline = opt(v.logline, '');
   if (title === null || logline === null || v.targetSeconds !== undefined && !num(v.targetSeconds) || v.approvedAt !== undefined && !str(v.approvedAt) || v.updatedAt !== undefined && !str(v.updatedAt)) return null;
-  const story: Story = { version: v.version as number, projectId: str(v.projectId) ? v.projectId : '', status: v.status === 'approved' ? 'approved' : 'empty', title, logline, targetSeconds: (v.targetSeconds as number | undefined) ?? 0,
-    style: style as Story['style'], characters, shots, ...(str(v.approvedAt) ? { approvedAt: v.approvedAt } : {}), updatedAt: str(v.updatedAt) ? v.updatedAt : new Date(0).toISOString(), consistency: (v.consistency ?? {}) as Story['consistency'] };
+  const story: Story = {
+    version: v.version as number, projectId: str(v.projectId) ? v.projectId : '', status: v.status === 'approved' ? 'approved' : 'empty',
+    ...(str(v.filmKind) && ['general', 'suspense_short', 'product', 'explainer', 'lyrical'].includes(v.filmKind) ? { filmKind: v.filmKind as Story['filmKind'] } : {}),
+    title, logline, targetSeconds: (v.targetSeconds as number | undefined) ?? 0,
+    style: style as Story['style'], characters,
+    ...(locations?.length ? { locations } : {}),
+    ...(props?.length ? { props } : {}),
+    ...(Array.isArray(v.storyBeats) ? { storyBeats: v.storyBeats as Story['storyBeats'] } : {}),
+    ...(Array.isArray(v.worldLayouts) ? { worldLayouts: v.worldLayouts as Story['worldLayouts'] } : {}),
+    ...(Array.isArray(v.continuityLog) ? { continuityLog: v.continuityLog as Story['continuityLog'] } : {}),
+    shots, ...(str(v.approvedAt) ? { approvedAt: v.approvedAt } : {}), updatedAt: str(v.updatedAt) ? v.updatedAt : new Date(0).toISOString(),
+    consistency: (v.consistency ?? {}) as Story['consistency'],
+  };
   try { storyBrief({ ...story, status: 'approved' }); anchorPrompt(story, characters.map(c => c.id)); } catch { return null; }
   return story;
 }
@@ -72,7 +94,7 @@ export function migrateStory(v: Record<string, unknown>): Story | null {
 export function argsHash(runId: string, tool: string, args: Record<string, unknown>): string { return createHash('sha256').update(runId + '\0' + tool + '\0' + canonical(args)).digest('hex'); }
 function sleep(ms: number, signal: AbortSignal) { return new Promise<void>((resolve, reject) => { const timer = setTimeout(() => { signal.removeEventListener('abort', stop); resolve(); }, ms); const stop = () => { clearTimeout(timer); reject(signal.reason); }; signal.addEventListener('abort', stop, { once: true }); }); }
 
-/** Plan → act → observe → reflect loop over registered tools, with approval gates, budgets, durable resume and traces. */
+/** Hierarchical Showrunner + Specialized Crew Sub-Agents + Batch Scheduler loop with approval gates, budgets, durable resume and traces. */
 export class AgentService {
   private runs = new Map<string, AgentRun>();
   private active = new Map<string, { controller: AbortController; promise: Promise<void> }>();
@@ -95,6 +117,10 @@ export class AgentService {
     };
   }
   story(projectId: string) { return this.stories.get(projectId); }
+  /** Bidirectional sync: when DirectorDocument is saved or approved from the Workbench UI, keep Story / Production Bible unified. */
+  async syncFromDirectorPlan(projectId: string, plan: DirectorPlan, approved: boolean): Promise<Story> {
+    return this.stories.update(projectId, current => mergeDirectorPlanIntoStory(plan, current, approved));
+  }
   /** Agent-side project data for backups: story, budget ledger and last QC report. Missing documents are omitted. */
   async exportDocs(projectId: string): Promise<Record<'story' | 'ledger' | 'qc', unknown>> {
     const [story, ledger, qc] = await Promise.all([this.stories.raw(projectId), this.ledgers.raw(projectId), this.qcs.raw(projectId)]);
@@ -127,14 +153,16 @@ export class AgentService {
     if (docs.ledger) await this.ledgers.put(projectId, { ...emptyLedger(projectId), ...(docs.ledger as Ledger), projectId });
     if (docs.qc) await this.qcs.put(projectId, docs.qc as { version: number; report?: QcReport });
   }
-  /** User edits from the UI (style, characters, logline). Shots are changed through the agent's plan_shots or here wholesale. */
+  /** User edits from the UI (style, characters, locations, props, logline). */
   async saveStory(projectId: string, input: Record<string, unknown>, expectedVersion: number): Promise<Story> {
     return this.stories.update(projectId, current => {
       const next = { ...current, updatedAt: now() };
       if (typeof input.title === 'string') next.title = input.title.trim().slice(0, 80);
       if (typeof input.logline === 'string') next.logline = input.logline.trim().slice(0, 1200);
       if (input.style !== undefined) next.style = normalizeStyle(input.style);
-      if (Array.isArray(input.characters)) { const list = input.characters.slice(0, 20).map(normalizeCharacter); const used = new Set(next.shots.flatMap(s => s.characters)); const missing = [...used].filter(id => !list.some(c => c.id === id)); if (missing.length) throw new Error('分镜仍在使用这些角色，不能删除：' + missing.join(', ')); next.characters = list; }
+      if (Array.isArray(input.characters)) { const list = input.characters.slice(0, 30).map(normalizeCharacter); const used = new Set(next.shots.flatMap(s => s.characters)); const missing = [...used].filter(id => !list.some(c => c.id === id)); if (missing.length) throw new Error('分镜仍在使用这些角色，不能删除：' + missing.join(', ')); next.characters = list; }
+      if (Array.isArray(input.locations)) next.locations = input.locations.slice(0, 30).map(normalizeLocation);
+      if (Array.isArray(input.props)) next.props = input.props.slice(0, 40).map(normalizeProp);
       if (input.status === 'empty') { next.status = 'empty'; delete next.approvedAt; }
       return next;
     }, expectedVersion);
@@ -142,39 +170,64 @@ export class AgentService {
   ledger(projectId: string) { return this.ledgers.get(projectId); }
   setProjectBudget(projectId: string, maxCost: number | null, currency?: string): Promise<Ledger> {
     if (maxCost !== null && (!Number.isFinite(maxCost) || maxCost < 0)) throw new Error('费用上限须为非负数，或留空表示不限');
-    if(currency!==undefined&&!/^[A-Z]{3}$/.test(currency))throw new Error('账本币种须为三个大写字母');
+    if (currency !== undefined && !/^[A-Z]{3}$/.test(currency)) throw new Error('账本币种须为三个大写字母');
     return this.ledgers.update(projectId, current => {
-      if(currency!==undefined&&currency!==current.currency&&(current.spent!==0||current.unknownCostCalls>0||Object.values(current.byTool).some(entry=>entry.cost!==0)))throw new Error('已有花费或未知费用记录，不能直接更改账本币种');
-      return {...current,maxCost,...(currency?{currency}:{}),updatedAt:now()};
+      if (currency !== undefined && currency !== current.currency && (current.spent !== 0 || current.unknownCostCalls > 0 || Object.values(current.byTool).some(entry => entry.cost !== 0))) throw new Error('已有花费或未知费用记录，不能直接更改账本币种');
+      return { ...current, maxCost, ...(currency ? { currency } : {}), updatedAt: now() };
     });
   }
   async lastQc(projectId: string) { return (await this.qcs.get(projectId)).report ?? null; }
   async runQc(projectId: string, signal = new AbortController().signal): Promise<QcReport> { return qualityCheck(this.context('qc', projectId, signal)); }
-  private context(runId: string, projectId: string, signal: AbortSignal, run?:AgentRun): ToolContext {
-    const analyze=this.port.vision;
-    const vision:AgentPort['vision']=run?.allowImages&&analyze?(prompt,images,requestSignal)=>analyze.call(this.port,prompt,images,requestSignal,target=>{
-      if(run.visionGrant!==target.fingerprint)throw new UploadConsentRequired('review',target);
-    }):undefined;
-    const port:AgentPort=Object.create(this.port,{vision:{value:vision,enumerable:true}});
-    return { runId, projectId, signal, port, docs: this.docs(projectId) };
+  private context(runId: string, projectId: string, signal: AbortSignal, run?: AgentRun): ToolContext {
+    const analyze = this.port.vision;
+    const vision: AgentPort['vision'] = run?.allowImages && analyze ? (prompt, images, requestSignal) => analyze.call(this.port, prompt, images, requestSignal, target => {
+      if (run.visionGrant !== target.fingerprint) throw new UploadConsentRequired('review', target);
+    }) : undefined;
+    const port: AgentPort = Object.create(this.port, { vision: { value: vision, enumerable: true } });
+    const ctx: ToolContext = { runId, projectId, signal, port, docs: this.docs(projectId) };
+    if (run) {
+      ctx.delegateCrew = async (department: CrewDepartment, task: string, scopedShotIds?: string[]) => {
+        const caps = await this.capabilities();
+        const activeToolsList = this.runTools(run, caps.capabilities);
+        const result = await runCrewSubagent({
+          department,
+          task,
+          scopedShotIds,
+          parentRun: run,
+          parentCtx: ctx,
+          allTools: activeToolsList,
+          resolveSubModel: role => this.options.resolveSubModel ? this.options.resolveSubModel(role) : this.options.resolveModel(),
+          fetch: this.options.fetch,
+          onTokenUsage: async (inputTokens, outputTokens, usageKnown, parameters) => {
+            const ledger = await this.ledgers.get(run.projectId);
+            const cost = usageKnown && ledger.currency === run.usage.currency ? tokenCost(parameters, inputTokens, outputTokens, run.usage.currency) : null;
+            chargeModel(run.usage, inputTokens, outputTokens, cost);
+            await this.spend(run.projectId, 'director', cost);
+          },
+        });
+        await this.store.trace(run.id, { event: 'subagent.complete', department, task: bound(task, 200) });
+        return result;
+      };
+    }
+    return ctx;
   }
   /** Tools exposed to one run: image-upload tools are withheld unless the user allowed sending frames. */
   private runTools(run: AgentRun, capabilities: Capabilities): AgentTool[] {
     const tools = activeTools(this.tools, capabilities);
     return run.allowImages === true ? tools : tools.filter(tool => !(tool.requires ?? []).includes('vision'));
   }
-  private setVisionChallenge(run:AgentRun,error:UploadConsentRequired){
-    if(run.visionConsentRequired?.purpose!==error.purpose||run.visionChallengeFingerprint!==error.destination.fingerprint){
-      run.visionConsentRequired={...consentChallenge(error.purpose,error.destination),...(error.purpose==='video-reference'&&run.pendingVideoReference?{assetId:run.pendingVideoReference.assetId}:{})};
-      run.visionChallengeFingerprint=error.destination.fingerprint;
+  private setVisionChallenge(run: AgentRun, error: UploadConsentRequired) {
+    if (run.visionConsentRequired?.purpose !== error.purpose || run.visionChallengeFingerprint !== error.destination.fingerprint) {
+      run.visionConsentRequired = { ...consentChallenge(error.purpose, error.destination), ...(error.purpose === 'video-reference' && run.pendingVideoReference ? { assetId: run.pendingVideoReference.assetId } : {}) };
+      run.visionChallengeFingerprint = error.destination.fingerprint;
     }
-    run.status='paused';run.message=error.message;
+    run.status = 'paused'; run.message = error.message;
   }
-  private invalidateVideoApproval(run:AgentRun,call:ToolCall){
-    const execId=call.execId;
-    if(run.approvals?.some(item=>item.execId===execId)){
-      run.approvals=run.approvals.filter(item=>item.execId!==execId);
-      call.execId=randomUUID();
+  private invalidateVideoApproval(run: AgentRun, call: ToolCall) {
+    const execId = call.execId;
+    if (run.approvals?.some(item => item.execId === execId)) {
+      run.approvals = run.approvals.filter(item => item.execId !== execId);
+      call.execId = randomUUID();
     }
   }
   private async spend(projectId: string, tool: string, cost: number | null | undefined, settleUnknown = false, executionId?: string) {
@@ -208,7 +261,7 @@ export class AgentService {
   subscribe(listener: (event: AgentEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   private emit(event: AgentEvent) { for (const listener of this.listeners) { try { listener(event); } catch { /* listener errors never break the loop */ } } }
   public(run: AgentRun): PublicRun {
-    const { messages,visionGrant,visionChallengeFingerprint,pendingSelfCheck,videoReferenceGrant,pendingVideoReference,...rest } = structuredClone(run);
+    const { messages, visionGrant, visionChallengeFingerprint, pendingSelfCheck, videoReferenceGrant, pendingVideoReference, ...rest } = structuredClone(run);
     const transcript = messages.slice(1).map(message => ({
       role: message.role,
       content: typeof message.content === 'string' ? bound(message.content, 2000) : Array.isArray(message.content) ? message.content.map(part => part.type === 'text' ? part.text : '[图片]').join('\n') : '',
@@ -230,7 +283,6 @@ export class AgentService {
   async get(id: string) { return this.public(await this.required(id)); }
   async trace(id: string) { await this.required(id); return this.store.readTrace(id); }
 
-  /** Serialize lifecycle changes only within one project; snapshot I/O must not leave an activation race. */
   private projectCommand<T>(projectId: string, work: () => Promise<T>): Promise<T> {
     const next = (this.projectCommands.get(projectId) ?? Promise.resolve()).then(() => {
       this.requireOpen(); return work();
@@ -242,7 +294,6 @@ export class AgentService {
   }
   private requireOpen() { if (this.stopped) throw new Error('智能体服务正在关闭'); }
   private async requireProjectAvailable(projectId: string, exceptId?: string) {
-    // Terminal/paused status is published just before the loop returns; drain that final save instead of reporting a false conflict.
     await Promise.all([...this.runs.values()].filter(run => run.id !== exceptId && run.projectId === projectId && (TERMINAL.has(run.status) || run.status === 'paused')).map(run => this.settled(run.id)));
     if ([...this.runs.values()].some(run => run.id !== exceptId && run.projectId === projectId && (this.active.has(run.id) || !TERMINAL.has(run.status) && run.status !== 'paused'))) throw new Error('该工程已有进行中的智能体运行，请先完成、暂停或取消');
   }
@@ -259,34 +310,29 @@ export class AgentService {
       const budget = budgetFrom(input.budget), autoApprove = (input.autoApprove ?? DEFAULT_AUTO).filter(risk => ['read', 'write', 'plan', 'cost', 'export'].includes(risk));
       if (!autoApprove.includes('read')) autoApprove.push('read');
       const run: AgentRun = {
-        version: 1, id: randomUUID(), projectId: input.projectId, goal, status: 'running', message: '智能体正在规划', createdAt: now(), updatedAt: now(),
+        version: 1, id: randomUUID(), projectId: input.projectId, goal, status: 'running', message: '总导演智能体正在规划', createdAt: now(), updatedAt: now(),
         model: {}, budget, usage: emptyUsage(budget.currency), policy: { autoApprove },
         messages: [{ role: 'user', content: `目标：${goal}\n\n当前工程摘要：${JSON.stringify(summarizeProject(snapshot.project))}` }],
         steps: [], queue: [], approvedCallIds: [], reviewRounds: 0,
       };
       (run as AgentRun & { maxReviewRounds?: number }).maxReviewRounds = Number.isSafeInteger(input.maxReviewRounds) ? Math.max(0, Math.min(5, input.maxReviewRounds!)) : this.options.maxReviewRounds ?? 2;
-      run.allowImages=input.allowImages===true;
-      if(run.allowImages&&this.port.visionDestination)run.visionGrant=(await this.port.visionDestination()).fingerprint;
+      run.allowImages = input.allowImages === true;
+      if (run.allowImages && this.port.visionDestination) run.visionGrant = (await this.port.visionDestination()).fingerprint;
       this.requireOpen();
       this.runs.set(run.id, run); await this.store.trace(run.id, { event: 'run.start', goal, budget, autoApprove }); await this.save(run);
       this.launch(run); return this.public(run);
     });
   }
-  /** R08: a loop publishes paused/awaiting state just before it exits; callers acting on that state wait for it to finish. */
-  /** R02: decisions are bound to the host execution ID (and optionally the args hash) of the pending call; a stale or replayed
-   *  decision for an earlier call that reused the provider call ID is rejected instead of attaching to the current one. */
+
   private checkPending(pending: AgentRun['pending'], execId?: string, expectedArgsHash?: string) {
-    if (!pending?.execId) return; // legacy pending records created before execution IDs
+    if (!pending?.execId) return;
     if (typeof execId !== 'string' || !execId) throw Object.assign(new Error('审批需要提供待批准步骤的 execId'), { code: 'EXEC_ID_REQUIRED' });
     if (execId !== pending.execId) throw Object.assign(new Error('审批已过期：待批准的步骤已变化，请刷新后重新确认'), { code: 'STALE_APPROVAL' });
     if (expectedArgsHash !== undefined && expectedArgsHash !== pending.argsHash) throw Object.assign(new Error('审批已过期：参数已变化'), { code: 'STALE_APPROVAL' });
   }
-  /** R03: a paid/export call that was in flight when the loop stopped (pause, cancel, dispose, crash) has an unknown outcome.
-   *  Record it, answer the model's tool call as unknown and drop it from the queue so resume never re-executes it;
-   *  later paid calls then require explicit approval (uncertainSubmissions). */
+
   private async settleInFlight(run: AgentRun): Promise<boolean> {
     const flight = run.inFlight; if (!flight) return false;
-    // A known result belongs to the success journal even when bookkeeping is still failing.
     if ((await this.store.toolSuccesses(run.id)).some(receipt => receipt.execId === flight.execId)) return false;
     const entry = { execId: flight.execId, tool: flight.tool, at: now(), error: '运行中断时收费请求已发出，结果未知（可能已受理并计费）', attempts: 1 };
     (run.uncertainSubmissions ??= []).push(entry); delete run.inFlight;
@@ -332,36 +378,38 @@ export class AgentService {
       delete run.pending; run.status = 'running'; run.message = '已拒绝，智能体调整方案'; await this.save(run); this.launch(run); return this.public(run);
     });
   }
-  async resume(id:string,visionConsentId?:string,disableVision=false):Promise<PublicRun> {
+  async resume(id: string, visionConsentId?: string, disableVision = false): Promise<PublicRun> {
     const run = await this.required(id);
     return this.projectCommand(run.projectId, async () => {
       if (!['paused', 'failed', 'waiting_task'].includes(run.status) || run.status === 'waiting_task' && this.active.has(id)) throw new Error('当前状态不能继续');
       await this.settled(id); if (!['paused', 'failed', 'waiting_task'].includes(run.status) || this.active.has(id)) throw new Error('当前状态不能继续');
       this.requireOpen(); await this.requireProjectAvailable(run.projectId, run.id);
-      if(disableVision){
-        const reference=run.pendingVideoReference;
-        if(run.visionConsentRequired?.purpose==='video-reference'&&reference){
-          const call=run.queue.find(item=>item.execId===reference.execId);
-          if(call){run.queue=run.queue.filter(item=>item!==call);run.messages.push({role:'tool',tool_call_id:call.id,content:'用户拒绝上传参考图片，本次图生视频未提交。'});}
-          run.approvals=run.approvals?.filter(item=>item.execId!==reference.execId);
-          delete run.videoReferenceGrant;delete run.pendingVideoReference;
-        }else{run.allowImages=false;delete run.visionGrant;}
-        delete run.visionConsentRequired;delete run.visionChallengeFingerprint;
-      }else if(visionConsentId!==undefined){
-        const challenge=run.visionConsentRequired;
-        const destination=challenge?.purpose==='video-reference'?this.port.videoReferenceDestination:this.port.visionDestination;
-        if(challenge?.id!==visionConsentId||!destination)throw new Error('上传授权已过期，请刷新运行状态后重新确认');
-        const target=await destination.call(this.port);
-        if(target.fingerprint!==run.visionChallengeFingerprint){this.setVisionChallenge(run,new UploadConsentRequired(challenge.purpose,target));await this.save(run);return this.public(run);}
-        if(challenge.purpose==='review')run.visionGrant=target.fingerprint;
-        else{
-          if(!run.pendingVideoReference||run.queue[0]?.execId!==run.pendingVideoReference.execId)throw new Error('原图生视频工具调用已变更');
-          run.videoReferenceGrant={...run.pendingVideoReference,fingerprint:target.fingerprint};delete run.pendingVideoReference;
+      if (disableVision) {
+        const reference = run.pendingVideoReference;
+        if (run.visionConsentRequired?.purpose === 'video-reference' && reference) {
+          const call = run.queue.find(item => item.execId === reference.execId);
+          if (call) { run.queue = run.queue.filter(item => item !== call); run.messages.push({ role: 'tool', tool_call_id: call.id, content: '用户拒绝上传参考图片，本次参考图生成未提交。' }); }
+          run.approvals = run.approvals?.filter(item => item.execId !== reference.execId);
+          delete run.videoReferenceGrant; delete run.pendingVideoReference;
+        } else { run.allowImages = false; delete run.visionGrant; }
+        delete run.visionConsentRequired; delete run.visionChallengeFingerprint;
+      } else if (visionConsentId !== undefined) {
+        const challenge = run.visionConsentRequired;
+        const destination = challenge?.purpose === 'video-reference'
+          ? (run.pendingVideoReference?.role === 'image' ? this.port.imageReferenceDestination : this.port.videoReferenceDestination)
+          : this.port.visionDestination;
+        if (challenge?.id !== visionConsentId || !destination) throw new Error('上传授权已过期，请刷新运行状态后重新确认');
+        const target = await destination.call(this.port);
+        if (target.fingerprint !== run.visionChallengeFingerprint) { this.setVisionChallenge(run, new UploadConsentRequired(challenge.purpose, target)); await this.save(run); return this.public(run); }
+        if (challenge.purpose === 'review') run.visionGrant = target.fingerprint;
+        else {
+          if (!run.pendingVideoReference || run.queue[0]?.execId !== run.pendingVideoReference.execId) throw new Error('原参考图生成工具调用已变更');
+          run.videoReferenceGrant = { ...run.pendingVideoReference, fingerprint: target.fingerprint }; delete run.pendingVideoReference;
         }
-        delete run.visionConsentRequired;delete run.visionChallengeFingerprint;
+        delete run.visionConsentRequired; delete run.visionChallengeFingerprint;
       }
       if (run.status === 'failed' && !run.queue.length) run.messages.push({ role: 'user', content: '上一步失败：' + (run.error ?? '') + '。请根据当前工程重新判断并继续。' });
-      run.status = run.waiting ? 'waiting_task' : 'running'; delete run.error; run.message = '从断点继续'; await this.store.trace(run.id, { event: 'run.resume' }); await this.save(run); this.launch(run); return this.public(run);
+      run.status = (run.waiting || run.waitingBatch) ? 'waiting_task' : 'running'; delete run.error; run.message = '从断点继续'; await this.store.trace(run.id, { event: 'run.resume' }); await this.save(run); this.launch(run); return this.public(run);
     });
   }
   async pause(id: string): Promise<PublicRun> {
@@ -395,7 +443,7 @@ export class AgentService {
       delete run.final;
       delete run.error;
       run.reviewRounds = 0;
-      if (run.usage.steps >= run.budget.maxSteps) run.budget.maxSteps = Math.min(200, run.usage.steps + 12);
+      if (run.usage.steps >= run.budget.maxSteps) run.budget.maxSteps = Math.min(200, run.usage.steps + 16);
       run.status = 'running';
       run.message = '继续处理新指令';
       await this.store.trace(run.id, { event: 'run.followup', message: bound(message, 400) });
@@ -409,7 +457,6 @@ export class AgentService {
     return this.projectCommand(run.projectId, async () => {
       const active = this.active.get(id);
       active?.controller.abort(new Error('用户取消')); await active?.promise.catch(() => {});
-      // Cancelling cannot discard an already successful paid effect that still needs local settlement.
       try { for (const receipt of await this.store.toolSuccesses(run.id)) await this.settleToolSuccess(run, receipt); }
       catch (error) {
         run.status = 'failed'; run.error = errorText(error); run.message = '工具已成功，但本地结算尚未完成；回执已保留，修复后可继续结算或再次取消';
@@ -446,7 +493,6 @@ export class AgentService {
   }
 
   private async loop(run: AgentRun, signal: AbortSignal): Promise<void> {
-    // Complete recorded effects before credentials, changed capabilities, approvals or budgets can cause a new submission.
     for (const receipt of await this.store.toolSuccesses(run.id)) await this.settleToolSuccess(run, receipt);
     let model = await this.options.resolveModel();
     if (run.model.mode === 'plan-json') model = { ...model, config: { ...model.config, supportsTools: false } };
@@ -456,20 +502,19 @@ export class AgentService {
     while (true) {
       signal.throwIfAborted();
       if (run.waiting) { await this.awaitTask(run, signal); continue; }
-      if(run.pendingSelfCheck){
+      if (run.waitingBatch) { await this.awaitBatchTasks(run, signal); continue; }
+      if (run.pendingSelfCheck) {
         let review;
-        try{review=await this.selfCheck(run,signal);}
-        catch(error){if(!(error instanceof UploadConsentRequired))throw error;this.setVisionChallenge(run,error);await this.save(run);return;}
-        delete run.pendingSelfCheck;run.reviewRounds++;meta.dirty=false;
-        if(review&&!review.pass){run.messages.push({role:'user',content:`自检（第 ${run.reviewRounds} 轮）发现问题，请修复后再总结：\n${review.text}`});await this.save(run);continue;}
-        const content=run.messages.at(-1)?.content;
-        return this.complete(run,typeof content==='string'?content:'');
+        try { review = await this.selfCheck(run, signal); }
+        catch (error) { if (!(error instanceof UploadConsentRequired)) throw error; this.setVisionChallenge(run, error); await this.save(run); return; }
+        delete run.pendingSelfCheck; run.reviewRounds++; meta.dirty = false;
+        if (review && !review.pass) { run.messages.push({ role: 'user', content: `自检（第 ${run.reviewRounds} 轮）发现问题，请修复后再总结：\n${review.text}` }); await this.save(run); continue; }
+        const content = run.messages.at(-1)?.content;
+        return this.complete(run, typeof content === 'string' ? content : '');
       }
       if (run.queue.length) {
-        // F06: budget is checked before *every* tool execution, not only before the next model turn.
         const limit = await this.budgetLimit(run, 'tool');
         if (limit) { run.status = 'budget_exceeded'; run.message = '已停止：' + limit; await this.store.trace(run.id, { event: 'budget', reason: limit, usage: run.usage, pendingCalls: run.queue.map(c => c.name) }); await this.save(run); return; }
-        // Run leading consecutive pure-read (non-vision) tools in bounded parallel batches, preserving exact tool_call order.
         const activeToolsList = this.runTools(run, (await this.capabilities()).capabilities);
         const batch: { call: ToolCall; tool: AgentTool }[] = [];
         const remainingToolBudget = Math.max(0, run.budget.maxToolCalls - run.usage.toolCalls);
@@ -521,12 +566,12 @@ export class AgentService {
       const compressed = compressMessages(run.messages, this.options.contextChars ?? 120_000);
       if (compressed.compressed) { run.messages = compressed.messages; const s = await this.step(run, { kind: 'compress', status: 'running' }); await this.finishStep(run, s, { status: 'complete', summary: '已压缩较早的上下文' }); }
       const caps = await this.capabilities(), tools = this.runTools(run, caps.capabilities), roleText = capabilityPrompt(caps.capabilities.roles);
-      const brief = storyBrief(await this.stories.get(run.projectId)), planRule = brief ? brief : '工程还没有已批准的创作计划：多镜头或有角色的目标，先用 plan_story（剧本/风格/角色）和 plan_shots（分镜表）提交计划，等用户批准后再动手；简单的单镜头修改可以直接做。写镜头源码前可用 skill_read 查阅导演技能文档。';
+      const brief = storyBrief(await this.stories.get(run.projectId)), planRule = brief ? brief : '工程还没有已批准的创作计划（制片圣经）：多镜头或有角色/场景的目标，先用 plan_story（剧本/风格/角色/场景/道具）和 plan_shots（分镜表，支持 1–120 镜）提交计划，等用户批准后再动手；简单的单镜头修改可以直接做。可随时用 skill_read 查阅导演与剧组专业工艺文档。';
       const promptExtra = roleText.text + '\n' + planRule;
       const changed = JSON.stringify(run.active?.tools) !== JSON.stringify(tools.map(t => t.name));
       if (run.active && changed) { run.messages.push({ role: 'user', content: '（系统通知）可用生成能力已变化：' + roleText.text }); await this.store.trace(run.id, { event: 'capabilities', roles: caps.capabilities.roles, tools: tools.map(t => t.name) }); }
       run.active = { roles: caps.capabilities.roles, tools: tools.map(t => t.name), selfMade: roleText.selfMade };
-      run.message = '模型思考中'; await this.save(run);
+      run.message = '总导演思考中'; await this.save(run);
       const step = await this.step(run, { kind: 'model', status: 'running' });
       let turn;
       const emitDelta = (text: string) => { this.emit({ type: 'delta', runId: run.id, text }); };
@@ -547,27 +592,25 @@ export class AgentService {
       const ledger = await this.ledgers.get(run.projectId);
       const cost = turn.usageKnown && ledger.currency === run.usage.currency ? tokenCost(model.parameters, turn.usage.inputTokens, turn.usage.outputTokens, run.usage.currency) : null;
       chargeModel(run.usage, turn.usage.inputTokens, turn.usage.outputTokens, cost); await this.spend(run.projectId, 'director', cost);
-      await this.store.trace(run.id, { event: 'model', mode: turn.mode, finish: turn.finish, usage: turn.usage, usageKnown:turn.usageKnown, cost, content: bound(turn.content, 4000), toolCalls: turn.toolCalls });
+      await this.store.trace(run.id, { event: 'model', mode: turn.mode, finish: turn.finish, usage: turn.usage, usageKnown: turn.usageKnown, cost, content: bound(turn.content, 4000), toolCalls: turn.toolCalls });
       run.messages.push({ role: 'assistant', content: turn.content || null, ...(turn.toolCalls.length ? { tool_calls: turn.toolCalls.map(call => ({ id: call.id, type: 'function' as const, function: { name: call.name, arguments: call.arguments } })) } : {}) });
       await this.finishStep(run, step, { status: 'complete', summary: turn.toolCalls.length ? '计划调用：' + turn.toolCalls.map(call => call.name).join(', ') : bound(turn.content, 200) });
       if (turn.toolCalls.length) { run.queue = turn.toolCalls.map(call => ({ ...call, execId: randomUUID() })); await this.save(run); continue; }
       if (turn.finish === 'length') { run.messages.push({ role: 'user', content: '上一条输出被截断，请更简短地继续。' }); continue; }
-      // Reflection: verify writes visually before accepting "done".
       if (meta.dirty && run.reviewRounds < (meta.maxReviewRounds ?? 2)) {
-        run.pendingSelfCheck=true;await this.save(run);continue;
+        run.pendingSelfCheck = true; await this.save(run); continue;
       }
-      return this.complete(run,turn.content);
+      return this.complete(run, turn.content);
     }
   }
 
-  private async complete(run:AgentRun,content:string){
-    // Persist the terminal snapshot before callers can observe it.
-    await this.store.trace(run.id,{event:'run.complete',usage:run.usage});
-    const final={...run,status:'complete' as const,final:content,message:'已完成',updatedAt:now()};
-    delete final.visionConsentRequired;delete final.visionChallengeFingerprint;
-    await this.store.save(final);Object.assign(run,final);
-    delete run.visionConsentRequired;delete run.visionChallengeFingerprint;
-    this.emit({type:'run',run:this.public(run)});
+  private async complete(run: AgentRun, content: string) {
+    await this.store.trace(run.id, { event: 'run.complete', usage: run.usage });
+    const final = { ...run, status: 'complete' as const, final: content, message: '已完成', updatedAt: now() };
+    delete final.visionConsentRequired; delete final.visionChallengeFingerprint;
+    await this.store.save(final); Object.assign(run, final);
+    delete run.visionConsentRequired; delete run.visionChallengeFingerprint;
+    this.emit({ type: 'run', run: this.public(run) });
   }
 
   private async selfCheck(run: AgentRun, signal: AbortSignal): Promise<{ pass: boolean; text: string } | null> {
@@ -579,7 +622,7 @@ export class AgentService {
       try { const value = JSON.parse(result.content.slice(result.content.indexOf('{'), result.content.lastIndexOf('}') + 1)); pass = value.skipped === true || value.pass === true || (name === 'render_check' && value.status === 'complete' && !value.error); } catch { pass = false; }
       await this.finishStep(run, step, { status: 'complete', summary: (pass ? '自检通过：' : '自检发现问题：') + bound(result.content, 300) });
       return { pass, text: result.content };
-    } catch (error) { if (signal.aborted) throw error; await this.finishStep(run, step, { status: 'failed', error: errorText(error) }); if(error instanceof UploadConsentRequired)throw error;return { pass: false, text: '自检失败：' + errorText(error) }; }
+    } catch (error) { if (signal.aborted) throw error; await this.finishStep(run, step, { status: 'failed', error: errorText(error) }); if (error instanceof UploadConsentRequired) throw error; return { pass: false, text: '自检失败：' + errorText(error) }; }
   }
 
   private async runCall(run: AgentRun, call: ToolCall, signal: AbortSignal): Promise<'next' | 'suspend'> {
@@ -593,28 +636,43 @@ export class AgentService {
     catch (error) { respond(JSON.stringify({ error: '参数不是有效 JSON 对象：' + errorText(error) })); await this.save(run); return 'next'; }
     call.execId ??= randomUUID();
     const hash = argsHash(run.id, tool.name, args);
-    const ctx=this.context(run.id,run.projectId,signal,run);
-    if(tool.referenceImage){
-      const image=await tool.referenceImage(args,ctx);
-      if(image){
-        const execId=call.execId,grant=run.videoReferenceGrant;
-        const target=await this.port.videoReferenceDestination?.();
-        if(target&&(grant?.execId!==execId||grant.assetId!==image||grant.fingerprint!==target.fingerprint)){
-          this.invalidateVideoApproval(run,call);
-          if(run.pendingVideoReference?.execId!==call.execId||run.pendingVideoReference?.assetId!==image)delete run.visionChallengeFingerprint;
-          delete run.videoReferenceGrant;run.pendingVideoReference={execId:call.execId!,assetId:image};
-          this.setVisionChallenge(run,new UploadConsentRequired('video-reference',target));await this.save(run);return 'suspend';
+    const ctx = this.context(run.id, run.projectId, signal, run);
+
+    if (tool.referenceImages || tool.referenceImage) {
+      const resolvedRefs = tool.referenceImages
+        ? await tool.referenceImages(args, ctx)
+        : { assetIds: [await tool.referenceImage!(args, ctx)].filter(Boolean), role: 'video' as const };
+      const assetIds = resolvedRefs.assetIds.filter(Boolean);
+      const primaryImage = assetIds[0] ?? '';
+      if (primaryImage) {
+        const execId = call.execId, grant = run.videoReferenceGrant;
+        const destResolver = resolvedRefs.role === 'image' ? this.port.imageReferenceDestination : this.port.videoReferenceDestination;
+        const target = await destResolver?.call(this.port);
+        const sameAssets = JSON.stringify(grant?.assetIds ?? (grant?.assetId ? [grant.assetId] : [])) === JSON.stringify(assetIds);
+        if (target && (grant?.execId !== execId || !sameAssets || grant.fingerprint !== target.fingerprint)) {
+          this.invalidateVideoApproval(run, call);
+          if (run.pendingVideoReference?.execId !== call.execId || JSON.stringify(run.pendingVideoReference?.assetIds ?? [run.pendingVideoReference?.assetId]) !== JSON.stringify(assetIds)) delete run.visionChallengeFingerprint;
+          delete run.videoReferenceGrant;
+          run.pendingVideoReference = { execId: call.execId!, assetId: primaryImage, assetIds, role: resolvedRefs.role };
+          this.setVisionChallenge(run, new UploadConsentRequired('video-reference', target));
+          await this.save(run); return 'suspend';
         }
-        ctx.videoReference={assetId:image,authorizeUpload:destination=>{
-          if(!grant||grant.fingerprint!==destination.fingerprint)throw new UploadConsentRequired('video-reference',destination);
-        }};
-      }else{
-        if(run.videoReferenceGrant?.execId===call.execId){this.invalidateVideoApproval(run,call);delete run.videoReferenceGrant;}
-        if(run.pendingVideoReference?.execId===call.execId){delete run.pendingVideoReference;delete run.visionConsentRequired;delete run.visionChallengeFingerprint;}
+        ctx.videoReference = {
+          assetId: primaryImage,
+          assetIds,
+          role: resolvedRefs.role,
+          authorizeUpload: destination => {
+            if (!grant || grant.fingerprint !== destination.fingerprint) throw new UploadConsentRequired('video-reference', destination);
+          },
+        };
+      } else {
+        if (run.videoReferenceGrant?.execId === call.execId) { this.invalidateVideoApproval(run, call); delete run.videoReferenceGrant; }
+        if (run.pendingVideoReference?.execId === call.execId) { delete run.pendingVideoReference; delete run.visionConsentRequired; delete run.visionChallengeFingerprint; }
       }
     }
+
     const grant = (run.approvals ?? []).findIndex(item => item.execId === call.execId && item.tool === tool.name && item.argsHash === hash);
-    if (grant >= 0) run.approvals!.splice(grant, 1); // single use: consumed before execution
+    if (grant >= 0) run.approvals!.splice(grant, 1);
     else {
       const estimate = tool.estimate?.(args) ?? (tool.risk === 'cost' ? null : 0);
       const uncertain = tool.risk === 'cost' && run.uncertainSubmissions?.length ? '此前有收费请求结果未知（可能已受理并扣费），再次提交需要你确认' : null;
@@ -629,15 +687,12 @@ export class AgentService {
     const step = await this.step(run, { kind: 'tool', status: 'running', tool: tool.name, callId: call.id, risk: tool.risk, arguments: bound(call.arguments, 2000) });
     run.message = '执行工具：' + tool.name; await this.save(run);
     let result: ToolResult;
-    // F04: paid / export tools have side effects that cannot be proven idempotent, so they are submitted exactly once.
     const sideEffect = tool.risk === 'cost' || tool.risk === 'export';
-    const work = () => tool.run({ ...args, __callId: call.execId },ctx);
+    const work = () => tool.run({ ...args, __callId: call.execId }, ctx);
     if (sideEffect) { run.inFlight = { execId: call.execId!, tool: tool.name, argsHash: hash, startedAt: now() }; await this.save(run); }
-    // Capabilities, approval and durable preparation can await I/O. Honor a budget changed during that preparation
-    // at the last boundary before submitting work, including calls with an already consumed approval grant.
     let finalLimit: string | null;
     try { finalLimit = await this.budgetLimit(run, 'tool'); signal.throwIfAborted(); }
-    catch (error) { delete run.inFlight; throw error; } // Nothing has been submitted yet.
+    catch (error) { delete run.inFlight; throw error; }
     if (finalLimit) {
       delete run.inFlight;
       await this.finishStep(run, step, { status: 'skipped', summary: '未执行：' + finalLimit });
@@ -647,16 +702,16 @@ export class AgentService {
     }
     try { result = sideEffect ? await (async () => { step.attempts = 1; return work(); })() : await this.withRetry(run, step, work, signal); }
     catch (error) {
-      if (signal.aborted) throw error; // R03: the in-flight receipt stays persisted and is settled by pause/restart/resume
+      if (signal.aborted) throw error;
       delete run.inFlight;
-      if(error instanceof UploadConsentRequired){
-        if(error.purpose==='video-reference'&&ctx.videoReference){
-          if(grant>=0)call.execId=randomUUID();
-          delete run.videoReferenceGrant;run.pendingVideoReference={execId:call.execId,assetId:ctx.videoReference.assetId};
+      if (error instanceof UploadConsentRequired) {
+        if (error.purpose === 'video-reference' && ctx.videoReference) {
+          if (grant >= 0) call.execId = randomUUID();
+          delete run.videoReferenceGrant;
+          run.pendingVideoReference = { execId: call.execId, assetId: ctx.videoReference.assetId, assetIds: ctx.videoReference.assetIds, role: ctx.videoReference.role };
         }
-        await this.finishStep(run,step,{status:'skipped',summary:error.message});this.setVisionChallenge(run,error);await this.save(run);return 'suspend';
+        await this.finishStep(run, step, { status: 'skipped', summary: error.message }); this.setVisionChallenge(run, error); await this.save(run); return 'suspend';
       }
-      // R04: decide on the adapter's structured submission state; only undeclared errors fall back to the transport classifier.
       const state = submissionOf(error) ?? (classify(error) === 'retry' ? 'unknown' : undefined);
       if (sideEffect && state === 'unknown') {
         const jobId = (error as { jobId?: unknown })?.jobId;
@@ -676,9 +731,8 @@ export class AgentService {
       await this.save(run); return 'next';
     }
     const receipt: ToolSuccessReceipt = { execId: call.execId!, tool: tool.name, argsHash: hash, risk: tool.risk, stepIndex: step.index, at: now(), result };
-    // Keep inFlight until the known outcome has its own durable journal. Any later failure only retries settlement.
     if (sideEffect) await this.store.saveToolSuccess(run.id, receipt);
-    if(run.videoReferenceGrant?.execId===call.execId)delete run.videoReferenceGrant;
+    if (run.videoReferenceGrant?.execId === call.execId) delete run.videoReferenceGrant;
     await this.settleToolSuccess(run, receipt);
     signal.throwIfAborted(); return 'next';
   }
@@ -688,11 +742,9 @@ export class AgentService {
     const call = run.queue.find(item => item.execId === receipt.execId);
     if (!call) {
       if (!(run.settledToolExecIds ?? []).includes(key)) {
-        // Orphaned success: never resubmit and never block the run forever. Account the known cost once (ledger dedupes by key),
-        // record it as an uncertain submission (later paid calls need explicit approval) and tell the model it was not adopted.
         const error = '工具已成功，但回执无法匹配运行队列；结果未自动采用，未重新提交（请人工核对）';
         chargeTool(run.usage, receipt.result.cost, receipt.risk); (run.settledToolExecIds ??= []).push(key);
-        if (receipt.risk === 'cost') await this.spend(run.projectId, receipt.tool, receipt.result.waitFor ? null : receipt.result.cost, false, key);
+        if (receipt.risk === 'cost') await this.spend(run.projectId, receipt.tool, (receipt.result.waitFor || receipt.result.waitForBatch) ? null : receipt.result.cost, false, key);
         (run.uncertainSubmissions ??= []).push({ execId: receipt.execId, tool: receipt.tool, at: now(), error, attempts: 1 });
         if (run.inFlight?.execId === receipt.execId) delete run.inFlight;
         await this.store.trace(run.id, { event: 'tool.orphan_success', execId: receipt.execId, tool: receipt.tool });
@@ -706,12 +758,13 @@ export class AgentService {
     if (!(run.settledToolExecIds ?? []).includes(key)) {
       chargeTool(run.usage, result.cost, receipt.risk); (run.settledToolExecIds ??= []).push(key);
     }
-    if (receipt.risk === 'cost') await this.spend(run.projectId, receipt.tool, result.waitFor ? null : result.cost, false, key);
+    if (receipt.risk === 'cost') await this.spend(run.projectId, receipt.tool, (result.waitFor || result.waitForBatch) ? null : result.cost, false, key);
     if (receipt.risk === 'write') meta.dirty = true;
     if (result.images?.length) result = { ...result, content: result.content + '（旧回执含截取画面，请重新使用 capture_frame 获取视觉描述）' };
     const step = run.steps[receipt.stepIndex]; if (step) await this.finishStep(run, step, { status: 'complete', summary: bound(result.content, 300) });
     if (result.projectTask && !run.taskRefs?.some(task => task.id === result.projectTask!.id)) (run.taskRefs ??= []).push({ ...result.projectTask, callId: call.id, execId: call.execId });
     if (result.waitFor) { run.waiting = { ...result.waitFor, callId: call.id, execId: call.execId }; run.status = 'waiting_task'; run.message = '等待生成任务完成'; }
+    else if (result.waitForBatch) { run.waitingBatch = { ...result.waitForBatch, callId: call.id, execId: call.execId }; run.status = 'waiting_task'; run.message = `等待 ${result.waitForBatch.ids.length} 项并发生成任务完成`; }
     else run.messages.push({ role: 'tool', tool_call_id: call.id, content: result.content });
     run.queue = run.queue.filter(item => item !== call);
     if (run.inFlight?.execId === receipt.execId) delete run.inFlight;
@@ -734,6 +787,69 @@ export class AgentService {
         run.messages.push({ role: 'tool', tool_call_id: waiting.callId, content: bound(JSON.stringify(result.ok ? { id: waiting.id, state, message: value.message, error: value.error, hint: state === 'ready' ? '素材已就绪：调用 media_apply 采用' : undefined } : { error: result.error?.message })) });
         delete run.waiting; run.status = 'running'; run.message = '生成任务已结束'; await this.save(run); return;
       }
+      await sleep(this.options.pollMs ?? 1000, signal);
+    }
+  }
+
+  private async awaitBatchTasks(run: AgentRun, signal: AbortSignal): Promise<void> {
+    const batch = run.waitingBatch!;
+    const terminal = new Set(['ready', 'complete', 'failed', 'cancelled', 'unknown', 'paused']);
+    while (true) {
+      signal.throwIfAborted();
+      const states = await Promise.all(batch.ids.map(async id => {
+        const res = await this.port.route('media.get', { taskId: id });
+        const val = (res.value ?? {}) as Record<string, unknown>;
+        return { id, ok: res.ok, state: String(val.phase ?? val.status ?? ''), value: val, error: res.error?.message };
+      }));
+      const finishedCount = states.filter(s => !s.ok || terminal.has(s.state)).length;
+      if (finishedCount === states.length) {
+        let knownBatchCost = 0, anyKnown = false;
+        const outcomes: Record<string, unknown>[] = [];
+        for (const item of states) {
+          if (item.value.usage && typeof (item.value.usage as { cost?: unknown }).cost === 'number') {
+            knownBatchCost += (item.value.usage as { cost: number }).cost;
+            anyKnown = true;
+          }
+          let appliedAssetIds: string[] | undefined;
+          if (item.state === 'ready' && batch.autoApplyShots?.[item.id]) {
+            try {
+              const cur = await this.port.snapshot(run.projectId);
+              if (cur.project) {
+                const applied = await this.port.route('media.apply', { projectId: run.projectId, taskId: item.id, expectedRevision: cur.project.revision });
+                if (applied.ok && applied.value && typeof applied.value === 'object') {
+                  const av = applied.value as { applied?: { assetIds?: string[] }; assetIds?: string[] };
+                  appliedAssetIds = av.applied?.assetIds ?? av.assetIds;
+                  (run as AgentRun & { dirty?: boolean }).dirty = true;
+                }
+              }
+            } catch { /* Caller can still apply manually if concurrent edit occurred */ }
+          }
+          outcomes.push({
+            taskId: item.id,
+            shotId: batch.autoApplyShots?.[item.id],
+            state: appliedAssetIds ? 'applied' : item.state,
+            ...(appliedAssetIds ? { assetIds: appliedAssetIds } : {}),
+            ...(item.value.error || item.error ? { error: item.value.error ?? item.error } : {}),
+          });
+        }
+        if (anyKnown) {
+          const key = run.id + '.' + (batch.execId ?? batch.callId) + '.batch_settled';
+          if (!run.settledToolExecIds?.includes(key)) {
+            run.usage.cost += knownBatchCost;
+            run.usage.unknownCostCalls = Math.max(0, run.usage.unknownCostCalls - 1);
+            (run.settledToolExecIds ??= []).push(key);
+          }
+          await this.spend(run.projectId, 'media', knownBatchCost, true, key);
+        }
+        const latestRev = (await this.port.snapshot(run.projectId)).project?.revision;
+        run.messages.push({ role: 'tool', tool_call_id: batch.callId, content: bound(JSON.stringify({ ok: true, revision: latestRev, results: outcomes })) });
+        delete run.waitingBatch;
+        run.status = 'running';
+        run.message = `批次并发生成已完成（${outcomes.length} 项）`;
+        await this.save(run);
+        return;
+      }
+      run.message = `并发生成进行中（已完成 ${finishedCount}/${states.length}）`;
       await sleep(this.options.pollMs ?? 1000, signal);
     }
   }

@@ -6,12 +6,15 @@ import type { MediaRequest, MediaTask } from '../jobs/contracts.ts';
 /** Risk tiers: read runs freely; write is revision-checked and undoable; cost/export always need a human by default. */
 export type ToolRisk = 'read' | 'write' | 'plan' | 'cost' | 'export';
 export type JsonSchema = Record<string, unknown>;
+export type CrewDepartment = 'screenwriter' | 'art_director' | 'cinematographer' | 'scene_coder' | 'sound_director' | 'post_editor_qc';
 
 export interface ToolContext {
   runId: string; projectId: string; signal: AbortSignal; port: AgentPort;
-  /** Per-project structured plan (story.json) and spend ledger. */
+  /** Per-project structured plan (story.json / Production Bible) and spend ledger. */
   docs: AgentDocs;
-  videoReference?:{assetId:string;authorizeUpload:AuthorizeUpload};
+  videoReference?: { assetId: string; assetIds?: string[]; role?: 'image' | 'video'; authorizeUpload: AuthorizeUpload };
+  /** Hierarchical delegation to specialized film crew sub-agents (isolated context, shared CAS & ledger). */
+  delegateCrew?: (department: CrewDepartment, task: string, shotIds?: string[]) => Promise<ToolResult>;
 }
 export interface AgentDocs {
   story(): Promise<Story>;
@@ -29,6 +32,8 @@ export interface ToolResult {
   cost?: number | null;
   /** When set, the run suspends until this async task reaches a terminal phase. */
   waitFor?: { kind: 'media' | 'workflow'; id: string };
+  /** When set, the run suspends until all async media tasks in this batch settle concurrently. */
+  waitForBatch?: { kind: 'media'; ids: string[]; autoApplyShots?: Record<string, string> };
   /** Exact host task started by this call; later tasks must not replace this association. */
   projectTask?: ProjectTaskRef;
   revision?: number;
@@ -43,12 +48,13 @@ export interface AgentTool {
   name: string; description: string; parameters: JsonSchema; risk: ToolRisk;
   /** Estimated spend before running (used by budget gate); null = unknown. */
   estimate?(args: Record<string, unknown>): number | null;
-  referenceImage?(args:Record<string,unknown>,ctx:ToolContext):Promise<string>;
+  referenceImage?(args: Record<string, unknown>, ctx: ToolContext): Promise<string>;
+  referenceImages?(args: Record<string, unknown>, ctx: ToolContext): Promise<{ assetIds: string[]; role: 'image' | 'video' }>;
   run(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult>;
 }
 
 export type GenRole = 'image' | 'video' | 'speech' | 'music' | 'sfx' | 'vision' | 'blender';
-export interface Capabilities { roles: GenRole[]; director?: string; models?: Partial<Record<GenRole, string>> }
+export interface Capabilities { roles: GenRole[]; director?: string; scene?: string; models?: Partial<Record<GenRole, string>> }
 /** `id` is the provider's tool_call_id (only used to thread tool messages); `execId` is server-generated and single-use. */
 export interface ToolCall { id: string; name: string; arguments: string; execId?: string }
 export type AgentMessage =
@@ -59,7 +65,7 @@ export type AgentContent = { type: 'text'; text: string } | { type: 'image_url';
 
 export interface ModelTurn {
   content: string; toolCalls: ToolCall[]; finish: 'stop' | 'tool_calls' | 'length' | 'other';
-  usage: { inputTokens: number; outputTokens: number }; usageKnown:boolean; mode: 'tools' | 'plan-json';
+  usage: { inputTokens: number; outputTokens: number }; usageKnown: boolean; mode: 'tools' | 'plan-json';
 }
 
 export interface Budget {
@@ -88,7 +94,9 @@ export interface AgentRun {
   messages: AgentMessage[]; steps: RunStep[];
   /** Tool calls from the last assistant turn not yet executed (resumable). */
   queue: ToolCall[];
-  pending?: PendingApproval; waiting?: { kind: 'media' | 'workflow'; id: string; callId: string; execId?: string };
+  pending?: PendingApproval;
+  waiting?: { kind: 'media' | 'workflow'; id: string; callId: string; execId?: string };
+  waitingBatch?: { kind: 'media'; ids: string[]; callId: string; execId?: string; autoApplyShots?: Record<string, string> };
   taskRefs?: (ProjectTaskRef & { callId: string; execId?: string })[];
   /** Usage settlement keys already applied to this snapshot; the project ledger has its own atomic deduplication. */
   settledToolExecIds?: string[];
@@ -97,14 +105,14 @@ export interface AgentRun {
   /** One-shot approvals bound to a server execution ID + tool + canonical argument hash; consumed on use. */
   approvals?: { execId: string; tool: string; argsHash: string }[];
   reviewRounds: number;
-  allowImages?:boolean;
-  visionGrant?:string;
-  visionChallengeFingerprint?:string;
-  visionConsentRequired?:UploadConsentChallenge;
-  videoReferenceGrant?:{execId:string;assetId:string;fingerprint:string};
-  pendingVideoReference?:{execId:string;assetId:string};
+  allowImages?: boolean;
+  visionGrant?: string;
+  visionChallengeFingerprint?: string;
+  visionConsentRequired?: UploadConsentChallenge;
+  videoReferenceGrant?: { execId: string; assetId: string; assetIds?: string[]; role?: 'image' | 'video'; fingerprint: string };
+  pendingVideoReference?: { execId: string; assetId: string; assetIds?: string[]; role?: 'image' | 'video' };
   /** Reflection was interrupted before a request was authorized. */
-  pendingSelfCheck?:boolean;
+  pendingSelfCheck?: boolean;
   /** Paid/side-effect submissions whose outcome is unknown (accepted-then-lost response). Never auto-resubmitted. */
   /** R03: receipt persisted *before* a paid/export side effect starts; cleared once its outcome is known. */
   inFlight?: { execId: string; tool: string; argsHash: string; startedAt: string };
@@ -130,8 +138,8 @@ export interface AgentPort {
   commit(projectId: string, expectedRevision: number, project: VideoProject, sources: Record<string, SceneSource>, label: string): Promise<StudioSnapshot>;
   route(endpoint: string, payload: Record<string, unknown>): Promise<{ ok: boolean; value?: unknown; error?: { code: string; message: string } }>;
   capture(projectId: string, frame: number, signal: AbortSignal): Promise<{ bytes: Uint8Array; mime: string; frame: number; shotId: string }>;
-  /** Synthesize narration and register it as a project asset (idempotent per requestId). */
-  voice?(projectId: string, shotId: string, text: string, signal: AbortSignal, options?: { expectedRevision?: number; requestId?: string }): Promise<{ id: string; name: string; revision?: number }>;
+  /** Synthesize narration/dialogue and register it as a project asset (idempotent per requestId, supports character voice/speed). */
+  voice?(projectId: string, shotId: string, text: string, signal: AbortSignal, options?: { expectedRevision?: number; requestId?: string; voice?: string; speed?: number; speaker?: string }): Promise<{ id: string; name: string; revision?: number }>;
   /** Generate audio with a bound role (speech/music/sfx) and import it as a project asset. */
   generateAudio?(projectId: string, role: 'speech' | 'music' | 'sfx', prompt: string, options: { durationSeconds?: number; signal: AbortSignal; shotId?: string }): Promise<{ id: string; name: string; cost?: number | null }>;
   /** Import locally synthesized audio bytes (WAV) as a project asset. */
@@ -140,10 +148,14 @@ export interface AgentPort {
   capabilities?(): Promise<Capabilities>;
   /** Import image bytes (e.g. a captured tail frame) as a project asset. */
   importImage?(projectId: string, name: string, bytes: Uint8Array, mime: string): Promise<{ id: string; name: string }>;
-  visionDestination?():Promise<UploadDestination>;
-  vision?(prompt: string, images: { mime: string; bytes: Uint8Array }[], signal: AbortSignal, authorizeUpload?:AuthorizeUpload): Promise<string>;
-  videoReferenceDestination?():Promise<UploadDestination>;
-  generateVideoReference?(request:MediaRequest,authorizeUpload:AuthorizeUpload):Promise<MediaTask>;
-  /** Render a deterministic whitebox 3D shot previsualization via local headless Blender. */
-  renderPreviz?(projectId:string,spec:import('../host/blender.ts').PrevizSceneSpec,options:{shotId?:string;name?:string;bindPreviewClip?:boolean;signal:AbortSignal}):Promise<{imageAssetId:string;videoAssetId?:string;width:number;height:number;fps:number;frameCount:number;revision:number}>;
+  visionDestination?(): Promise<UploadDestination>;
+  vision?(prompt: string, images: { mime: string; bytes: Uint8Array }[], signal: AbortSignal, authorizeUpload?: AuthorizeUpload): Promise<string>;
+  imageReferenceDestination?(): Promise<UploadDestination>;
+  generateImageReference?(request: MediaRequest, authorizeUpload: AuthorizeUpload): Promise<MediaTask>;
+  videoReferenceDestination?(): Promise<UploadDestination>;
+  generateVideoReference?(request: MediaRequest, authorizeUpload: AuthorizeUpload): Promise<MediaTask>;
+  /** Render a deterministic whitebox 3D shot previsualization (with articulated poses & Z-depth pass) via local headless Blender. */
+  renderPreviz?(projectId: string, spec: import('../host/blender.ts').PrevizSceneSpec, options: { shotId?: string; name?: string; bindPreviewClip?: boolean; signal: AbortSignal }): Promise<{ imageAssetId: string; depthAssetId?: string; videoAssetId?: string; width: number; height: number; fps: number; frameCount: number; revision: number }>;
+  /** Generate or refine deterministic HTML/CSS/JS scene code using the bound `scene` role model (falling back to `director`). */
+  generateSceneCode?(projectId: string, shotId: string, instruction: string, signal: AbortSignal): Promise<{ shotId: string; revision: number; summary: string }>;
 }

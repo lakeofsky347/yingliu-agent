@@ -1,8 +1,8 @@
 import type { ModelProtocol, ResolvedModel } from './contracts.ts';
 import type { MediaOperation } from '../jobs/contracts.ts';
-import { templateAcceptsImage } from './template-presets.ts';
+import { templateAcceptsImage, templateMaxImages } from './template-presets.ts';
 
-export type MediaReferenceRole = 'reference' | 'first_frame' | 'last_frame' | 'character' | 'style' | 'layout';
+export type MediaReferenceRole = 'reference' | 'first_frame' | 'last_frame' | 'character' | 'style' | 'layout' | 'depth' | 'location' | 'prop';
 export interface MediaReferenceInput { type:'image'|'video'|'audio'; dataUrl?:string; role?:string }
 export interface MediaCapabilityRequest {
   operation:MediaOperation;
@@ -37,35 +37,49 @@ const VOLC_DOC='https://docs.volcengine.com/docs/ark/video-generation-tutorial?l
 const WAN_DOC='https://help.aliyun.com/en/model-studio/legacy-wan-text-to-video-api-reference';
 const VEO_DOC='https://ai.google.dev/gemini-api/docs/veo';
 const WAN_SIZES={low:['832x480','480x832','624x624'],medium:['1280x720','720x1280','960x960','1088x832','832x1088'],high:['1920x1080','1080x1920','1440x1440','1632x1248','1248x1632']};
+const isImageOut=(op:MediaOperation)=>op==='text-to-image'||op==='image-compose';
+const needsImageIn=(op:MediaOperation)=>op==='image-compose'||op==='image-to-video'||op==='first-last-frame-video';
 function declaredCapabilities(cap:MediaCapabilities,resolved:ResolvedModel):MediaCapabilities {
-  cap.operations=cap.operations.filter(op=>resolved.model.inputModalities.includes('text')&&resolved.model.outputModalities.includes(op==='text-to-image'?'image':'video')&&(op!=='image-to-video'||resolved.model.inputModalities.includes('image')));
-  if(!cap.operations.includes('image-to-video')){cap.references.max=0;cap.references.roles=[];}
+  cap.operations=cap.operations.filter(op=>resolved.model.inputModalities.includes('text')&&resolved.model.outputModalities.includes(isImageOut(op)?'image':'video')&&(!needsImageIn(op)||resolved.model.inputModalities.includes('image')));
+  if(!cap.operations.some(needsImageIn)){cap.references.max=0;cap.references.roles=[];}
   return cap;
 }
 
 /** Adapter-supported intersection, not a claim that every model of a vendor supports it. */
 export function getMediaCapabilities(resolved:ResolvedModel):MediaCapabilities {
   const {protocol}=resolved.connection,model=resolved.model.model;
-  const result:MediaCapabilities={protocol,model,operations:[],references:{max:0,roles:[],defaultRole:'first_frame'},parameters:[],audio:{input:false,output:'unknown',controllable:false},verification:{level:'adapter-contract',modelRecognized:false,realProviderTested:false,checkedAt:'2026-11-21',sources:[],notes:['仅声明适配器可编码的请求；未验证当前账号、地区、端点或真实生成质量。']},recovery:{lookupByClientRequestId:protocol==='video-gateway',automaticResubmit:false}};
+  const result:MediaCapabilities={protocol,model,operations:[],references:{max:0,roles:[],defaultRole:'first_frame'},parameters:[],audio:{input:false,output:'unknown',controllable:false},verification:{level:'adapter-contract',modelRecognized:false,realProviderTested:false,checkedAt:'2026-11-22',sources:[],notes:['仅声明适配器可编码的请求；未验证当前账号、地区、端点或真实生成质量。']},recovery:{lookupByClientRequestId:protocol==='video-gateway',automaticResubmit:false}};
   if(protocol==='async-task'){
+    const maxImgs=templateMaxImages(resolved.model.parameters);
     if(resolved.model.outputModalities.includes('image')){
-      result.operations=['text-to-image'];
+      result.operations=maxImgs>0?['text-to-image','image-compose']:['text-to-image'];
+      result.references=maxImgs>0?{max:maxImgs,roles:['reference','layout','depth','character','location','style','prop'],defaultRole:'reference'}:{max:0,roles:[],defaultRole:'reference'};
       result.parameters=[...IMAGE_PARAMETERS];
     }else if(resolved.model.outputModalities.includes('video')){
       const acceptsImage=templateAcceptsImage(resolved.model.parameters);
-      result.operations=acceptsImage?['text-to-video','image-to-video']:['text-to-video'];
-      result.references=acceptsImage?{max:1,roles:['first_frame','reference'],defaultRole:'first_frame'}:{max:0,roles:[],defaultRole:'first_frame'};
+      result.operations=maxImgs>=2?['text-to-video','image-to-video','first-last-frame-video','lip-sync-video']:acceptsImage?['text-to-video','image-to-video','lip-sync-video']:['text-to-video','lip-sync-video'];
+      result.references=acceptsImage?{max:maxImgs||1,roles:['first_frame','last_frame','reference','character','style','layout','depth'],defaultRole:'first_frame'}:{max:0,roles:[],defaultRole:'first_frame'};
       result.parameters=[...VIDEO_PARAMETERS];
       result.duration={integer:false,min:0,max:120};
     }
     return declaredCapabilities(result,resolved);
   }
   if(protocol==='images'||protocol==='gemini-image'){
-    result.operations=['text-to-image'];result.parameters=protocol==='images'?[...IMAGE_PARAMETERS]:[];return declaredCapabilities(result,resolved);
+    const acceptsImg=resolved.model.inputModalities.includes('image');
+    result.operations=acceptsImg?['text-to-image','image-compose']:['text-to-image'];
+    result.references=acceptsImg?{max:4,roles:['reference','layout','depth','character','location','style','prop'],defaultRole:'reference'}:{max:0,roles:[],defaultRole:'reference'};
+    result.parameters=protocol==='images'?[...IMAGE_PARAMETERS]:[];return declaredCapabilities(result,resolved);
   }
   if(!['video-gateway','openai-videos','kling-video','minimax-video','volc-video','dashscope-video','gemini-video'].includes(protocol))return result;
-  result.operations=['text-to-video','image-to-video'];
-  result.references={max:protocol==='video-gateway'?3:1,roles:protocol==='video-gateway'?['reference']:['first_frame'],defaultRole:protocol==='video-gateway'?'reference':'first_frame'};
+  const supportsFlf=['video-gateway','kling-video','volc-video','dashscope-video','gemini-video'].includes(protocol);
+  result.operations=protocol==='video-gateway'
+    ?['text-to-video','image-to-video','first-last-frame-video','lip-sync-video']
+    :supportsFlf?['text-to-video','image-to-video','first-last-frame-video']:['text-to-video','image-to-video'];
+  result.references=protocol==='video-gateway'
+    ?{max:4,roles:['reference','first_frame','last_frame','character','style','layout','depth','location','prop'],defaultRole:'reference'}
+    :supportsFlf
+      ?{max:2,roles:['first_frame','last_frame'],defaultRole:'first_frame'}
+      :{max:1,roles:['first_frame'],defaultRole:'first_frame'};
   result.duration={integer:protocol!=='video-gateway',min:protocol==='video-gateway'?0:1,max:120};
   const params:Partial<Record<ModelProtocol,string[]>>={
     'video-gateway':VIDEO_PARAMETERS,'openai-videos':['durationSeconds','width','height','aspectRatio'],
@@ -129,21 +143,24 @@ export function validateMediaRequest(resolved:ResolvedModel,request:MediaCapabil
   const cap=getMediaCapabilities(resolved),fail=(message:string):never=>{throw new MediaCapabilityError(message);};
   if(!resolved.connection.enabled||!resolved.model.enabled||resolved.model.connectionId!==resolved.connection.id)fail('模型连接已停用或与模型不匹配');
   if(!cap.operations.includes(request.operation))fail('所选模型/协议不支持此生成操作：'+request.operation);
-  const output=request.operation==='text-to-image'?'image':'video';
+  const output=isImageOut(request.operation)?'image':'video';
   if(!resolved.model.outputModalities.includes(output)||!resolved.model.inputModalities.includes('text'))fail('所选模型未声明所需文字输入或媒体输出能力');
   if(request.inputs!==undefined&&!Array.isArray(request.inputs)||request.imageAssetIds!==undefined&&!Array.isArray(request.imageAssetIds))fail('参考素材列表无效');
   if(request.imageAssetIds&&(request.imageAssetIds.some(id=>typeof id!=='string'||!id)||new Set(request.imageAssetIds).size!==request.imageAssetIds.length))fail('参考资产 ID 必须有效且不重复');
   const count=request.inputs?.length??request.imageAssetIds?.length??0;
   if(request.inputs&&request.imageAssetIds&&request.inputs.length!==request.imageAssetIds.length)fail('参考素材数量与资产列表不一致');
-  if(count>cap.references.max)fail('当前适配器最多支持 '+cap.references.max+' 张参考图片；不会只取首图');
-  if(request.operation==='image-to-video'&&(!count||!resolved.model.inputModalities.includes('image')))fail('图生视频需要参考图片及模型图片输入能力');
-  if(request.operation!=='image-to-video'&&count)fail('此操作不支持参考图片');
+  const opMax=request.operation==='image-to-video'&&!['video-gateway'].includes(cap.protocol)?1:cap.references.max;
+  if(count>opMax)fail('当前适配器最多支持 '+opMax+' 张参考图片；不会只取首图');
+  if(needsImageIn(request.operation)&&(!count||!resolved.model.inputModalities.includes('image')))fail('此操作需要参考图片及模型图片输入能力');
+  if(request.operation==='first-last-frame-video'&&count<2)fail('首尾帧生视频需要同时提供首帧与尾帧图片');
+  if(!needsImageIn(request.operation)&&count)fail('此操作不支持参考图片');
   if(request.referenceRoles!==undefined&&(!Array.isArray(request.referenceRoles)||request.referenceRoles.length!==count))fail('参考图片角色必须与图片逐项对应');
   for(let i=0;i<count;i++){
     const input=request.inputs?.[i];
     if(request.inputs&&(!input||typeof input!=='object'||input.type!=='image'))fail('当前适配器只支持有效的图片参考输入，不支持视频或音频参考');
     if(input?.role&&request.referenceRoles?.[i]&&input.role!==request.referenceRoles[i])fail('参考图片角色声明冲突');
-    const role=input?.role??request.referenceRoles?.[i]??cap.references.defaultRole;
+    const fallbackRole=request.operation==='first-last-frame-video'&&i===1?'last_frame':cap.references.defaultRole;
+    const role=input?.role??request.referenceRoles?.[i]??fallbackRole;
     if(typeof role!=='string'||!cap.references.roles.includes(role as MediaReferenceRole))fail('当前适配器不支持参考角色：'+String(role));
     if(input&&(typeof input.dataUrl!=='string'||!/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(input.dataUrl)))fail('参考图片必须是 PNG、JPEG 或 WebP Data URL');
   }

@@ -7,14 +7,14 @@ import {pipeline} from 'node:stream/promises';
 import type {ReadableStream as NodeReadableStream} from 'node:stream/web';
 import {spawn, type ChildProcess} from 'node:child_process';
 import {createHash, randomUUID} from 'node:crypto';
-import type {Asset, AudioClip, EnvironmentSettings, TtsSettings, VideoProject, VideoClip} from '../shared/types.js';
+import type {Asset, AudioClip, AudioMixSettings, EnvironmentSettings, TtsSettings, VideoProject, VideoClip} from '../shared/types.js';
 import {compileSpec} from '../core/index.js';
 import {ProjectStore, projectPath} from './store.js';
 import {findToolExecutable, isExecutableFile, type ToolEnvironmentOptions} from './tool-environment.js';
 
 export interface AudioMetadata {duration:number;sampleRate:number;channels:number;mime:string;extension:string}
 export interface PlannedAudioClip extends AudioClip {path:string;start:number;duration:number;trimEnd:number;speed?:number;sourceVideoClipId?:string}
-export interface AudioPlan {duration:number;sampleRate:48000;channels:2;clips:PlannedAudioClip[]}
+export interface AudioPlan {duration:number;sampleRate:48000;channels:2;clips:PlannedAudioClip[];audioMix?:AudioMixSettings}
 export interface AudioMix {path:string;duration:number;plan:AudioPlan}
 
 function aborted(signal?:AbortSignal):void {signal?.throwIfAborted();}
@@ -66,7 +66,7 @@ export async function probeAudio(file:string,settings:Partial<EnvironmentSetting
 
 /** Audio anchors use seconds; shot order and rational FPS are resolved once here. */
 export function compileAudioPlan(project:VideoProject):AudioPlan {
-  const spec=compileSpec(project),plan:AudioPlan={duration:spec.durationSeconds,sampleRate:48000,channels:2,clips:[]};
+  const spec=compileSpec(project),plan:AudioPlan={duration:spec.durationSeconds,sampleRate:48000,channels:2,clips:[],...(project.audioMix?{audioMix:structuredClone(project.audioMix)}:{})};
   if(project.target.audioMode==='none')return plan;
   for(const clip of project.audioClips??[]){
     const asset=project.assets.find(item=>item.id===clip.assetId);
@@ -143,18 +143,40 @@ export class AudioMixer {
   }
   private async render(destination:string,plan:AudioPlan,files:string[],settings:Partial<EnvironmentSettings>,signal?:AbortSignal):Promise<AudioMix>{
     await fs.mkdir(path.dirname(destination),{recursive:true});const temporary=destination+'.tmp-'+randomUUID()+'.wav';
+    const mixCfg=plan.audioMix;
+    const reverbFilter=mixCfg?.voiceReverb==='room'?'aecho=0.8:0.75:28:0.18':mixCfg?.voiceReverb==='hall'?'aecho=0.8:0.85:65:0.25':mixCfg?.voiceReverb==='phone'?'highpass=f=380,lowpass=f=3200':undefined;
     const filters=plan.clips.map((clip,index)=>{
       const length=clip.trimEnd-clip.trimStart,fadeIn=Math.min(clip.fadeIn,clip.duration),fadeOut=Math.min(clip.fadeOut,clip.duration);
       const parts=[`[${index}:a]atrim=start=${clip.trimStart}:end=${clip.trimEnd}`,'asetpts=PTS-STARTPTS','aresample=48000','aformat=sample_fmts=fltp:channel_layouts=stereo',...tempoFilters(clip.speed??1)];
       if(clip.loop)parts.push('aloop=loop=-1:size='+Math.max(1,Math.round(length*48000)));
       parts.push('atrim=duration='+clip.duration,'volume='+clip.volume);
+      if(clip.role==='voice'&&reverbFilter)parts.push(reverbFilter);
       if(fadeIn)parts.push('afade=t=in:st=0:d='+fadeIn);
       if(fadeOut)parts.push('afade=t=out:st='+Math.max(0,clip.duration-fadeOut)+':d='+fadeOut);
-      parts.push('adelay='+Math.round(clip.start*48000)+'S:all=1');return parts.join(',')+'[clip'+index+']';
+      parts.push('adelay='+Math.round(clip.start*48000)+'S:all=1');
+      if(mixCfg?.autoDucking)parts.push('apad=whole_dur='+plan.duration,'atrim=duration='+plan.duration);
+      return parts.join(',')+'[clip'+index+']';
     });
-    // amix can emit NOPTS once an earlier input ends. Rebuild timestamps from the
-    // output sample count so the limiter and final padding retain the whole timeline.
-    filters.push(plan.clips.map((_,index)=>'[clip'+index+']').join('')+'amix=inputs='+plan.clips.length+':duration=longest:dropout_transition=0:normalize=0,asetpts=N/SR/TB,alimiter=limit=0.95:level=0:latency=1,apad=whole_dur='+plan.duration+',atrim=duration='+plan.duration+'[mix]');
+    const voiceIdx=plan.clips.map((c,i)=>c.role==='voice'?i:-1).filter(i=>i>=0);
+    const musicIdx=plan.clips.map((c,i)=>c.role==='music'?i:-1).filter(i=>i>=0);
+    const otherIdx=plan.clips.map((c,i)=>c.role!=='voice'&&c.role!=='music'?i:-1).filter(i=>i>=0);
+    const masterTail=mixCfg?.targetLufs!==undefined
+      ?`asetpts=N/SR/TB,loudnorm=I=${mixCfg.targetLufs}:TP=-1.5:LRA=11,alimiter=limit=0.95:level=0:latency=1,apad=whole_dur=${plan.duration},atrim=duration=${plan.duration}[mix]`
+      :`asetpts=N/SR/TB,alimiter=limit=0.95:level=0:latency=1,apad=whole_dur=${plan.duration},atrim=duration=${plan.duration}[mix]`;
+    if(mixCfg?.autoDucking&&voiceIdx.length>0&&musicIdx.length>0){
+      if(voiceIdx.length===1)filters.push(`[clip${voiceIdx[0]}]asplit=2[vo_bus][vo_sc]`);
+      else filters.push(`${voiceIdx.map(i=>`[clip${i}]`).join('')}amix=inputs=${voiceIdx.length}:duration=longest:dropout_transition=0:normalize=0,asetpts=N/SR/TB,asplit=2[vo_bus][vo_sc]`);
+      if(musicIdx.length===1)filters.push(`[clip${musicIdx[0]}]anull[bgm_raw]`);
+      else filters.push(`${musicIdx.map(i=>`[clip${i}]`).join('')}amix=inputs=${musicIdx.length}:duration=longest:dropout_transition=0:normalize=0,asetpts=N/SR/TB[bgm_raw]`);
+      const ratio=Math.max(2,Math.min(20,Math.round(1+(mixCfg.duckingDb??8)*0.8)));
+      filters.push(`[bgm_raw][vo_sc]sidechaincompress=threshold=0.025:ratio=${ratio}:attack=35:release=380[bgm_ducked]`);
+      const busInputs=['[vo_bus]','[bgm_ducked]',...otherIdx.map(i=>`[clip${i}]`)];
+      filters.push(`${busInputs.join('')}amix=inputs=${busInputs.length}:duration=longest:dropout_transition=0:normalize=0,${masterTail}`);
+    }else{
+      // amix can emit NOPTS once an earlier input ends. Rebuild timestamps from the
+      // output sample count so the limiter and final padding retain the whole timeline.
+      filters.push(plan.clips.map((_,index)=>'[clip'+index+']').join('')+'amix=inputs='+plan.clips.length+':duration=longest:dropout_transition=0:normalize=0,'+masterTail);
+    }
     try{
       await this.processes.run(audioExecutable('ffmpeg',settings.ffmpegPath),['-hide_banner','-loglevel','error','-y',...files.flatMap(file=>['-i',file]),'-filter_complex',filters.join(';'),'-map','[mix]','-ar','48000','-ac','2','-c:a','pcm_s16le',temporary],signal);
       aborted(signal);await fs.rename(temporary,destination);return {path:destination,duration:plan.duration,plan};

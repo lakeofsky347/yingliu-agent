@@ -26,7 +26,7 @@ export class AppBackend implements BackendPort {
   route(endpoint:string,payload:unknown={}):Promise<RpcResult>{return this.hub.route(endpoint,payload);}
   mediaPort(){return this.hub.mediaPort();}
   stageWorkflowMedia(id:string,task:MediaTask,files:GeneratedFile[],signal:AbortSignal){return this.hub.stageWorkflowMedia(id,task,files,signal);}
-  workflowVoice(id:string,shotId:string,text:string,signal:AbortSignal,settings?:TtsSettings){return this.hub.workflowVoice(id,shotId,text,signal,settings);}
+  workflowVoice(id:string,shotId:string,text:string,signal:AbortSignal,settings?:TtsSettings,speakerLabel?:string){return this.hub.workflowVoice(id,shotId,text,signal,settings,speakerLabel);}
   workflowCapture(id:string,frame:number,signal:AbortSignal,candidate?:import('../workflows/contracts.ts').WorkflowCandidate){return this.hub.workflowCapture(id,frame,signal,candidate);}
   renderPreviz(id:string,spec:import('../host/blender.ts').PrevizSceneSpec,options:{shotId?:string;name?:string;bindPreviewClip?:boolean;signal?:AbortSignal}={}){return this.hub.renderPreviz(id,spec,options);}
   dispose():Promise<void>{return this.hub.dispose();}

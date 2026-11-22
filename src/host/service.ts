@@ -13,9 +13,11 @@ import {ProjectStore,projectPath,validateStoredProject,validateSources} from './
 import {VideoRenderer,detectEnvironment,renderCheckError} from './renderer.ts';
 import {sanitizeTaskFailure,taskFailure} from '../shared/task-diagnostic.ts';
 import {AppSceneGenerator,parseSceneSource,normalizeStoryboard} from './generator.ts';
-import {SpeechSynthesizer,extractVideoAudio} from './audio.ts';
+import {SpeechSynthesizer,AudioMixer,extractVideoAudio} from './audio.ts';
 import {BlenderRunner,type PrevizSceneSpec} from './blender.ts';
 import {synthesizeLocalSfx} from '../media/local-sfx.ts';
+import {analyzeAudioAcoustics,deconstructReferenceVideo} from '../media/deconstruct.ts';
+import {deriveSubtitles,formatAss,formatEdl,formatFcpxml,formatOtio,formatSrt} from '../media/delivery.ts';
 import type {MediaProjectPort} from '../jobs/contracts.ts';
 import {inspectGeneratedMedia,readProjectImage} from '../media/inspect.ts';
 import type { GeneratedFile, MediaTask } from '../jobs/contracts.ts';
@@ -77,13 +79,14 @@ export class StudioService {
     await this.initialized;const {root,project}=this.required();if(task.projectId!==project.id)throw new Error('素材任务工程不匹配');
     const assets:Asset[]=[];for(const file of files){signal.throwIfAborted();const asset=await this.store.importAsset(root,{path:file.path,mime:file.mimeType,name:file.name,description:task.prompt},this.settings,signal);asset.generation={taskId:task.id,connectionId:task.connection.id,model:task.model.model,operation:task.operation,prompt:task.prompt,inputHashes:task.inputHashes};assets.push(asset);}return assets;
   }
-  async workflowVoice(shotId:string,text:string,signal:AbortSignal,settings?:TtsSettings):Promise<Asset>{
+  async workflowVoice(shotId:string,text:string,signal:AbortSignal,settings?:TtsSettings,speakerLabel?:string):Promise<Asset>{
     const prepared=await (async()=>{
       await this.initialized;signal.throwIfAborted();const {root,project}=this.required(),shot=project.shots.find(item=>item.id===shotId);if(!shot)throw new Error('配音目标镜头不存在');
       const speechSettings=settings??await this.speechSettings();if(!speechSettings.enabled)throw new Error('请先配置并启用配音服务');validateTtsSettings(speechSettings,detectEnvironment(this.settings));if(!text.trim())throw new Error('配音文本不能为空');
       return {root,shot,speechSettings};
     })().catch(error=>{throw Object.assign(error instanceof Error?error:new Error(String(error)),{submissionUncertain:false});});
-    return this.speech.synthesize(prepared.root,{text,name:prepared.shot.title+' · 协作配音'},prepared.speechSettings,this.settings,signal);
+    const label=speakerLabel?`${prepared.shot.title} · ${speakerLabel}配音`:`${prepared.shot.title} · 协作配音`;
+    return this.speech.synthesize(prepared.root,{text,name:label,description:text},prepared.speechSettings,this.settings,signal);
   }
   async workflowCapture(frame:number,signal:AbortSignal,candidate?:import('../workflows/contracts.ts').WorkflowCandidate){await this.initialized;const {root,project}=this.required();if(candidate){if(candidate.project.id!==project.id)throw new Error('候选工程不匹配');return this.renderer.captureCandidate(root,candidate.project,candidate.sources,this.settings,frame,signal);}const capture=await this.renderer.capture(root,project,this.settings,frame,signal);return {bytes:await readFile(capture.path),mime:'image/png',sha256:capture.sha256};}
   async applyMediaResult(input:Parameters<MediaProjectPort['applyResult']>[0]):Promise<{assetIds:string[];revision:number}>{
@@ -157,8 +160,15 @@ export class StudioService {
     if(metadata.shots){if(!Array.isArray(metadata.shots))throw new Error('shots须为数组');project.shots=structuredClone(metadata.shots);project.shotOrder=project.shots.map(s=>s.id);delete project.extensions.graphEdges;}
     if(metadata.shotOrder)project=reorderShots(project,metadata.shotOrder);
     for(const item of metadata.shotPatches??[])project=updateShot(project,item.id??item.shotId,item.patch);
+    if(metadata.schemaVersion!==undefined&&(metadata.schemaVersion===2||metadata.schemaVersion===3))project.schemaVersion=metadata.schemaVersion;
+    if(metadata.productionPolicy!==undefined)project.productionPolicy=structuredClone(metadata.productionPolicy);
+    if('videoStyle' in incoming){if(incoming.videoStyle)project.videoStyle=structuredClone(incoming.videoStyle);else delete project.videoStyle;}
+    else if(data.videoStyle!==undefined){if(data.videoStyle)project.videoStyle=structuredClone(data.videoStyle);else delete project.videoStyle;}
     if(metadata.audioClips!==undefined)project.audioClips=structuredClone(metadata.audioClips);
     if(metadata.videoClips!==undefined)project.videoClips=structuredClone(metadata.videoClips);
+    if(metadata.overlayClips!==undefined)project.overlayClips=structuredClone(metadata.overlayClips);
+    if(metadata.subtitles!==undefined)project.subtitles=structuredClone(metadata.subtitles);
+    if(metadata.audioMix!==undefined)project.audioMix=structuredClone(metadata.audioMix);
     if(metadata.sessionIds)project.sessionIds=[...new Set<string>(metadata.sessionIds)];
     if(metadata.extensions)project.extensions={...project.extensions,...metadata.extensions};
     this.fitAudio(project);
@@ -511,6 +521,62 @@ export class StudioService {
             throw error;
           }
         }
+        case 'media.deconstruct':{
+          const {root,project}=this.required();
+          const asset=project.assets.find(item=>item.id===String(data.assetId??'')&&item.kind==='video');
+          if(!asset?.path)throw new Error('请选择当前工程内已有的视频素材进行拉片拆解');
+          const file=await projectPath(root,asset.path);
+          const analysis=await deconstructReferenceVideo(file,this.settings,{threshold:typeof data.threshold==='number'?data.threshold:undefined});
+          return {ok:true,value:{assetId:asset.id,name:asset.name,...analysis}};
+        }
+        case 'audio.analyze':{
+          const {root,project}=this.required();
+          if(typeof data.assetId==='string'&&data.assetId){
+            const asset=project.assets.find(item=>item.id===data.assetId&&(item.kind==='audio'||item.kind==='video'));
+            if(!asset?.path)throw new Error('未找到指定的音视频资产');
+            const file=await projectPath(root,asset.path);
+            return {ok:true,value:{scope:'asset',assetId:asset.id,name:asset.name,...await analyzeAudioAcoustics(file,this.settings)}};
+          }
+          const mixer=new AudioMixer();
+          try{
+            const mixed=await mixer.mix(root,project,this.settings);
+            if(!mixed)return {ok:true,value:{scope:'mix',empty:true,integratedLufs:null,loudnessRangeLu:null,truePeakDbtp:null,clippingRisk:false,tooQuiet:false,silenceIntervals:[],totalSilenceSeconds:0}};
+            return {ok:true,value:{scope:'mix',durationSeconds:mixed.duration,...await analyzeAudioAcoustics(mixed.path,this.settings)}};
+          }finally{await mixer.close();}
+        }
+        case 'delivery.export':{
+          const {root,project}=this.required();
+          compileSpec(project);
+          const formats=Array.isArray(data.formats)&&data.formats.length?data.formats.map(String):['srt','ass','otio','fcpxml','edl'];
+          const folderRel=`exports/delivery-${project.revision}-${Date.now().toString(36)}`;
+          const folder=await projectPath(root,folderRel);
+          await mkdir(folder,{recursive:true});
+          const cues=deriveSubtitles(project);
+          const written:{format:string;relativePath:string;bytes:number}[]=[];
+          for(const fmt of formats){
+            let filename='',content='';
+            if(fmt==='srt'){filename='subtitles.srt';content=formatSrt(cues);}
+            else if(fmt==='ass'){filename='subtitles.ass';content=formatAss(cues,project.target,project.title);}
+            else if(fmt==='otio'){filename='timeline.otio';content=formatOtio(project);}
+            else if(fmt==='fcpxml'){filename='timeline.fcpxml';content=formatFcpxml(project);}
+            else if(fmt==='edl'){filename='timeline.edl';content=formatEdl(project);}
+            else continue;
+            const targetFile=join(folder,filename);
+            await writeFile(targetFile,content,'utf8');
+            written.push({format:fmt,relativePath:`${folderRel}/${filename}`,bytes:Buffer.byteLength(content,'utf8')});
+          }
+          return {ok:true,value:{projectId:project.id,revision:project.revision,subtitleCount:cues.length,files:written}};
+        }
+        case 'media.assetDataUrl':{
+          const {root,project}=this.required();
+          const asset=project.assets.find(item=>item.id===String(data.assetId??''));
+          if(!asset?.path)throw new Error('素材不存在');
+          const file=await projectPath(root,asset.path);
+          const bytes=await readFile(file);
+          if(bytes.byteLength>32*1024*1024)throw new Error('用于内联驱动的单个音视频素材不得超过 32 MiB');
+          const fallbackMime=asset.kind==='video'?'video/mp4':asset.kind==='audio'?'audio/wav':'image/png';
+          return {ok:true,value:{assetId:asset.id,mime:asset.mime||fallbackMime,dataUrl:`data:${asset.mime||fallbackMime};base64,${bytes.toString('base64')}`}};
+        }
         case 'environment':this.assertIdle();if(data.maxVideoBytes!==undefined){if(!Number.isSafeInteger(data.maxVideoBytes)||data.maxVideoBytes<1||data.maxVideoBytes>512*1024*1024)throw new Error('单个视频文件上限须为 1 字节至 512 MiB');this.settings.maxVideoBytes=data.maxVideoBytes;}for(const key of ['browserPath','ffmpegPath','ffprobePath','blenderPath'] as const)if(data[key]!==undefined){if(typeof data[key]!=='string')throw new Error('执行文件路径须为字符串');this.settings[key]=data[key];}await mkdir(this.baseDirectory,{recursive:true});await writeFile(join(this.baseDirectory,'environment.json'),JSON.stringify(this.settings,null,2));break;
         case 'reveal':{const {root}=this.required(),target=await projectOpenPath(root,data.path==null?root:String(data.path));if(!this.ctx.reveal)throw new Error('当前运行器没有文件打开服务');await this.ctx.reveal(target);break;}
         default:throw new Error('未找到应用操作');
@@ -518,7 +584,7 @@ export class StudioService {
       return {ok:true,value:await this.snapshot()};
     }catch(error){return {ok:false,error:{code:error instanceof Error&&'code' in error?String(error.code):'STUDIO_ERROR',message:error instanceof Error?error.message:String(error)}};}
   }
-  async renderPreviz(spec:PrevizSceneSpec,options:{shotId?:string;name?:string;bindPreviewClip?:boolean;signal?:AbortSignal}={}):Promise<{imageAssetId:string;videoAssetId?:string;width:number;height:number;fps:number;frameCount:number;revision:number}>{
+  async renderPreviz(spec:PrevizSceneSpec,options:{shotId?:string;name?:string;bindPreviewClip?:boolean;signal?:AbortSignal}={}):Promise<{imageAssetId:string;depthAssetId?:string;videoAssetId?:string;width:number;height:number;fps:number;frameCount:number;revision:number}>{
     await this.initialized;
     const {root}=this.required();
     const rendered=await this.blender.renderPreviz(root,spec,this.settings,{signal:options.signal});
@@ -529,6 +595,11 @@ export class StudioService {
       const label=(options.name||'白模预演').trim().slice(0,80)||'白模预演';
       const imageAsset=await this.store.importAsset(currentRoot,{name:`${label} · 预演帧.png`,description:'Blender 白模空间预演关键帧（参考用）',mime:'image/png',dataBase64:`data:image/png;base64,${Buffer.from(rendered.keyframePng).toString('base64')}`},this.settings);
       imageAsset.provenance={origin:'code_render',usage:'reference_only'};
+      let depthAsset:Asset|undefined;
+      if(rendered.depthPng){
+        depthAsset=await this.store.importAsset(currentRoot,{name:`${label} · 深度图.png`,description:'Blender 空间景深遮罩图（构图与空间控制参考用）',mime:'image/png',dataBase64:`data:image/png;base64,${Buffer.from(rendered.depthPng).toString('base64')}`},this.settings);
+        depthAsset.provenance={origin:'code_render',usage:'reference_only'};
+      }
       let videoAsset:Asset|undefined;
       if(rendered.videoMp4){
         videoAsset=await this.store.importAsset(currentRoot,{name:`${label} · 白模预演.mp4`,description:'Blender 白模动态预演视频（审阅用）',mime:'video/mp4',dataBase64:`data:video/mp4;base64,${Buffer.from(rendered.videoMp4).toString('base64')}`},this.settings);
@@ -537,6 +608,10 @@ export class StudioService {
       const next=structuredClone(project);
       next.assets.push(imageAsset);
       next.graph.positions[imageAsset.id]=[60,80+(next.assets.length-1)*180];
+      if(depthAsset){
+        next.assets.push(depthAsset);
+        next.graph.positions[depthAsset.id]=[60,80+(next.assets.length-1)*180];
+      }
       if(videoAsset){
         next.assets.push(videoAsset);
         next.graph.positions[videoAsset.id]=[60,80+(next.assets.length-1)*180];
@@ -545,13 +620,14 @@ export class StudioService {
         const shot=next.shots.find(item=>item.id===options.shotId);
         if(shot){
           if(!shot.referenceIds.includes(imageAsset.id))shot.referenceIds.push(imageAsset.id);
+          if(depthAsset&&!shot.referenceIds.includes(depthAsset.id))shot.referenceIds.push(depthAsset.id);
           if(videoAsset&&options.bindPreviewClip&&next.schemaVersion!==3){
             next.videoClips=[...(next.videoClips??[]).filter(item=>item.shotId!==shot.id),{id:randomUUID(),shotId:shot.id,assetId:videoAsset.id,trimStart:0,speed:1,fit:'cover',audio:'mute'}];
           }
         }
       }
       await this.persist(next,{},'Blender 白模预演');
-      return {imageAssetId:imageAsset.id,...(videoAsset?{videoAssetId:videoAsset.id}:{}),width:rendered.width,height:rendered.height,fps:rendered.fps,frameCount:rendered.frameCount,revision:this.required().project.revision};
+      return {imageAssetId:imageAsset.id,...(depthAsset?{depthAssetId:depthAsset.id}:{}),...(videoAsset?{videoAssetId:videoAsset.id}:{}),width:rendered.width,height:rendered.height,fps:rendered.fps,frameCount:rendered.frameCount,revision:this.required().project.revision};
     });
   }
   async dispose(){

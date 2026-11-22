@@ -7,15 +7,17 @@ import {artifactAuth,cancelGeneration,pollGeneration,submitGeneration} from '../
 import {cancelTemplate,pollTemplate,resolveTemplate,submitTemplate} from '../models/adapters/template.ts';
 import {validateMediaRequest} from '../models/capabilities.ts';
 import {ROLE_PROTOCOLS} from '../models/contracts.ts';
-import {templateAcceptsImage} from '../models/template-presets.ts';
+import {templateAcceptsImage, templateMaxImages} from '../models/template-presets.ts';
 import {uploadDestination,type AuthorizeUpload} from '../models/upload-consent.ts';
 import type {RemoteJob as Job} from './contracts.ts';
 // Protocol dispatch: official providers use official.ts; async-task uses the configurable template adapter.
-const outputOf=(operation:string):'image'|'video'=>operation==='text-to-image'?'image':'video';
+const isImageOp=(operation:string)=>operation==='text-to-image'||operation==='image-compose';
+const needsImageInput=(operation:string)=>operation==='image-compose'||operation==='image-to-video'||operation==='first-last-frame-video';
+const outputOf=(operation:string):'image'|'video'=>isImageOp(operation)?'image':'video';
 async function generateImage(context:AdapterContext,input:AdapterInput):Promise<Job>{return context.connection.protocol==='async-task'?submitAsync(context,input):submitGeneration(context,input);}
 async function submitVideo(context:AdapterContext,input:AdapterInput):Promise<Job>{return context.connection.protocol==='async-task'?submitAsync(context,input):submitGeneration(context,input);}
 async function submitAsync(context:AdapterContext,input:AdapterInput):Promise<Job>{
-  const result=await submitTemplate(context,{clientRequestId:input.clientRequestId,model:input.model,prompt:input.prompt,image:input.inputs[0]?.dataUrl,duration:typeof input.parameters.durationSeconds==='number'?input.parameters.durationSeconds:typeof input.parameters.duration==='number'?input.parameters.duration:undefined,parameters:input.parameters},outputOf(input.operation));
+  const result=await submitTemplate(context,{clientRequestId:input.clientRequestId,model:input.model,prompt:input.prompt,image:input.inputs[0]?.dataUrl,tailImage:input.inputs[1]?.dataUrl,images:input.inputs.length?input.inputs.map(i=>i.dataUrl):undefined,duration:typeof input.parameters.durationSeconds==='number'?input.parameters.durationSeconds:typeof input.parameters.duration==='number'?input.parameters.duration:undefined,parameters:input.parameters},outputOf(input.operation));
   if('kind' in result)return {jobId:input.clientRequestId,status:'succeeded',artifacts:[{base64:Buffer.from(result.bytes).toString('base64'),mimeType:result.mimeType}]};
   return result;
 }
@@ -78,7 +80,7 @@ export class MediaTaskService {
   generate(input:MediaRequest,authorizeUpload?:AuthorizeUpload):Promise<MediaTask>{const captured=structuredClone(input);const next=this.submissions.then(()=>this.create(captured,authorizeUpload));this.submissions=next.then(()=>undefined,()=>undefined);return next;}
   private async create(input:MediaRequest,authorizeUpload?:AuthorizeUpload):Promise<MediaTask>{
     await this.initialize();if(this.stopped)throw new Error('媒体任务服务正在关闭');
-    if(!input||!['text-to-image','text-to-video','image-to-video'].includes(input.operation)||typeof input.projectId!=='string'||typeof input.prompt!=='string'||!input.prompt.trim()||input.prompt.length>20000)throw new Error('请填写有效的工程、生成类型和提示词');
+    if(!input||!['text-to-image','image-compose','text-to-video','image-to-video','first-last-frame-video','lip-sync-video'].includes(input.operation)||typeof input.projectId!=='string'||typeof input.prompt!=='string'||!input.prompt.trim()||input.prompt.length>20000)throw new Error('请填写有效的工程、生成类型和提示词');
     if(input.clientRequestId!==undefined){
       if(typeof input.clientRequestId!=='string'||!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,199}$/.test(input.clientRequestId))throw new Error('稳定生成请求 ID 无效');
       const existing=[...this.tasks.values()].find(task=>task.clientRequestId===input.clientRequestId);
@@ -88,24 +90,29 @@ export class MediaTaskService {
     }
     const project=await this.projects.inspect(input.projectId);if(!Number.isSafeInteger(input.expectedRevision)||input.expectedRevision!==project.revision)throw Object.assign(new Error('工程版本已变化，请刷新后生成'),{code:'REVISION_CONFLICT'});
     if(input.shotId&&!project.shotIds.includes(input.shotId))throw new Error('生成目标镜头不存在');
-    const resolved=await this.registry.resolve({role:input.operation==='text-to-image'?'image':'video',...(input.modelId?{modelId:input.modelId}:{}),...(input.connectionId?{connectionId:input.connectionId}:{})});
+    const resolved=await this.registry.resolve({role:isImageOp(input.operation)?'image':'video',...(input.modelId?{modelId:input.modelId}:{}),...(input.connectionId?{connectionId:input.connectionId}:{})});
     const release=this.registry.acquire?.(resolved.connection.id,resolved.model.id);try {
-    const output=input.operation==='text-to-image'?'image':'video';
+    const output=outputOf(input.operation);
     const validProtocols=output==='image'?ROLE_PROTOCOLS.image:ROLE_PROTOCOLS.video;
     if(!validProtocols.includes(resolved.connection.protocol)||!resolved.model.outputModalities.includes(output))throw new Error('所选模型不支持此生成操作');
     if(!resolved.model.inputModalities.includes('text'))throw new Error('所选模型不支持文字提示输入');
-    if(input.operation==='image-to-video'&&!resolved.model.inputModalities.includes('image'))throw new Error('所选模型不支持图片输入');
+    if(needsImageInput(input.operation)&&!resolved.model.inputModalities.includes('image'))throw new Error('所选模型不支持图片输入');
     const policyFingerprint=this.projects.authorizeOperation?await this.projects.authorizeOperation(input.projectId,input.operation,input.shotId):undefined;
-    if(input.operation==='image-to-video'&&authorizeUpload)authorizeUpload(uploadDestination(resolved));
+    if(needsImageInput(input.operation)&&authorizeUpload)authorizeUpload(uploadDestination(resolved));
     // Resolve now to reject unavailable credentials before registering work. Resolve again per HTTP operation.
     await this.registry.credential(resolved.connection);
-    const ids=input.imageAssetIds??[];if(!Array.isArray(ids)||ids.some(id=>typeof id!=='string')||new Set(ids).size!==ids.length||ids.length>3)throw new Error('每次最多选择 3 张不同参考图片');
-    if(input.operation==='image-to-video'&&(!input.allowImageUpload||ids.length===0))throw new Error('图生视频需要选择图片并明确允许本次上传');
-    if(input.operation!=='image-to-video'&&ids.length)throw new Error('此操作不支持参考图片');
-    // F09: the template adapter forwards exactly one image ({{image}}); never upload/bill for references that would be silently dropped.
-    if(resolved.connection.protocol==='async-task'&&ids.length>1)throw new Error('此服务模板一次只支持 1 张参考图片');
-    if(resolved.connection.protocol==='async-task'&&ids.length&&!templateAcceptsImage(resolved.model.parameters))throw new Error('此服务模板的请求体没有 {{image}}，无法传送参考图片');
-    const allowed=output==='image'?['size','quality','style','response_format','background','output_format','n']:['durationSeconds','width','height','fps','aspectRatio','seed','negativePrompt'];
+    const ids=input.imageAssetIds??[];if(!Array.isArray(ids)||ids.some(id=>typeof id!=='string')||new Set(ids).size!==ids.length||ids.length>4)throw new Error('每次最多选择 4 张不同参考图片');
+    if(input.operation==='image-to-video'&&ids.length>3)throw new Error('每次最多选择 3 张不同参考图片');
+    if(needsImageInput(input.operation)&&(!input.allowImageUpload||ids.length===0))throw new Error('参考图生成需要选择图片并明确允许本次上传');
+    if(input.operation==='first-last-frame-video'&&ids.length<2)throw new Error('首尾帧生视频需要提供首帧和尾帧 2 张参考图片');
+    if(!needsImageInput(input.operation)&&ids.length)throw new Error('此操作不支持参考图片');
+    // F09: enforce exact template image slot capacity so references are never silently dropped.
+    if(resolved.connection.protocol==='async-task'&&ids.length){
+      if(!templateAcceptsImage(resolved.model.parameters))throw new Error('此服务模板的请求体没有 {{image}}，无法传送参考图片');
+      const maxSlots=templateMaxImages(resolved.model.parameters);
+      if(ids.length>maxSlots)throw new Error(`此服务模板一次只支持 ${maxSlots} 张参考图片`);
+    }
+    const allowed=output==='image'?['size','quality','style','response_format','background','output_format','n']:['durationSeconds','width','height','fps','aspectRatio','seed','negativePrompt','videoDataUrl','audioDataUrl'];
     if(input.parameters&&Object.keys(input.parameters).some(key=>!allowed.includes(key)))throw new Error('请求包含当前协议不支持的生成参数');
     const parameters:Record<string,string|number|boolean>={};for(const [key,value]of Object.entries({...resolved.model.parameters,...input.parameters})){if(!allowed.includes(key))continue;if(!['string','number','boolean'].includes(typeof value)||typeof value==='number'&&!Number.isFinite(value)||typeof value==='string'&&value.length>4000)throw new Error('生成参数无效：'+key);parameters[key]=value;}
     if(resolved.connection.protocol!=='async-task')validateMediaRequest(resolved,{operation:input.operation,parameters,imageAssetIds:ids,referenceRoles:input.referenceRoles,requiresAudio:input.requiresAudio});
@@ -121,8 +128,8 @@ export class MediaTaskService {
     }finally{release?.();}
   }
   private async inputs(task:MediaTask,verify=true):Promise<AdapterInput['inputs']>{let total=0;const inputs:AdapterInput['inputs']=[],hashes:MediaTask['inputHashes']=[];
-    for(const assetId of task.imageAssetIds){const image=await this.projects.readImage(task.projectId,assetId,task.shotId);total+=image.bytes.byteLength;const mime=mediaSignature(image.bytes),dimensions=imageDimensions(image.bytes);if(total>6*1024*1024||!dimensions||dimensions.width<1||dimensions.height<1||Math.max(dimensions.width,dimensions.height)>4096||dimensions.width*dimensions.height>16_777_216||mime!==image.mime||!mime?.startsWith('image/'))throw new Error('参考图片格式、像素尺寸或总大小超出限制');
-      const sha256=createHash('sha256').update(image.bytes).digest('hex');hashes.push({assetId,sha256});inputs.push({type:'image',dataUrl:`data:${mime};base64,${Buffer.from(image.bytes).toString('base64')}`});}
+    for(const [idx,assetId] of task.imageAssetIds.entries()){const image=await this.projects.readImage(task.projectId,assetId,task.shotId);total+=image.bytes.byteLength;const mime=mediaSignature(image.bytes),dimensions=imageDimensions(image.bytes);if(total>6*1024*1024||!dimensions||dimensions.width<1||dimensions.height<1||Math.max(dimensions.width,dimensions.height)>4096||dimensions.width*dimensions.height>16_777_216||mime!==image.mime||!mime?.startsWith('image/'))throw new Error('参考图片格式、像素尺寸或总大小超出限制');
+      const sha256=createHash('sha256').update(image.bytes).digest('hex');hashes.push({assetId,sha256});const role=task.referenceRoles?.[idx];inputs.push({type:'image',dataUrl:`data:${mime};base64,${Buffer.from(image.bytes).toString('base64')}`,...(role?{role}:{})});}
     if(verify&&JSON.stringify(hashes)!==JSON.stringify(task.inputHashes))throw new Error('参考图片已变化，请重新创建生成请求');task.inputHashes=hashes;return inputs;
   }
   private schedule():void {if(this.stopped)return;for(const task of this.tasks.values()){
@@ -153,9 +160,9 @@ export class MediaTaskService {
     if(task.phase==='pending'){
       const inputs=await this.inputs(task),context=await this.context(task,signal);task.phase='submitting';task.metrics??={};task.metrics.submittedAt??=new Date().toISOString();task.message='正在提交生成请求';await this.persist(task);signal.throwIfAborted();
       const input:AdapterInput={clientRequestId:task.clientRequestId,model:task.model,operation:task.operation,prompt:task.prompt,inputs,parameters:task.parameters};
-      remote=task.operation==='text-to-image'?await generateImage(context,input):await submitVideo(context,input);
+      remote=isImageOp(task.operation)?await generateImage(context,input):await submitVideo(context,input);
       this.applyRemote(task,remote);await this.persist(task);
-    }else if(!this.canReuseSuccessfulResult(task)&&(task.operation!=='text-to-image'||task.connection.protocol==='async-task'&&task.remoteJobId)){
+    }else if(!this.canReuseSuccessfulResult(task)&&(!isImageOp(task.operation)||task.connection.protocol==='async-task'&&task.remoteJobId)){
       remote=task.remoteJobId?await getVideo(await this.context(task,signal),task.remoteJobId):await lookupVideo(await this.context(task,signal),task.clientRequestId);
       if(!remote){task.phase='unknown';task.observation='paused';task.message='未查到提交结果；没有重新发起计费请求';await this.persist(task);return;}this.applyRemote(task,remote);await this.persist(task);
     }else if(!task.artifacts?.length){task.phase='unknown';task.observation='paused';task.message='生图提交结果未确认，兼容接口不支持查单；请核对服务记录';await this.persist(task);return;}
@@ -167,7 +174,7 @@ export class MediaTaskService {
     const downloadAuth=task.artifacts?.some(item=>item.sameOriginAuth)?artifactAuth(task.connection,await this.registry.credential(task.connection).catch(()=>undefined)):undefined;
     for(let index=0;index<(task.artifacts?.length??0);index++){
       task.phase='downloading';task.message='下载生成素材 '+(index+1);await this.persist(task);
-      const file=await downloadArtifact(task.artifacts![index]!,join(this.directory,task.id),index,{signal,fetch:this.options.fetch,maxBytes:Math.min(this.options.maxArtifactBytes??512*1024*1024,(this.options.maxTaskBytes??1024*1024*1024)-total),expected:task.operation==='text-to-image'?'image':'video',authorization:downloadAuth});total+=file.bytes;
+      const file=await downloadArtifact(task.artifacts![index]!,join(this.directory,task.id),index,{signal,fetch:this.options.fetch,maxBytes:Math.min(this.options.maxArtifactBytes??512*1024*1024,(this.options.maxTaskBytes??1024*1024*1024)-total),expected:outputOf(task.operation),authorization:downloadAuth});total+=file.bytes;
       task.phase='validating';task.message='检查真实媒体格式';await this.persist(task);const metadata=await this.projects.validateArtifact(file.path,file.mimeType,task.projectId,signal);signal.throwIfAborted();files.push({...file,metadata});
     }
     if(!files.length)throw new Error('生成结果没有可采用素材');task.files=files;task.metrics??={};task.metrics.readyAt=new Date().toISOString();task.metrics.downloadBytes=total;if(task.metrics.remoteCompletedAt)task.metrics.downloadMs=Date.parse(task.metrics.readyAt)-Date.parse(task.metrics.remoteCompletedAt);task.phase='ready';task.progress=1;task.message='素材已就绪，等待采用';task.observation='paused';delete task.error;await this.persist(task);

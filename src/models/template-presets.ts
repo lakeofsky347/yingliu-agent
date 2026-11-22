@@ -47,12 +47,25 @@ export const TEMPLATE_PRESETS: Record<string, { label: string; output: 'image' |
   'replicate-musicgen': { label: 'Replicate 音乐生成（MusicGen）', output: 'audio', template: {
     submitPath: '/models/{{modelOwner}}/{{modelName}}/predictions', submitBody: '{"input":{"prompt":"{{prompt}}","duration":{{duration|15}}}}',
     idPath: 'id', pollPath: '/predictions/{{id}}', statusPath: 'status', resultPath: 'output', errorPath: 'error', cancelPath: '/predictions/{{id}}/cancel' } },
+  'replicate-lipsync': { label: 'Replicate 口型同步（Lip-Sync 视频+配音驱动）', output: 'video', template: {
+    submitPath: '/models/{{modelOwner}}/{{modelName}}/predictions', submitBody: '{"input":{"video":"{{param.videoDataUrl}}","audio":"{{param.audioDataUrl}}","prompt":"{{prompt}}"}}',
+    idPath: 'id', pollPath: '/predictions/{{id}}', statusPath: 'status', resultPath: 'output', errorPath: 'error', cancelPath: '/predictions/{{id}}/cancel' } },
   'generic-async': { label: '通用异步任务（自定义字段）', output: 'image', template: {} },
 };
 
 export function templateAcceptsImage(parameters: Record<string, unknown>): boolean {
   const preset = typeof parameters.preset === 'string' ? TEMPLATE_PRESETS[parameters.preset] : undefined;
   const body = parameters.submitBody ?? preset?.template.submitBody;
-  return typeof body === 'string' && /\{\{\s*image\s*(?:\|[^}]*)?\}\}/.test(body);
+  return typeof body === 'string' && /\{\{\s*(?:image|tailImage|images)\s*(?:\|[^}]*)?\}\}/.test(body);
+}
+
+export function templateMaxImages(parameters: Record<string, unknown>): number {
+  const preset = typeof parameters.preset === 'string' ? TEMPLATE_PRESETS[parameters.preset] : undefined;
+  const body = parameters.submitBody ?? preset?.template.submitBody;
+  if (typeof body !== 'string') return 0;
+  if (/\{\{\s*images\s*(?:\|[^}]*)?\}\}/.test(body)) return 4;
+  if (/\{\{\s*tailImage\s*(?:\|[^}]*)?\}\}/.test(body)) return 2;
+  if (/\{\{\s*image\s*(?:\|[^}]*)?\}\}/.test(body)) return 1;
+  return 0;
 }
 

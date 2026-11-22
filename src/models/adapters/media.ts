@@ -2,7 +2,7 @@ import { fetch } from '../../host/http.ts';
 import type { ProviderConnection, ModelDefinition } from '../contracts.ts';
 import type { MediaArtifact, MediaOperation, RemoteJob } from '../../jobs/contracts.ts';
 
-export interface AdapterInput {clientRequestId:string;model:ModelDefinition;operation:MediaOperation;prompt:string;inputs:{type:'image';dataUrl:string}[];parameters:Record<string,string|number|boolean>}
+export interface AdapterInput {clientRequestId:string;model:ModelDefinition;operation:MediaOperation;prompt:string;inputs:{type:'image';dataUrl:string;role?:string}[];parameters:Record<string,string|number|boolean>}
 export interface AdapterContext {connection:ProviderConnection;key?:string;signal:AbortSignal;fetch?:typeof fetch}
 export function mediaEndpoint(connection:ProviderConnection,path:string):string {
   const base=connection.baseUrl.replace(/\/+$/,'');
@@ -32,11 +32,13 @@ async function json(response:Response):Promise<unknown>{
   try{return JSON.parse(Buffer.concat(parts).toString('utf8'));}catch{throw new Error('媒体接口返回无效 JSON');}
 }
 export async function generateImage(context:AdapterContext,input:AdapterInput):Promise<RemoteJob>{
-  if(input.operation!=='text-to-image')throw new Error('图片兼容接口只支持文生图');
+  if(!['text-to-image','image-compose'].includes(input.operation))throw new Error('图片兼容接口只支持文生图或多图融合重绘');
   // Never spread provider parameters after identity fields: parameters cannot override model/prompt.
   const allowed=['size','quality','style','response_format','background','output_format','n'];const parameters=Object.fromEntries(Object.entries(input.parameters).filter(([key])=>allowed.includes(key)));
   if(parameters.n!==undefined&&(!Number.isInteger(parameters.n)||Number(parameters.n)<1||Number(parameters.n)>4))throw new Error('每次生图数量须为 1–4');
-  const data=record(await json(await request(context,'/images/generations',{...parameters,model:input.model.model,prompt:input.prompt})));
+  const routePath=input.operation==='image-compose'&&input.inputs.length?'/images/edits':'/images/generations';
+  const payload={...parameters,model:input.model.model,prompt:input.prompt,...(input.operation==='image-compose'&&input.inputs.length?{images:input.inputs.map(i=>i.dataUrl)}:{})};
+  const data=record(await json(await request(context,routePath,payload)));
   if(!Array.isArray(data.data)||!data.data.length||data.data.length>4)throw new Error('生图接口没有返回有效产物');
   const artifacts=data.data.map(raw=>{const artifact=record(raw);if(typeof artifact.b64_json==='string'&&/^[A-Za-z0-9+/]+={0,2}$/.test(artifact.b64_json))return {base64:artifact.b64_json,mimeType:typeof data.output_format==='string'&&data.output_format==='jpeg'?'image/jpeg':typeof parameters.output_format==='string'&&parameters.output_format==='webp'?'image/webp':'image/png'};
     if(typeof artifact.url==='string')return {url:artifact.url,mimeType:'image/png'};throw new Error('生图产物缺少 URL 或 Base64');});

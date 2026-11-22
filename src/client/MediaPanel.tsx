@@ -8,14 +8,22 @@ import { StudioController } from './controller.ts';
 import { ModelCenter } from './ModelCenter.tsx';
 
 const phaseNames:Record<MediaTask['phase'],string>={pending:'等待执行',submitting:'正在提交',queued:'远端排队',running:'正在生成',downloading:'下载结果',validating:'检查媒体',ready:'待采用',applying:'正在采用',complete:'已采用',failed:'未完成',cancelled:'远端已取消',unknown:'提交结果待确认'};
-const operationNames:Record<MediaOperation,string>={'text-to-image':'文字生成图片','text-to-video':'文字生成视频','image-to-video':'参考图片生成视频'};
+const operationNames:Record<MediaOperation,string>={
+  'text-to-image':'文字生成图片',
+  'image-compose':'多图参考重绘关键帧',
+  'text-to-video':'文字生成视频',
+  'image-to-video':'参考图片生成视频',
+  'first-last-frame-video':'首尾帧受控生视频',
+  'lip-sync-video':'口型同步面部驱动',
+};
 const errorMessage=(cause:unknown)=>cause instanceof Error?cause.message:'操作未完成';
 export function mediaModels(catalog:RegistrySnapshot,operation:MediaOperation):ModelDefinition[]{
-  const role=operation==='text-to-image'?'image':'video';
+  const role=(operation==='text-to-image'||operation==='image-compose')?'image':'video';
+  const requiresImg=['image-compose','image-to-video','first-last-frame-video'].includes(operation);
   return catalog.models.filter(model=>{
     const connection=catalog.connections.find(item=>item.id===model.connectionId);
     if(!model.enabled||!connection?.enabled||!ROLE_PROTOCOLS[role].includes(connection.protocol)||!model.inputModalities.includes('text')||!model.outputModalities.includes(role))return false;
-    return operation!=='image-to-video'||model.inputModalities.includes('image')&&(connection.protocol!=='async-task'||templateAcceptsImage(model.parameters));
+    return !requiresImg||model.inputModalities.includes('image')&&(connection.protocol!=='async-task'||templateAcceptsImage(model.parameters));
   });
 }
 export function mediaUsageLabel(task:Pick<MediaTask,'usage'>):string{return typeof task.usage?.cost==='number'?`${task.usage.cost.toFixed(4)} ${task.usage.currency||'（币种未提供）'}`:'费用未知';}

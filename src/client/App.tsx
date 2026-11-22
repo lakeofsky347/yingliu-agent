@@ -225,9 +225,12 @@ export function App({controller,api}:{controller:StudioController;api:StudioApi}
             {historyLoading&&!conversation?<div className="yl-history-loading"><span className="vs-spinner"/>读取工程对话…</div>
               :!conversation?.messages.length&&!pendingMessage?<div className="yl-chat-welcome">
                 <h2>快速创作对话</h2>
-                <p>适合单轮讨论与轻量修改；多镜头编排、Blender 白模预演与自动质检推荐切换到「智能体」标签。</p>
+                <p>适合单轮讨论与轻量修改；多镜头编排、虚拟剧组分工、3D 白模预演与声画质检推荐切换到「智能体」主面板。</p>
                 {project?.topic&&<blockquote>{project.topic}</blockquote>}
-                {!configured&&<button type="button" className="vs-primary" onClick={()=>setSettingsOpen(true)}>连接创作模型</button>}
+                <div style={{display:'flex',gap:'8px',flexWrap:'wrap'}}>
+                  <button type="button" className="vs-primary" onClick={()=>setCopilotTab('agent')}>进入剧组智能体编排</button>
+                  {!configured&&<button type="button" onClick={()=>setSettingsOpen(true)}>连接创作模型</button>}
+                </div>
               </div>
               :conversation?.messages.map(message=>{const turn=conversation.turns?.find(value=>value.id===message.turnId);return <article key={message.id} className={`yl-message is-${message.role}`} data-message-id={message.id}><div className="yl-message-meta"><span className="yl-avatar">{message.role==='user'?'你':'映'}</span><strong>{message.role==='user'?'你':settings?.config.name||'创作助手'}</strong><time dateTime={message.createdAt}>{localTime(message.createdAt)}</time></div><div className="yl-message-content">{message.content}</div>{message.actions?.length?<div className="yl-message-actions">{message.actions.map((action,index)=><button key={index} disabled={blocked} onClick={()=>void jump(action)}>{action.label} ↗</button>)}</div>:null}{message.role==='user'&&turn&&<div className={`yl-turn is-${turn.status}`}><span>{turnLabels[turn.status]}{turn.committedRevision!==undefined?` · 工程 v${turn.committedRevision}`:''}</span>{turn.error&&<p>{turn.error}</p>}{turn.status==='interrupted'&&<p>上次运行已中断，工程会保留最后保存的版本。</p>}{['failed','cancelled','interrupted'].includes(turn.status)&&<button disabled={blocked} onClick={()=>void performSend('',turn.request.intent||'auto',turn.id,undefined,turn.request.role)}>重试这次请求</button>}</div>}</article>;})}
             {pendingMessage&&!conversation?.messages.some(message=>message.content===pendingMessage&&message.role==='user'&&new Date(message.createdAt).getTime()>Date.now()-10000)&&<article className="yl-message is-user"><div className="yl-message-meta"><span className="yl-avatar">你</span><strong>你</strong><small>提交中</small></div><div className="yl-message-content">{pendingMessage}</div></article>}

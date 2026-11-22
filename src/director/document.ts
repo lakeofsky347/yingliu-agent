@@ -29,7 +29,12 @@ export function validateProjectDirectorPlan(project:VideoProject,input:unknown):
   const plan=validPlan(input),shots=new Set(project.shots.map(shot=>shot.id));
   for(const shot of plan.shots)if(!shots.has(shot.shotId))fail('导演计划引用不存在的工程镜头：'+shot.shotId);
   const imageIds=new Set(project.assets.filter(asset=>asset.kind==='image').map(asset=>asset.id));
-  for(const id of [...plan.identityMap.map(binding=>binding.assetId),...plan.characters.flatMap(character=>character.referenceAssetIds??[])])if(!imageIds.has(id))fail('导演计划引用的图片资产不存在：'+id);
+  for(const id of [
+    ...plan.identityMap.map(binding=>binding.assetId),
+    ...plan.characters.flatMap(character=>character.referenceAssetIds??[]),
+    ...(plan.locations??[]).flatMap(loc=>loc.referenceAssetIds??[]),
+    ...(plan.props??[]).flatMap(prop=>prop.referenceAssetIds??[]),
+  ])if(!imageIds.has(id))fail('导演计划引用的图片资产不存在：'+id);
   for(const reference of plan.shots.flatMap(shot=>shot.references))if(!project.assets.some(asset=>asset.id===reference.assetId))fail('导演计划引用的参考资产不存在：'+reference.assetId);
   return plan;
 }
