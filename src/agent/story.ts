@@ -2,7 +2,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import type { VideoProject } from '../shared/types.ts';
-import type { AcceptanceCondition, AudioStrategy, ContinuityEntry, DialogueEvent, DirectorDocument, DirectorLocation, DirectorPlan, DirectorProp, FilmKind, PerformanceBeat, ShotEvent, StoryBeat, WorldLayout } from '../director/contracts.ts';
+import type { AcceptanceCondition, AudioStrategy, ContinuityEntry, DialogueEvent, DirectorDocument, DirectorLocation, DirectorPlan, DirectorProp, DirectorReference, FilmKind, PerformanceBeat, ShotEvent, StoryBeat, WorldLayout } from '../director/contracts.ts';
 import { DIRECTOR_RULESET_VERSION, validateDirectorPlan } from '../director/index.ts';
 import { directorPlanHash } from '../director/document.ts';
 import { writeDurableFile } from './durable-file.ts';
@@ -23,9 +23,10 @@ export interface StoryPreviz {
 }
 export interface StoryShot {
   id: string; shotId?: string; summary: string; shotType: string; camera: string; durationSeconds: number;
-  dialogue: string; characters: string[]; continueFromPrevious: boolean; previz?: StoryPreviz;
+  dialogue: string; narration?: string; characters: string[]; continueFromPrevious: boolean; previz?: StoryPreviz;
   locationId?: string; propIds?: string[]; audioStrategy?: AudioStrategy;
-  performance?: PerformanceBeat[]; dialogueEvents?: DialogueEvent[]; shotEvents?: ShotEvent[]; acceptance?: AcceptanceCondition[];
+  performance?: PerformanceBeat[]; dialogueEvents?: DialogueEvent[]; shotEvents?: ShotEvent[];
+  references?: DirectorReference[]; acceptance?: AcceptanceCondition[];
 }
 export interface ConsistencyScore { shotId: string; score: number; notes: string; at: string }
 export interface Story {
@@ -34,7 +35,7 @@ export interface Story {
   style: StoryStyle; characters: StoryCharacter[];
   locations?: StoryLocation[]; props?: StoryProp[];
   storyBeats?: StoryBeat[]; worldLayouts?: WorldLayout[]; continuityLog?: ContinuityEntry[];
-  shots: StoryShot[]; approvedAt?: string; updatedAt: string;
+  shots: StoryShot[]; approvedAt?: string; approvedDocHash?: string; approvedDocVersion?: number; updatedAt: string;
   consistency: Record<string, ConsistencyScore>;
 }
 export interface Ledger { version: number; projectId: string; maxCost: number | null; currency: string; spent: number; unknownCostCalls: number; byTool: Record<string, { calls: number; cost: number }>; settledExecutions?: Record<string, true>; updatedAt: string }
@@ -78,26 +79,40 @@ export function normalizeProp(value: unknown, index: number): StoryProp {
     referenceAssetIds: list(v.referenceAssetIds, 6, 80),
   };
 }
-export function normalizeShots(value: unknown, characters: StoryCharacter[], locations: StoryLocation[] = [], props: StoryProp[] = []): StoryShot[] {
+export function normalizeShots(value: unknown, characters: StoryCharacter[], locations: StoryLocation[] = [], props: StoryProp[] = [], existingShots: StoryShot[] = []): StoryShot[] {
   if (!Array.isArray(value) || !value.length) throw new Error('shots 必须是非空数组');
   if (value.length > 120) throw new Error('分镜最多 120 个');
   const known = new Set(characters.map(c => c.id)); const knownLocs = new Set(locations.map(l => l.id)); const knownProps = new Set(props.map(p => p.id)); const seen = new Set<string>();
   return value.map((raw, index) => {
     const v = (raw ?? {}) as Record<string, unknown>; const summary = text(v.summary ?? v.visualPrompt, 800); if (!summary) throw new Error(`分镜 ${index + 1} 缺少 summary`);
     let shotId = id(v.id, 's' + (index + 1)); while (seen.has(shotId)) shotId += '_'; seen.add(shotId);
+    const linkedShotId = text(v.shotId, 80);
+    const old = existingShots.find(e => (linkedShotId && e.shotId === linkedShotId) || e.id === shotId);
     const duration = Number(v.durationSeconds); if (!Number.isFinite(duration) || duration <= 0 || duration > 120) throw new Error(`分镜 ${index + 1} 的 durationSeconds 须在 0–120 秒`);
+    const roundedDur = Math.round(duration * 100) / 100;
     const chars = list(v.characters ?? v.characterIds, 8, 60); const unknown = chars.filter(c => !known.has(c)); if (unknown.length) throw new Error(`分镜 ${index + 1} 引用了未知角色：${unknown.join(', ')}（先用 plan_story 或 character_upsert 定义）`);
     const locationId = text(v.locationId, 60); if (locationId && knownLocs.size && !knownLocs.has(locationId)) throw new Error(`分镜 ${index + 1} 引用了未知场景：${locationId}`);
     const propIds = list(v.propIds, 8, 60); const unknownProps = propIds.filter(p => knownProps.size && !knownProps.has(p)); if (unknownProps.length) throw new Error(`分镜 ${index + 1} 引用了未知道具：${unknownProps.join(', ')}`);
-    const audioStrategy = ['native', 'external', 'silent'].includes(String(v.audioStrategy)) ? String(v.audioStrategy) as AudioStrategy : undefined;
+    const audioStrategy = ['native', 'external', 'silent'].includes(String(v.audioStrategy)) ? String(v.audioStrategy) as AudioStrategy : old?.audioStrategy;
+    const rawEvents = Array.isArray(v.shotEvents) ? v.shotEvents as ShotEvent[] : Array.isArray(v.events) ? v.events as ShotEvent[] : old?.shotEvents;
+    const rawPerf = Array.isArray(v.performance) ? v.performance as PerformanceBeat[] : old?.performance;
+    const rawDlg = Array.isArray(v.dialogueEvents) ? v.dialogueEvents as DialogueEvent[] : old?.dialogueEvents;
+    const rawAcc = Array.isArray(v.acceptance) ? v.acceptance as AcceptanceCondition[] : old?.acceptance;
+    const rawRefs = Array.isArray(v.references) ? v.references as DirectorReference[] : old?.references;
+    const previz = v.previz && typeof v.previz === 'object' ? v.previz as StoryPreviz : old?.previz;
+    const narration = typeof v.narration === 'string' ? text(v.narration, 600) : old?.narration;
     return {
-      id: shotId, ...(text(v.shotId, 80) ? { shotId: text(v.shotId, 80) } : {}), summary, shotType: text(v.shotType, 40), camera: text(v.camera, 120),
-      durationSeconds: Math.round(duration * 100) / 100, dialogue: text(v.dialogue ?? v.narration, 600), characters: chars, continueFromPrevious: v.continueFromPrevious === true,
+      id: shotId, ...(linkedShotId ? { shotId: linkedShotId } : old?.shotId ? { shotId: old.shotId } : {}), summary, shotType: text(v.shotType, 40), camera: text(v.camera, 120),
+      durationSeconds: roundedDur, dialogue: text(typeof v.dialogue === 'string' ? v.dialogue : v.narration, 600),
+      ...(narration !== undefined ? { narration } : {}),
+      characters: chars, continueFromPrevious: v.continueFromPrevious === true,
       ...(locationId ? { locationId } : {}), ...(propIds.length ? { propIds } : {}), ...(audioStrategy ? { audioStrategy } : {}),
-      ...(Array.isArray(v.performance) ? { performance: v.performance as PerformanceBeat[] } : {}),
-      ...(Array.isArray(v.dialogueEvents) ? { dialogueEvents: v.dialogueEvents as DialogueEvent[] } : {}),
-      ...(Array.isArray(v.shotEvents) ? { shotEvents: v.shotEvents as ShotEvent[] } : {}),
-      ...(Array.isArray(v.acceptance) ? { acceptance: v.acceptance as AcceptanceCondition[] } : {}),
+      ...(rawPerf?.length ? { performance: rawPerf.filter(p => p.end <= roundedDur) } : {}),
+      ...(rawDlg?.length ? { dialogueEvents: rawDlg.filter(d => d.end <= roundedDur) } : {}),
+      ...(rawEvents?.length ? { shotEvents: rawEvents.filter(e => e.end <= roundedDur) } : {}),
+      ...(rawRefs?.length ? { references: structuredClone(rawRefs) } : {}),
+      ...(rawAcc?.length ? { acceptance: structuredClone(rawAcc) } : {}),
+      ...(previz ? { previz: structuredClone(previz) } : {}),
     };
   });
 }
@@ -141,29 +156,73 @@ export function storyBrief(story: Story | null): string {
 }
 
 /** Build a canonical DirectorDocument from the unified Story whenever project shots match. */
-export function buildDirectorDocumentFromStory(story: Story, project: VideoProject, existingDoc?: DirectorDocument): DirectorDocument | null {
+export function buildDirectorDocumentFromStory(
+  story: Story,
+  project: VideoProject,
+  existingDoc?: DirectorDocument,
+  options: { promoteApproved?: boolean } = {},
+): DirectorDocument | null {
+  const imageIds = new Set(project.assets.filter(a => a.kind === 'image').map(a => a.id));
+  const mapChars = () => story.characters.map(c => ({
+    id: c.id, name: c.name, identity: c.description || c.features.join('，') || c.name,
+    ...(c.objective ? { objective: c.objective } : {}),
+    ...(c.baselineEmotion ? { baselineEmotion: c.baselineEmotion } : {}),
+    features: c.features,
+    referenceAssetIds: c.referenceAssetIds.filter(id => imageIds.has(id)),
+    ...(c.voice ? { voice: c.voice } : {}),
+  }));
+  const mapLocs = () => story.locations?.length ? story.locations.map(l => ({ ...l, referenceAssetIds: (l.referenceAssetIds ?? []).filter(id => imageIds.has(id)) })) : undefined;
+  const mapProps = () => story.props?.length ? story.props.map(p => ({ ...p, referenceAssetIds: (p.referenceAssetIds ?? []).filter(id => imageIds.has(id)) })) : undefined;
+
+  // Never promote an unapproved workbench draft to 'approved' during background asset/continuity sync!
+  if (existingDoc?.status === 'draft' && options.promoteApproved !== true) {
+    const draftPlan: DirectorPlan = {
+      ...structuredClone(existingDoc.plan),
+      characters: mapChars().length ? mapChars() : existingDoc.plan.characters,
+      ...(mapLocs() ? { locations: mapLocs() } : {}),
+      ...(mapProps() ? { props: mapProps() } : {}),
+      ...(story.continuityLog?.length ? { continuityLog: structuredClone(story.continuityLog) } : {}),
+    };
+    const checkedDraft = validateDirectorPlan(draftPlan);
+    if (!checkedDraft.ok || !checkedDraft.plan) return existingDoc;
+    return {
+      schemaVersion: 1,
+      version: existingDoc.version + 1,
+      status: 'draft',
+      hash: directorPlanHash(checkedDraft.plan),
+      plan: checkedDraft.plan,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
   if (!story.shots.length || !project.shots.length) return null;
   const projectShotIds = new Set(project.shots.map(s => s.id));
-  const imageIds = new Set(project.assets.filter(a => a.kind === 'image').map(a => a.id));
   const order = project.shotOrder.length ? project.shotOrder : project.shots.map(s => s.id);
   const mappedShots = story.shots.map((s, idx) => {
     const targetId = s.shotId && projectShotIds.has(s.shotId) ? s.shotId : order[idx];
     if (!targetId || !projectShotIds.has(targetId)) return null;
     const validChars = s.characters.filter(cid => story.characters.some(c => c.id === cid));
     const audioStrategy: AudioStrategy = s.audioStrategy ?? (s.dialogue ? 'external' : 'silent');
-    const dialogue: DialogueEvent[] = s.dialogueEvents?.length ? s.dialogueEvents : (s.dialogue && validChars[0] && audioStrategy !== 'silent'
+    const validDlg = (s.dialogueEvents ?? []).filter(d => validChars.includes(d.characterId) && d.end <= s.durationSeconds);
+    const dialogue: DialogueEvent[] = validDlg.length ? validDlg : (s.dialogue && validChars[0] && audioStrategy !== 'silent'
       ? [{ id: `dlg-${idx + 1}`, characterId: validChars[0], start: 0, end: Math.max(0.2, Math.min(s.durationSeconds, s.durationSeconds - 0.1)), text: s.dialogue }]
       : []);
-    const refs = [
-      ...(s.previz?.imageAssetId && project.assets.some(a => a.id === s.previz!.imageAssetId) ? [{ assetId: s.previz.imageAssetId, purpose: 'blocking' as const, usage: 'reference_only' as const }] : []),
-      ...(s.previz?.depthAssetId && project.assets.some(a => a.id === s.previz!.depthAssetId) ? [{ assetId: s.previz.depthAssetId, purpose: 'depth' as const, usage: 'reference_only' as const }] : []),
-    ];
+    const preservedRefs: DirectorReference[] = (s.references ?? []).filter(r => imageIds.has(r.assetId)).map(r => structuredClone(r));
+    const addRef = (assetId: string | undefined, purpose: DirectorReference['purpose']) => {
+      if (!assetId || !imageIds.has(assetId)) return;
+      if (!preservedRefs.some(r => r.assetId === assetId && r.purpose === purpose)) {
+        preservedRefs.push({ assetId, purpose, usage: 'reference_only' });
+      }
+    };
+    addRef(s.previz?.imageAssetId, 'blocking');
+    addRef(s.previz?.depthAssetId, 'depth');
+    const narration = s.narration !== undefined ? s.narration : (validDlg.length ? '' : (s.dialogue || ''));
     return {
       shotId: targetId,
       title: project.shots.find(ps => ps.id === targetId)?.title || `镜头 ${idx + 1}`,
       visualPrompt: s.summary,
       durationSeconds: s.durationSeconds,
-      narration: s.dialogue || '',
+      narration,
       ...(s.shotType ? { shotType: s.shotType } : {}),
       ...(s.camera ? { camera: s.camera } : {}),
       ...(s.locationId && (story.locations ?? []).some(l => l.id === s.locationId) ? { locationId: s.locationId } : {}),
@@ -174,9 +233,9 @@ export function buildDirectorDocumentFromStory(story: Story, project: VideoProje
       audioStrategy,
       performance: (s.performance ?? []).filter(p => validChars.includes(p.characterId) && p.end <= s.durationSeconds),
       dialogue,
-      events: s.shotEvents ?? [],
-      references: refs,
-      acceptance: s.acceptance ?? [],
+      events: (s.shotEvents ?? []).filter(e => e.end <= s.durationSeconds),
+      references: preservedRefs,
+      acceptance: s.acceptance ? structuredClone(s.acceptance) : [],
     };
   }).filter((item): item is NonNullable<typeof item> => item !== null);
   const seenShotIds = new Set<string>();
@@ -190,16 +249,9 @@ export function buildDirectorDocumentFromStory(story: Story, project: VideoProje
     ...(story.logline ? { logline: story.logline } : {}),
     ...(story.targetSeconds > 0 ? { targetSeconds: story.targetSeconds } : {}),
     style: structuredClone(story.style),
-    characters: story.characters.map(c => ({
-      id: c.id, name: c.name, identity: c.description || c.features.join('，') || c.name,
-      ...(c.objective ? { objective: c.objective } : {}),
-      ...(c.baselineEmotion ? { baselineEmotion: c.baselineEmotion } : {}),
-      features: c.features,
-      referenceAssetIds: c.referenceAssetIds.filter(id => imageIds.has(id)),
-      ...(c.voice ? { voice: c.voice } : {}),
-    })),
-    ...(story.locations?.length ? { locations: story.locations.map(l => ({ ...l, referenceAssetIds: (l.referenceAssetIds ?? []).filter(id => imageIds.has(id)) })) } : {}),
-    ...(story.props?.length ? { props: story.props.map(p => ({ ...p, referenceAssetIds: (p.referenceAssetIds ?? []).filter(id => imageIds.has(id)) })) } : {}),
+    characters: mapChars(),
+    ...(mapLocs() ? { locations: mapLocs() } : {}),
+    ...(mapProps() ? { props: mapProps() } : {}),
     storyBeats: (story.storyBeats ?? []).filter(b => b.shotIds.every(id => seenShotIds.has(id))),
     worldLayouts: story.worldLayouts ?? [],
     identityMap: story.characters
@@ -212,20 +264,32 @@ export function buildDirectorDocumentFromStory(story: Story, project: VideoProje
   if (!checked.ok || !checked.plan) return null;
   const now = new Date().toISOString();
   const status = story.status === 'approved' ? 'approved' : 'draft';
+  const hash = directorPlanHash(checked.plan);
+  if (existingDoc && existingDoc.hash === hash && existingDoc.status === status) return existingDoc;
   return {
     schemaVersion: 1,
     version: (existingDoc?.version ?? 0) + 1,
     status,
-    hash: directorPlanHash(checked.plan),
+    hash,
     plan: checked.plan,
     updatedAt: now,
     ...(status === 'approved' ? { approvedAt: story.approvedAt ?? now } : {}),
   };
 }
 
-/** Sync an edited/approved DirectorDocument back into the unified Story representation. */
-export function mergeDirectorPlanIntoStory(plan: DirectorPlan, current: Story, approved: boolean): Story {
+/** Sync an approved DirectorDocument into the unified Story representation (never overwrites an approved Story with an unapproved draft). */
+export function mergeDirectorPlanIntoStory(
+  plan: DirectorPlan,
+  current: Story,
+  approved: boolean,
+  docMeta?: { version?: number; hash?: string },
+): Story {
+  if (!approved) {
+    // Saving a draft must NEVER overwrite an already-approved Production Bible or inherit 'approved' status!
+    if (current.status === 'approved') return current;
+  }
   const now = new Date().toISOString();
+  const hash = docMeta?.hash ?? directorPlanHash(plan);
   return {
     ...current,
     filmKind: plan.filmKind,
@@ -256,6 +320,7 @@ export function mergeDirectorPlanIntoStory(plan: DirectorPlan, current: Story, a
         camera: s.camera ?? s.events[0]?.camera ?? existing?.camera ?? '',
         durationSeconds: s.durationSeconds,
         dialogue: s.dialogue.map(d => d.text).join(' ') || s.narration,
+        narration: s.narration,
         characters: [...new Set([...(s.characterIds ?? []), ...s.dialogue.map(d => d.characterId), ...s.performance.map(p => p.characterId)])],
         continueFromPrevious: s.continueFromPrevious ?? existing?.continueFromPrevious ?? false,
         ...(s.locationId ? { locationId: s.locationId } : {}),
@@ -264,12 +329,13 @@ export function mergeDirectorPlanIntoStory(plan: DirectorPlan, current: Story, a
         ...(s.performance.length ? { performance: structuredClone(s.performance) } : {}),
         ...(s.dialogue.length ? { dialogueEvents: structuredClone(s.dialogue) } : {}),
         ...(s.events.length ? { shotEvents: structuredClone(s.events) } : {}),
+        ...(s.references.length ? { references: structuredClone(s.references) } : {}),
         ...(s.acceptance.length ? { acceptance: structuredClone(s.acceptance) } : {}),
         ...(s.previz ?? existing?.previz ? { previz: structuredClone(s.previz ?? existing?.previz) } : {}),
       };
     }),
-    status: approved ? 'approved' : current.status,
-    ...(approved ? { approvedAt: now } : {}),
+    status: approved ? 'approved' : 'empty',
+    ...(approved ? { approvedAt: now, approvedDocHash: hash, ...(docMeta?.version !== undefined ? { approvedDocVersion: docMeta.version } : {}) } : {}),
     updatedAt: now,
   };
 }

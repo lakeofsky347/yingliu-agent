@@ -9,6 +9,8 @@ export interface MediaCapabilityRequest {
   /** Effective parameters after merging model defaults; never silently filter request parameters. */
   parameters?:Record<string,string|number|boolean>;
   imageAssetIds?:readonly string[];
+  videoAssetId?:string;
+  audioAssetId?:string;
   inputs?:readonly MediaReferenceInput[];
   referenceRoles?:readonly string[];
   /** A requirement, not a provider toggle. Unknown native audio support fails closed. */
@@ -147,22 +149,33 @@ export function validateMediaRequest(resolved:ResolvedModel,request:MediaCapabil
   if(!resolved.model.outputModalities.includes(output)||!resolved.model.inputModalities.includes('text'))fail('所选模型未声明所需文字输入或媒体输出能力');
   if(request.inputs!==undefined&&!Array.isArray(request.inputs)||request.imageAssetIds!==undefined&&!Array.isArray(request.imageAssetIds))fail('参考素材列表无效');
   if(request.imageAssetIds&&(request.imageAssetIds.some(id=>typeof id!=='string'||!id)||new Set(request.imageAssetIds).size!==request.imageAssetIds.length))fail('参考资产 ID 必须有效且不重复');
-  const count=request.inputs?.length??request.imageAssetIds?.length??0;
-  if(request.inputs&&request.imageAssetIds&&request.inputs.length!==request.imageAssetIds.length)fail('参考素材数量与资产列表不一致');
-  const opMax=request.operation==='image-to-video'&&!['video-gateway'].includes(cap.protocol)?1:cap.references.max;
-  if(count>opMax)fail('当前适配器最多支持 '+opMax+' 张参考图片；不会只取首图');
-  if(needsImageIn(request.operation)&&(!count||!resolved.model.inputModalities.includes('image')))fail('此操作需要参考图片及模型图片输入能力');
-  if(request.operation==='first-last-frame-video'&&count<2)fail('首尾帧生视频需要同时提供首帧与尾帧图片');
-  if(!needsImageIn(request.operation)&&count)fail('此操作不支持参考图片');
-  if(request.referenceRoles!==undefined&&(!Array.isArray(request.referenceRoles)||request.referenceRoles.length!==count))fail('参考图片角色必须与图片逐项对应');
-  for(let i=0;i<count;i++){
-    const input=request.inputs?.[i];
-    if(request.inputs&&(!input||typeof input!=='object'||input.type!=='image'))fail('当前适配器只支持有效的图片参考输入，不支持视频或音频参考');
-    if(input?.role&&request.referenceRoles?.[i]&&input.role!==request.referenceRoles[i])fail('参考图片角色声明冲突');
-    const fallbackRole=request.operation==='first-last-frame-video'&&i===1?'last_frame':cap.references.defaultRole;
-    const role=input?.role??request.referenceRoles?.[i]??fallbackRole;
-    if(typeof role!=='string'||!cap.references.roles.includes(role as MediaReferenceRole))fail('当前适配器不支持参考角色：'+String(role));
-    if(input&&(typeof input.dataUrl!=='string'||!/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(input.dataUrl)))fail('参考图片必须是 PNG、JPEG 或 WebP Data URL');
+  if(request.operation==='lip-sync-video'){
+    if(request.imageAssetIds?.length)fail('口型同步操作使用源视频与配音资产，不接受静态参考图片');
+    if(request.inputs!==undefined){
+      if(request.inputs.length!==2||request.inputs[0]?.type!=='video'||request.inputs[1]?.type!=='audio')fail('口型同步需要提供 1 个源视频输入和 1 个驱动音频输入');
+      if(typeof request.inputs[0].dataUrl!=='string'||!/^data:video\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/]+={0,2}$/i.test(request.inputs[0].dataUrl))fail('源视频必须是有效的视频 Data URL');
+      if(typeof request.inputs[1].dataUrl!=='string'||!/^data:audio\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/]+={0,2}$/i.test(request.inputs[1].dataUrl))fail('驱动音频必须是有效的音频 Data URL');
+    }else{
+      if(typeof request.videoAssetId!=='string'||!request.videoAssetId||typeof request.audioAssetId!=='string'||!request.audioAssetId)fail('口型同步需要同时指定有效的源视频与配音资产 ID');
+    }
+  }else{
+    const count=request.inputs?.length??request.imageAssetIds?.length??0;
+    if(request.inputs&&request.imageAssetIds&&request.inputs.length!==request.imageAssetIds.length)fail('参考素材数量与资产列表不一致');
+    const opMax=request.operation==='image-to-video'&&!['video-gateway'].includes(cap.protocol)?1:cap.references.max;
+    if(count>opMax)fail('当前适配器最多支持 '+opMax+' 张参考图片；不会只取首图');
+    if(needsImageIn(request.operation)&&(!count||!resolved.model.inputModalities.includes('image')))fail('此操作需要参考图片及模型图片输入能力');
+    if(request.operation==='first-last-frame-video'&&count<2)fail('首尾帧生视频需要同时提供首帧与尾帧图片');
+    if(!needsImageIn(request.operation)&&count)fail('此操作不支持参考图片');
+    if(request.referenceRoles!==undefined&&(!Array.isArray(request.referenceRoles)||request.referenceRoles.length!==count))fail('参考图片角色必须与图片逐项对应');
+    for(let i=0;i<count;i++){
+      const input=request.inputs?.[i];
+      if(request.inputs&&(!input||typeof input!=='object'||input.type!=='image'))fail('当前适配器只支持有效的图片参考输入，不支持视频或音频参考');
+      if(input?.role&&request.referenceRoles?.[i]&&input.role!==request.referenceRoles[i])fail('参考图片角色声明冲突');
+      const fallbackRole=request.operation==='first-last-frame-video'&&i===1?'last_frame':cap.references.defaultRole;
+      const role=input?.role??request.referenceRoles?.[i]??fallbackRole;
+      if(typeof role!=='string'||!cap.references.roles.includes(role as MediaReferenceRole))fail('当前适配器不支持参考角色：'+String(role));
+      if(input&&(typeof input.dataUrl!=='string'||!/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(input.dataUrl)))fail('参考图片必须是 PNG、JPEG 或 WebP Data URL');
+    }
   }
   if(request.requiresAudio!==undefined&&typeof request.requiresAudio!=='boolean')fail('音频要求须为开关');
   if(request.requiresAudio&&cap.audio.output!=='native')fail('此具体模型的原生音频输出未验证，不能承诺带音频生成');

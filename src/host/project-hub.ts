@@ -47,6 +47,7 @@ export class ProjectHub {
     return {
       inspect:async id=>{await this.initialized;return (await this.service(id)).inspectMediaProject();},
       readImage:async(id,assetId,shotId)=>{await this.initialized;return (await this.service(id)).readMediaImage(assetId,shotId);},
+      readMediaAsset:async(id,assetId,kind)=>{await this.initialized;return (await this.service(id)).readMediaAsset(assetId,kind);},
       validateArtifact:async(path,mime,id,signal)=>{await this.initialized;return (await this.service(id)).validateMediaArtifact(path,mime,signal);},
       applyResult:async input=>{await this.initialized;const service=await this.service(input.projectId);const result=await service.applyMediaResult(input);await this.remember(await service.snapshot());return result;},
     };

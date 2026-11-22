@@ -74,6 +74,7 @@ yingliu export mp4 "$P" --out ./out.mp4 --json
 
 `agent run` 选项：
 - `--auto-approve read,write,plan`（默认值）
+- `--allow-images`（允许本轮向已配置的 `vision` 视觉角色模型发送截取帧，启用 `capture_frame` / `visual_review` / `temporal_video_review` / `consistency_review`）
 - `--allow-paid --max-cost N`
 - `--max-steps N`
 - `--max-review-rounds N`

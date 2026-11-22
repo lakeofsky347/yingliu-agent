@@ -13,11 +13,16 @@ import type {RemoteJob as Job} from './contracts.ts';
 // Protocol dispatch: official providers use official.ts; async-task uses the configurable template adapter.
 const isImageOp=(operation:string)=>operation==='text-to-image'||operation==='image-compose';
 const needsImageInput=(operation:string)=>operation==='image-compose'||operation==='image-to-video'||operation==='first-last-frame-video';
+const needsMediaUpload=(operation:string)=>needsImageInput(operation)||operation==='lip-sync-video';
 const outputOf=(operation:string):'image'|'video'=>isImageOp(operation)?'image':'video';
 async function generateImage(context:AdapterContext,input:AdapterInput):Promise<Job>{return context.connection.protocol==='async-task'?submitAsync(context,input):submitGeneration(context,input);}
 async function submitVideo(context:AdapterContext,input:AdapterInput):Promise<Job>{return context.connection.protocol==='async-task'?submitAsync(context,input):submitGeneration(context,input);}
 async function submitAsync(context:AdapterContext,input:AdapterInput):Promise<Job>{
-  const result=await submitTemplate(context,{clientRequestId:input.clientRequestId,model:input.model,prompt:input.prompt,image:input.inputs[0]?.dataUrl,tailImage:input.inputs[1]?.dataUrl,images:input.inputs.length?input.inputs.map(i=>i.dataUrl):undefined,duration:typeof input.parameters.durationSeconds==='number'?input.parameters.durationSeconds:typeof input.parameters.duration==='number'?input.parameters.duration:undefined,parameters:input.parameters},outputOf(input.operation));
+  const imgInputs=input.inputs.filter(i=>i.type==='image');
+  const videoInput=input.inputs.find(i=>i.type==='video');
+  const audioInput=input.inputs.find(i=>i.type==='audio');
+  const mergedParams={...input.parameters,...(videoInput?{videoDataUrl:videoInput.dataUrl}:{}),...(audioInput?{audioDataUrl:audioInput.dataUrl}:{})};
+  const result=await submitTemplate(context,{clientRequestId:input.clientRequestId,model:input.model,prompt:input.prompt,image:imgInputs[0]?.dataUrl,tailImage:imgInputs[1]?.dataUrl,images:imgInputs.length?imgInputs.map(i=>i.dataUrl):undefined,duration:typeof input.parameters.durationSeconds==='number'?input.parameters.durationSeconds:typeof input.parameters.duration==='number'?input.parameters.duration:undefined,parameters:mergedParams},outputOf(input.operation));
   if('kind' in result)return {jobId:input.clientRequestId,status:'succeeded',artifacts:[{base64:Buffer.from(result.bytes).toString('base64'),mimeType:result.mimeType}]};
   return result;
 }
@@ -84,7 +89,7 @@ export class MediaTaskService {
     if(input.clientRequestId!==undefined){
       if(typeof input.clientRequestId!=='string'||!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,199}$/.test(input.clientRequestId))throw new Error('稳定生成请求 ID 无效');
       const existing=[...this.tasks.values()].find(task=>task.clientRequestId===input.clientRequestId);
-      if(existing){const changed=existing.projectId!==input.projectId||existing.shotId!==input.shotId||existing.operation!==input.operation||existing.prompt!==input.prompt.trim()||input.modelId!==undefined&&existing.model.id!==input.modelId||input.connectionId!==undefined&&existing.connection.id!==input.connectionId||JSON.stringify(existing.imageAssetIds)!==JSON.stringify(input.imageAssetIds??[])||Object.entries(input.parameters??{}).some(([key,value])=>existing.parameters[key]!==value)||input.ownerSessionId!==undefined&&existing.ownerSessionId!==input.ownerSessionId;
+      if(existing){const changed=existing.projectId!==input.projectId||existing.shotId!==input.shotId||existing.operation!==input.operation||existing.prompt!==input.prompt.trim()||input.modelId!==undefined&&existing.model.id!==input.modelId||input.connectionId!==undefined&&existing.connection.id!==input.connectionId||JSON.stringify(existing.imageAssetIds)!==JSON.stringify(input.imageAssetIds??[])||existing.videoAssetId!==input.videoAssetId||existing.audioAssetId!==input.audioAssetId||Object.entries(input.parameters??{}).some(([key,value])=>existing.parameters[key]!==value)||input.ownerSessionId!==undefined&&existing.ownerSessionId!==input.ownerSessionId;
         if(changed)throw new Error('稳定请求 ID 已用于不同的生成内容或工程');return this.public(existing);
       }
     }
@@ -98,24 +103,27 @@ export class MediaTaskService {
     if(!resolved.model.inputModalities.includes('text'))throw new Error('所选模型不支持文字提示输入');
     if(needsImageInput(input.operation)&&!resolved.model.inputModalities.includes('image'))throw new Error('所选模型不支持图片输入');
     const policyFingerprint=this.projects.authorizeOperation?await this.projects.authorizeOperation(input.projectId,input.operation,input.shotId):undefined;
-    if(needsImageInput(input.operation)&&authorizeUpload)authorizeUpload(uploadDestination(resolved));
+    if(needsMediaUpload(input.operation)&&authorizeUpload)authorizeUpload(uploadDestination(resolved));
     // Resolve now to reject unavailable credentials before registering work. Resolve again per HTTP operation.
     await this.registry.credential(resolved.connection);
     const ids=input.imageAssetIds??[];if(!Array.isArray(ids)||ids.some(id=>typeof id!=='string')||new Set(ids).size!==ids.length||ids.length>4)throw new Error('每次最多选择 4 张不同参考图片');
     if(input.operation==='image-to-video'&&ids.length>3)throw new Error('每次最多选择 3 张不同参考图片');
     if(needsImageInput(input.operation)&&(!input.allowImageUpload||ids.length===0))throw new Error('参考图生成需要选择图片并明确允许本次上传');
     if(input.operation==='first-last-frame-video'&&ids.length<2)throw new Error('首尾帧生视频需要提供首帧和尾帧 2 张参考图片');
-    if(!needsImageInput(input.operation)&&ids.length)throw new Error('此操作不支持参考图片');
+    if(input.operation==='lip-sync-video'){
+      if(!input.allowImageUpload||typeof input.videoAssetId!=='string'||!input.videoAssetId||typeof input.audioAssetId!=='string'||!input.audioAssetId)throw new Error('口型同步需要指定源视频与配音素材并明确允许本次上传');
+      if(ids.length)throw new Error('口型同步不接受静态参考图片');
+    }else if(!needsImageInput(input.operation)&&ids.length)throw new Error('此操作不支持参考图片');
     // F09: enforce exact template image slot capacity so references are never silently dropped.
     if(resolved.connection.protocol==='async-task'&&ids.length){
       if(!templateAcceptsImage(resolved.model.parameters))throw new Error('此服务模板的请求体没有 {{image}}，无法传送参考图片');
       const maxSlots=templateMaxImages(resolved.model.parameters);
       if(ids.length>maxSlots)throw new Error(`此服务模板一次只支持 ${maxSlots} 张参考图片`);
     }
-    const allowed=output==='image'?['size','quality','style','response_format','background','output_format','n']:['durationSeconds','width','height','fps','aspectRatio','seed','negativePrompt','videoDataUrl','audioDataUrl'];
+    const allowed=output==='image'?['size','quality','style','response_format','background','output_format','n']:['durationSeconds','width','height','fps','aspectRatio','seed','negativePrompt'];
     if(input.parameters&&Object.keys(input.parameters).some(key=>!allowed.includes(key)))throw new Error('请求包含当前协议不支持的生成参数');
     const parameters:Record<string,string|number|boolean>={};for(const [key,value]of Object.entries({...resolved.model.parameters,...input.parameters})){if(!allowed.includes(key))continue;if(!['string','number','boolean'].includes(typeof value)||typeof value==='number'&&!Number.isFinite(value)||typeof value==='string'&&value.length>4000)throw new Error('生成参数无效：'+key);parameters[key]=value;}
-    if(resolved.connection.protocol!=='async-task')validateMediaRequest(resolved,{operation:input.operation,parameters,imageAssetIds:ids,referenceRoles:input.referenceRoles,requiresAudio:input.requiresAudio});
+    if(resolved.connection.protocol!=='async-task')validateMediaRequest(resolved,{operation:input.operation,parameters,imageAssetIds:ids,videoAssetId:input.videoAssetId,audioAssetId:input.audioAssetId,referenceRoles:input.referenceRoles,requiresAudio:input.requiresAudio});
     else {
       if(output==='image'){for(const [key,value]of Object.entries(parameters))if(key!=='n'&&typeof value!=='string')throw new Error('生图参数须为文本：'+key);if(parameters.n!==undefined&&(!Number.isSafeInteger(parameters.n)||Number(parameters.n)<1||Number(parameters.n)>4))throw new Error('每次生图数量须为 1–4');}
       if(parameters.negativePrompt!==undefined&&typeof parameters.negativePrompt!=='string')throw new Error('负向提示须为文本');
@@ -123,14 +131,27 @@ export class MediaTaskService {
       if(parameters.aspectRatio!==undefined&&(typeof parameters.aspectRatio!=='string'||parameters.aspectRatio.length>32))throw new Error('画面比例参数无效');
       for(const [key,limitKey]of [['durationSeconds','maxDurationSeconds'],['width','maxWidth'],['height','maxHeight'],['fps','maxFps']] as const){const value=parameters[key],hardLimit={durationSeconds:120,width:8192,height:8192,fps:120}[key],configured=resolved.model.parameters[limitKey];if(configured!==undefined&&(typeof configured!=='number'||!Number.isFinite(configured)||configured<=0))throw new Error('模型参数上限无效：'+limitKey);const limit=Math.min(hardLimit,typeof configured==='number'?configured:hardLimit);if(value!==undefined&&(typeof value!=='number'||value<=0||value>limit))throw new Error('生成参数超过模型范围：'+key);}
     }
-    const now=new Date().toISOString(),task:MediaTask={version:1,id:randomUUID(),clientRequestId:input.clientRequestId??randomUUID(),projectId:input.projectId,...(input.shotId?{shotId:input.shotId}:{}),startRevision:project.revision,operation:input.operation,prompt:input.prompt.trim(),imageAssetIds:[...ids],inputHashes:[],connection:structuredClone(resolved.connection),model:structuredClone(resolved.model),parameters,phase:'pending',observation:'active',progress:0,message:'等待生成',createdAt:now,updatedAt:now,files:[],resumeOnStart:true,...(policyFingerprint?{productionPolicyFingerprint:policyFingerprint}:{}),...(input.referenceRoles?{referenceRoles:[...input.referenceRoles]}:{}),...(input.requiresAudio!==undefined?{requiresAudio:input.requiresAudio}:{}),...(input.ownerSessionId?{ownerSessionId:input.ownerSessionId}:{})};
+    const now=new Date().toISOString(),task:MediaTask={version:1,id:randomUUID(),clientRequestId:input.clientRequestId??randomUUID(),projectId:input.projectId,...(input.shotId?{shotId:input.shotId}:{}),startRevision:project.revision,operation:input.operation,prompt:input.prompt.trim(),imageAssetIds:[...ids],...(input.videoAssetId?{videoAssetId:input.videoAssetId}:{}),...(input.audioAssetId?{audioAssetId:input.audioAssetId}:{}),inputHashes:[],connection:structuredClone(resolved.connection),model:structuredClone(resolved.model),parameters,phase:'pending',observation:'active',progress:0,message:'等待生成',createdAt:now,updatedAt:now,files:[],resumeOnStart:true,...(policyFingerprint?{productionPolicyFingerprint:policyFingerprint}:{}),...(input.referenceRoles?{referenceRoles:[...input.referenceRoles]}:{}),...(input.requiresAudio!==undefined?{requiresAudio:input.requiresAudio}:{}),...(input.ownerSessionId?{ownerSessionId:input.ownerSessionId}:{})};
     await this.inputs(task,false);this.tasks.set(task.id,task);try{await this.persist(task);}catch(error){this.tasks.delete(task.id);throw error;}this.schedule();return this.public(task);
     }finally{release?.();}
   }
   private async inputs(task:MediaTask,verify=true):Promise<AdapterInput['inputs']>{let total=0;const inputs:AdapterInput['inputs']=[],hashes:MediaTask['inputHashes']=[];
     for(const [idx,assetId] of task.imageAssetIds.entries()){const image=await this.projects.readImage(task.projectId,assetId,task.shotId);total+=image.bytes.byteLength;const mime=mediaSignature(image.bytes),dimensions=imageDimensions(image.bytes);if(total>6*1024*1024||!dimensions||dimensions.width<1||dimensions.height<1||Math.max(dimensions.width,dimensions.height)>4096||dimensions.width*dimensions.height>16_777_216||mime!==image.mime||!mime?.startsWith('image/'))throw new Error('参考图片格式、像素尺寸或总大小超出限制');
       const sha256=createHash('sha256').update(image.bytes).digest('hex');hashes.push({assetId,sha256});const role=task.referenceRoles?.[idx];inputs.push({type:'image',dataUrl:`data:${mime};base64,${Buffer.from(image.bytes).toString('base64')}`,...(role?{role}:{})});}
-    if(verify&&JSON.stringify(hashes)!==JSON.stringify(task.inputHashes))throw new Error('参考图片已变化，请重新创建生成请求');task.inputHashes=hashes;return inputs;
+    if(task.operation==='lip-sync-video'){
+      if(!this.projects.readMediaAsset||!task.videoAssetId||!task.audioAssetId)throw new Error('当前工程端口不支持读取口型同步音视频素材');
+      const vid=await this.projects.readMediaAsset(task.projectId,task.videoAssetId,'video');
+      const aud=await this.projects.readMediaAsset(task.projectId,task.audioAssetId,'audio');
+      if(vid.bytes.byteLength<1||vid.bytes.byteLength>64*1024*1024)throw new Error('口型同步源视频大小须在 1B–64MiB 之间');
+      if(aud.bytes.byteLength<1||aud.bytes.byteLength>32*1024*1024)throw new Error('口型同步驱动音频大小须在 1B–32MiB 之间');
+      const vMime=vid.mime.startsWith('video/')?vid.mime:'video/mp4';
+      const aMime=aud.mime.startsWith('audio/')?aud.mime:'audio/wav';
+      hashes.push({assetId:task.videoAssetId,sha256:createHash('sha256').update(vid.bytes).digest('hex')});
+      hashes.push({assetId:task.audioAssetId,sha256:createHash('sha256').update(aud.bytes).digest('hex')});
+      inputs.push({type:'video',role:'source_video',dataUrl:`data:${vMime};base64,${Buffer.from(vid.bytes).toString('base64')}`});
+      inputs.push({type:'audio',role:'driving_audio',dataUrl:`data:${aMime};base64,${Buffer.from(aud.bytes).toString('base64')}`});
+    }
+    if(verify&&JSON.stringify(hashes)!==JSON.stringify(task.inputHashes))throw new Error('参考素材已变化，请重新创建生成请求');task.inputHashes=hashes;return inputs;
   }
   private schedule():void {if(this.stopped)return;for(const task of this.tasks.values()){
     if(this.running.size>=(this.options.maxConcurrent??4))break;

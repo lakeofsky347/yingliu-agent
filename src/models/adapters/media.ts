@@ -2,7 +2,7 @@ import { fetch } from '../../host/http.ts';
 import type { ProviderConnection, ModelDefinition } from '../contracts.ts';
 import type { MediaArtifact, MediaOperation, RemoteJob } from '../../jobs/contracts.ts';
 
-export interface AdapterInput {clientRequestId:string;model:ModelDefinition;operation:MediaOperation;prompt:string;inputs:{type:'image';dataUrl:string;role?:string}[];parameters:Record<string,string|number|boolean>}
+export interface AdapterInput {clientRequestId:string;model:ModelDefinition;operation:MediaOperation;prompt:string;inputs:{type:'image'|'video'|'audio';dataUrl:string;role?:string}[];parameters:Record<string,string|number|boolean>}
 export interface AdapterContext {connection:ProviderConnection;key?:string;signal:AbortSignal;fetch?:typeof fetch}
 export function mediaEndpoint(connection:ProviderConnection,path:string):string {
   const base=connection.baseUrl.replace(/\/+$/,'');

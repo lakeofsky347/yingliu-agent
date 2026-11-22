@@ -212,24 +212,54 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
     videoReferenceDestination:()=>workflowPort.uploadDestination('video-reference'),
     generateVideoReference:(request,authorizeUpload)=>media.generate(request,authorizeUpload),
     renderPreviz:(id,spec,opts)=>backend.renderPreviz(id,spec,opts),
-    generateSceneCode:async(id,shotId,instruction,signal)=>{
+    generateSceneCode:async(id,shotId,instruction,signal,expectedRevision)=>{
       const current=await backend.call('current',{projectId:id});
       const project=current.project;if(!project)throw new Error('没有打开的工程');
+      if(expectedRevision!==undefined&&project.revision!==expectedRevision){
+        throw Object.assign(new Error(`工程版本冲突：期望 v${expectedRevision}，当前 v${project.revision}；请先读取最新工程后合并修改`),{code:'REVISION_CONFLICT'});
+      }
+      const baseRevision=project.revision;
       const shot=project.shots.find(item=>item.id===shotId);if(!shot)throw new Error('目标镜头不存在：'+shotId);
       const oldSource=await backend.call('source',{projectId:id,shotId});
-      const prompt=JSON.stringify({
+      const askSceneModel=async(payload:Record<string,unknown>)=>{
+        const prompt=JSON.stringify(payload);
+        const sysPrompt='你是映流智能体的专精动态图形与场景代码工程师（scene 角色）。只返回合法 JSON 对象 {html,css,js}。';
+        const raw=await providers.complete([{role:'user',content:prompt}],sysPrompt,signal,undefined,'scene')
+          .catch(()=>providers.complete([{role:'user',content:prompt}],'你是映流智能体的专精动态图形与场景代码工程师。只返回合法 JSON 对象 {html,css,js}。',signal,undefined,'director'));
+        return parseSceneSource(raw);
+      };
+      const waitPreviewTask=async(taskId:string|undefined)=>{
+        if(!taskId)return null;
+        for(let i=0;i<240;i++){
+          signal.throwIfAborted();
+          const snap=await backend.call('current',{projectId:id});
+          if(!snap.task||snap.task.id!==taskId||snap.task.status!=='running')return snap;
+          await new Promise(r=>setTimeout(r,60));
+        }
+        return await backend.call('current',{projectId:id});
+      };
+      const basePayload={
         shot:{id:shot.id,title:shot.title,intent:shot.intent,composition:shot.composition,action:shot.action,params:shot.params,hasVideo:Boolean(project.videoClips?.some(c=>c.shotId===shot.id))},
         target:project.target,
         videoStyle:project.videoStyle?{name:project.videoStyle.name,prompt:project.videoStyle.prompt}:null,
         currentSource:oldSource,
         instruction,
-        contract:'只输出严格 JSON：{"html":"...","css":"...","js":"export function render(ctx) { ... }"}。动画必须仅依赖 ctx.time 与 ctx.helpers，禁止 Date.now/setTimeout/requestAnimationFrame 或外链。若 hasVideo=true，底图透明不要遮挡底层视频。',
-      });
-      const raw=await providers.complete([{role:'user',content:prompt}],'你是映流智能体的专精动态图形与场景代码工程师（scene 角色）。只返回合法 JSON 对象 {html,css,js}。',signal,undefined,'scene').catch(()=>providers.complete([{role:'user',content:prompt}],'你是映流智能体的专精动态图形与场景代码工程师。只返回合法 JSON 对象 {html,css,js}。',signal,undefined,'director'));
-      const parsed=parseSceneSource(raw);
-      const latest=await backend.call('current',{projectId:id});
-      const saved=await backend.call('saveSource',{projectId:id,shotId,expectedRevision:latest.project?.revision,source:{html:parsed.html,css:parsed.css,js:parsed.js}});
-      return {shotId,revision:saved.project?.revision??0,summary:`已由专精场景模型更新镜头 ${shot.title} 源码`};
+        contract:'只输出严格 JSON：{"html":"...","css":"...","js":"export function render(ctx) { ... }"}。DOM 节点须通过 ctx.root.querySelector 查询（禁止 document.getElementById），动画必须仅依赖 ctx.time 与 ctx.helpers，禁止 Date.now/setTimeout/requestAnimationFrame 或外链。若 hasVideo=true，底图透明不要遮挡底层视频。',
+      };
+      let parsed=await askSceneModel(basePayload);
+      // CAS-protected: bind strictly to `baseRevision` so concurrent manual edits are NEVER overwritten!
+      let saved=await backend.call('saveSource',{projectId:id,shotId,expectedRevision:baseRevision,source:{html:parsed.html,css:parsed.css,js:parsed.js}});
+      let checked=await waitPreviewTask(saved.task?.id);
+      if(checked?.task?.id===saved.task?.id&&checked?.task?.status==='failed'){
+        const errDetail=checked.task.error||checked.task.message||'渲染校验失败';
+        parsed=await askSceneModel({...basePayload,currentSource:parsed,instruction:`${instruction}\n\n【紧急修复】上一版镜头源码在无头浏览器渲染校验时报错：${errDetail}。请修复该错误并返回完整合法 JSON {html,css,js}。`});
+        saved=await backend.call('saveSource',{projectId:id,shotId,expectedRevision:saved.project?.revision,source:{html:parsed.html,css:parsed.css,js:parsed.js}});
+        checked=await waitPreviewTask(saved.task?.id);
+        if(checked?.task?.id===saved.task?.id&&checked?.task?.status==='failed'){
+          throw new Error(`专精场景模型自动修复后镜头渲染仍报错：${checked.task.error||checked.task.message}`);
+        }
+      }
+      return {shotId,revision:saved.project?.revision??0,summary:`已由专精场景模型更新并通过渲染校验：${shot.title}`};
     },
   };
   async function analyzeFrames(prompt:string,images:{mime:string;bytes:Uint8Array}[],signal:AbortSignal,authorizeUpload?:AuthorizeUpload):Promise<string>{
@@ -364,11 +394,13 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         case 'director.document.save':
         case 'director.document.approve':{
           const routed=await backend.route(endpoint,payload);
-          if(routed.ok){
-            const docVal=routed.value as {document?:{status?:string;plan?:DirectorPlan};snapshot?:StudioSnapshot}|undefined;
+          if(routed.ok&&endpoint==='director.document.approve'){
+            const docVal=routed.value as {document?:{version?:number;hash?:string;status?:string;plan?:DirectorPlan};snapshot?:StudioSnapshot}|undefined;
             const pid=docVal?.snapshot?.project?.id??(typeof data.projectId==='string'?data.projectId:undefined);
             const plan=docVal?.document?.plan??(docVal?.snapshot?.project?readDirectorDocument(docVal.snapshot.project)?.plan:undefined);
-            if(pid&&plan)await agent.syncFromDirectorPlan(pid,plan,docVal?.document?.status==='approved').catch(()=>{});
+            if(pid&&plan&&docVal?.document?.status==='approved'){
+              await agent.syncFromDirectorPlan(pid,plan,true,{version:docVal.document.version,hash:docVal.document.hash}).catch(()=>{});
+            }
           }
           return routed;
         }

@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { compileDirectorPlan } from '../app/conversation.ts';
 import type { ChatInput } from '../app/contracts.ts';
-import { addShot, applyProductionPolicy, assertProductionComposition, defaultProductionPolicy, defaultSceneSource, deleteShot, reorderShots, updateShot, updateTarget } from '../core/index.ts';
+import { addShot, applyProductionPolicy, assertProductionComposition, assertProductionOperation, defaultProductionPolicy, defaultSceneSource, deleteShot, reorderShots, updateShot, updateTarget } from '../core/index.ts';
 import { normalizeStoryboard } from '../host/generator.ts';
 import { buildContactSheetPng } from '../host/contact-sheet.ts';
 import { readDirectorDocument, saveDirectorDocument, approveDirectorDocument } from '../director/document.ts';
-import type { AgentTool, Capabilities, CrewDepartment, JsonSchema, ProjectTaskRef, ToolContext, ToolResult } from './contracts.ts';
+import type { AgentTool, Capabilities, CrewDepartment, JsonSchema, ProjectTaskRef, ReferenceUploadGroup, ToolContext, ToolResult } from './contracts.ts';
 import { bound, summarizeProject } from './context.ts';
 import { synthesize, type SynthKind, type SynthSpec } from './synth.ts';
 import type { AudioClip, OverlayClip, ProductionMode, Shot, ShotColorGrade, ShotTransition, StudioSnapshot, SubtitleCue, VideoProject } from '../shared/types.ts';
@@ -41,19 +41,23 @@ function projectTask(snapshot: StudioSnapshot): ProjectTaskRef {
 }
 function agentInput(ctx: ToolContext, message: string): ChatInput { return { message, projectId: ctx.projectId, provider: 'agent', model: 'agent', intent: 'modify' }; }
 
-/** Synchronize Story into project.extensions.directorDocument whenever possible (best-effort, non-destructive). */
-async function syncBibleToProject(ctx: ToolContext, story: Story): Promise<void> {
+/** Synchronize Story into project.extensions.directorDocument whenever possible, returning the latest project revision. */
+async function syncBibleToProject(ctx: ToolContext, story: Story, options: { promoteApproved?: boolean } = {}): Promise<number | undefined> {
   try {
     const snap = await ctx.port.snapshot(ctx.projectId);
-    if (!snap.project || !snap.project.shots.length) return;
+    if (!snap.project) return undefined;
+    if (!snap.project.shots.length) return snap.project.revision;
     let existing;
     try { existing = readDirectorDocument(snap.project); } catch { existing = undefined; }
-    const doc = buildDirectorDocumentFromStory(story, snap.project, existing);
-    if (!doc) return;
+    const doc = buildDirectorDocumentFromStory(story, snap.project, existing, options);
+    if (!doc || doc === existing) return snap.project.revision;
     const next = structuredClone(snap.project);
     next.extensions = { ...next.extensions, directorDocument: doc };
-    await ctx.port.commit(ctx.projectId, snap.project.revision, next, {}, '智能体：同步制片圣经与导演计划文档');
-  } catch { /* Non-fatal if user modified project concurrently */ }
+    const committed = await ctx.port.commit(ctx.projectId, snap.project.revision, next, {}, '智能体：同步制片圣经与导演计划文档');
+    return committed.project?.revision ?? snap.project.revision;
+  } catch {
+    try { return (await ctx.port.snapshot(ctx.projectId)).project?.revision; } catch { return undefined; }
+  }
 }
 
 /** Ensure approved reference image assetIds are bound on `shot.referenceIds` before calling `media.generate` so `readProjectImage` passes. */
@@ -254,8 +258,22 @@ export async function qualityCheck(ctx: ToolContext): Promise<QcReport> {
 export function createTools(): AgentTool[] {
   const tools: AgentTool[] = [
     // ==================== 1. 感知、环境与拉片拆解 ====================
-    { name: 'project_get', risk: 'read', description: '读取当前工程完整摘要：版本号、镜头（含转场/调色/参数/候选条）、素材（含时长/分辨率）、视频片段、音轨明细（含 clipId）、画中画、字幕与制作策略。修改前必调。', parameters: object({}),
-      async run(_args, ctx) { const snapshot = await ctx.port.snapshot(ctx.projectId); return { content: json({ ...summarizeProject(snapshot.project), task: snapshot.task ? { kind: snapshot.task.kind, status: snapshot.task.status, message: snapshot.task.message } : null }), revision: snapshot.project?.revision }; } },
+    { name: 'project_get', risk: 'read', description: '读取当前工程完整摘要：版本号、镜头（含转场/调色/参数/候选条，长片支持 shotOffset/shotLimit 分页且始终返回完整 shotOrder）、素材（含时长/分辨率）、视频片段、音轨明细（含 clipId）、画中画、字幕与制作策略。修改前必调。',
+      parameters: object({
+        shotOffset: int('可选：百镜长片分页起始索引，默认 0'),
+        shotLimit: int('可选：单次读取镜头详情数量上限（1–60）'),
+        shotIds: { type: 'array', items: { type: 'string' }, description: '可选：按镜头 ID 精确读取指定镜头详情' },
+      }),
+      async run(args, ctx) {
+        const snapshot = await ctx.port.snapshot(ctx.projectId);
+        const summary = summarizeProject(snapshot.project, {
+          ...(Number.isSafeInteger(args.shotOffset) ? { shotOffset: Number(args.shotOffset) } : {}),
+          ...(Number.isSafeInteger(args.shotLimit) ? { shotLimit: Number(args.shotLimit) } : {}),
+          ...(Array.isArray(args.shotIds) ? { shotIds: args.shotIds.map(String) } : {}),
+          maxChars: 10_800,
+        });
+        return { content: JSON.stringify({ ...summary, task: snapshot.task ? { kind: snapshot.task.kind, status: snapshot.task.status, message: snapshot.task.message } : null }), revision: snapshot.project?.revision };
+      } },
     { name: 'bible_get', risk: 'read', description: '读取统一制片圣经（剧本梗概、视觉风格、角色库、固定场景母版库 Locations、道具库 Props、三维世界布局、戏剧节拍、场记连续性与分镜表）。', parameters: object({}),
       async run(_args, ctx) {
         const [story, snap] = await Promise.all([ctx.docs.story(), ctx.port.snapshot(ctx.projectId)]);
@@ -345,15 +363,15 @@ export function createTools(): AgentTool[] {
             updatedAt: new Date().toISOString(),
           };
         });
-        await syncBibleToProject(ctx, story);
-        return { content: json({ ok: true, version: story.version, characters: story.characters.map(c => c.id), locations: (story.locations ?? []).map(l => l.id), props: (story.props ?? []).map(p => p.id), next: story.shots.length ? '如需调整分镜，用 plan_shots' : '下一步用 plan_shots 提交分镜表（支持 1–120 镜）' }) };
+        const rev = await syncBibleToProject(ctx, story, { promoteApproved: true });
+        return { content: json({ ok: true, version: story.version, revision: rev, characters: story.characters.map(c => c.id), locations: (story.locations ?? []).map(l => l.id), props: (story.props ?? []).map(p => p.id), next: story.shots.length ? '如需调整分镜，用 plan_shots' : '下一步用 plan_shots 提交分镜表（支持 1–120 镜）' }), revision: rev };
       } },
     { name: 'plan_shots', risk: 'plan', description: '提交（整体替换）分镜表（支持 1–120 镜）：每镜摘要、景别、运镜、时长、台词、所属场景 locationId、出场角色、道具 propIds、是否承接上一镜尾帧、声音策略与表演节拍。需用户审批并自动同步至导演计划文档。',
       parameters: object({
         storyBeats: { type: 'array', description: '可选：戏剧节拍列表', items: object({ id: str('节拍 ID'), function: str('叙事功能'), change: str('信息或局面变化'), shotIds: { type: 'array', items: { type: 'string' } } }, ['id', 'function', 'change', 'shotIds']) },
         shots: { type: 'array', items: object({
           id: str('分镜 ID'), shotId: str('对应工程镜头 ID（已有时）'), summary: str('画面与情节'), shotType: str('景别：远/全/中/近/特写'),
-          camera: str('运镜与焦距'), durationSeconds: num('时长秒数'), dialogue: str('台词/旁白'),
+          camera: str('运镜与焦距'), durationSeconds: num('时长秒数'), dialogue: str('台词/旁白'), narration: str('可选：画外旁白'),
           locationId: str('可选：所属场景母版 ID'), propIds: { type: 'array', items: { type: 'string' } },
           characters: { type: 'array', items: { type: 'string' } }, continueFromPrevious: bool('是否承接上一镜尾帧'),
           audioStrategy: { type: 'string', enum: ['native', 'external', 'silent'] },
@@ -362,7 +380,7 @@ export function createTools(): AgentTool[] {
       async run(args, ctx) {
         const story = await ctx.docs.updateStory(current => {
           if (!current.title) throw new Error('先用 plan_story 提交剧本与风格');
-          const shots = normalizeShots(args.shots, current.characters, current.locations ?? [], current.props ?? []);
+          const shots = normalizeShots(args.shots, current.characters, current.locations ?? [], current.props ?? [], current.shots);
           return {
             ...current,
             shots,
@@ -373,8 +391,8 @@ export function createTools(): AgentTool[] {
             updatedAt: new Date().toISOString(),
           };
         });
-        await syncBibleToProject(ctx, story);
-        return { content: json({ ok: true, version: story.version, shots: story.shots.length, totalSeconds: story.shots.reduce((s, x) => s + x.durationSeconds, 0) }) };
+        const rev = await syncBibleToProject(ctx, story, { promoteApproved: true });
+        return { content: json({ ok: true, version: story.version, revision: rev, shots: story.shots.length, totalSeconds: story.shots.reduce((s, x) => s + x.durationSeconds, 0) }), revision: rev };
       } },
     { name: 'bible_save_plan', risk: 'plan', description: '直接保存并批准完整专业版 DirectorPlan（含逐拍表演 PerformanceBeat、精确对白/抢话事件 DialogueEvent、三维世界锚点 WorldLayout、屏幕坐标事件 ShotEvent 与验收条件），双向同步制片圣经。',
       parameters: object({ expectedRevision: int('当前工程版本'), plan: { type: 'object', description: '符合 DirectorPlan v1 规范的完整计划对象' } }, ['expectedRevision', 'plan']),
@@ -388,7 +406,7 @@ export function createTools(): AgentTool[] {
         const approved = approveDirectorDocument(withDraft, { expectedVersion: draft.version, expectedHash: draft.hash });
         withDraft.extensions = { ...withDraft.extensions, directorDocument: approved };
         const committed = await ctx.port.commit(ctx.projectId, expected, withDraft, {}, '智能体：批准完整专业导演计划文档');
-        await ctx.docs.updateStory(current => mergeDirectorPlanIntoStory(approved.plan, current, true));
+        await ctx.docs.updateStory(current => mergeDirectorPlanIntoStory(approved.plan, current, true, { version: approved.version, hash: approved.hash }));
         return { content: json({ ok: true, revision: committed.project?.revision, documentVersion: approved.version, hash: approved.hash, shots: approved.plan.shots.length }), revision: committed.project?.revision };
       } },
 
@@ -399,8 +417,8 @@ export function createTools(): AgentTool[] {
         const snapshot = await ctx.port.snapshot(ctx.projectId); const character = normalizeCharacter(args, 0);
         const bad = character.referenceAssetIds.filter(id => !snapshot.project?.assets.some(a => a.id === id && a.kind === 'image')); if (bad.length) throw new Error('参考图不是工程中的图片素材：' + bad.join(', '));
         const story = await ctx.docs.updateStory(current => ({ ...current, characters: [...current.characters.filter(c => c.id !== character.id), character], updatedAt: new Date().toISOString() }));
-        await syncBibleToProject(ctx, story);
-        return { content: json({ ok: true, version: story.version, character }) };
+        const rev = await syncBibleToProject(ctx, story, { promoteApproved: false });
+        return { content: json({ ok: true, version: story.version, revision: rev, character }), revision: rev };
       } },
     { name: 'location_upsert', risk: 'write', description: '新增或更新固定场景母版库（Location：内/外景、昼夜、环境建筑陈设、光影基调、空镜母版参考图 ID 与世界布局 ID），保障同场戏背景一致。',
       parameters: object({
@@ -414,8 +432,8 @@ export function createTools(): AgentTool[] {
         const snapshot = await ctx.port.snapshot(ctx.projectId); const loc = normalizeLocation(args, 0);
         const bad = (loc.referenceAssetIds ?? []).filter(id => !snapshot.project?.assets.some(a => a.id === id && a.kind === 'image')); if (bad.length) throw new Error('场景参考图不是工程中的图片素材：' + bad.join(', '));
         const story = await ctx.docs.updateStory(current => ({ ...current, locations: [...(current.locations ?? []).filter(l => l.id !== loc.id), loc], updatedAt: new Date().toISOString() }));
-        await syncBibleToProject(ctx, story);
-        return { content: json({ ok: true, version: story.version, location: loc }) };
+        const rev = await syncBibleToProject(ctx, story, { promoteApproved: false });
+        return { content: json({ ok: true, version: story.version, revision: rev, location: loc }), revision: rev };
       } },
     { name: 'prop_upsert', risk: 'write', description: '新增或更新关键叙事道具库（Prop：名称、外观细节、所属角色与参考图素材 ID），保障特写与远景道具一致。',
       parameters: object({ id: str('道具 ID'), name: str('道具名称'), description: str('外观尺寸与材质细节'), ownerCharacterId: str('可选：所属角色 ID'), referenceAssetIds: { type: 'array', items: { type: 'string' } } }, ['id', 'name', 'description']),
@@ -423,8 +441,8 @@ export function createTools(): AgentTool[] {
         const snapshot = await ctx.port.snapshot(ctx.projectId); const prop = normalizeProp(args, 0);
         const bad = (prop.referenceAssetIds ?? []).filter(id => !snapshot.project?.assets.some(a => a.id === id && a.kind === 'image')); if (bad.length) throw new Error('道具参考图不是工程中的图片素材：' + bad.join(', '));
         const story = await ctx.docs.updateStory(current => ({ ...current, props: [...(current.props ?? []).filter(p => p.id !== prop.id), prop], updatedAt: new Date().toISOString() }));
-        await syncBibleToProject(ctx, story);
-        return { content: json({ ok: true, version: story.version, prop }) };
+        const rev = await syncBibleToProject(ctx, story, { promoteApproved: false });
+        return { content: json({ ok: true, version: story.version, revision: rev, prop }), revision: rev };
       } },
     { name: 'continuity_log_upsert', risk: 'write', description: '记录或更新场记连续性日志（180° 轴线方向、人物服装道具状态、前后镜光影衔接备注）。',
       parameters: object({ shotId: str('镜头 ID'), axis180: str('180° 轴线与人物朝向备注'), wardrobeState: str('服装与持握道具状态'), lightingMatch: str('光影色温衔接说明'), notes: str('其他重拍或场记说明') }, ['shotId']),
@@ -438,7 +456,8 @@ export function createTools(): AgentTool[] {
           updatedAt: new Date().toISOString(),
         };
         const story = await ctx.docs.updateStory(current => ({ ...current, continuityLog: [...(current.continuityLog ?? []).filter(e => e.shotId !== entry.shotId), entry], updatedAt: entry.updatedAt }));
-        return { content: json({ ok: true, version: story.version, entry }) };
+        const rev = await syncBibleToProject(ctx, story, { promoteApproved: false });
+        return { content: json({ ok: true, version: story.version, revision: rev, entry }), revision: rev };
       } },
     { name: 'project_set_style', risk: 'write', description: '从风格库选择风格 ID 应用到当前工程（传空字符串清除）。', parameters: object({ expectedRevision: int('当前工程版本'), styleId: str('风格库中的风格 ID') }, ['expectedRevision', 'styleId']),
       async run(args, ctx) {
@@ -596,22 +615,28 @@ export function createTools(): AgentTool[] {
         const next = await ctx.port.saveSource(ctx.projectId, need(args, 'shotId'), revision(args), source);
         return { content: json({ ok: true, revision: next.project?.revision }), revision: next.project?.revision };
       } },
-    { name: 'delegate_scene_code', risk: 'write', description: '委派专精「场景代码模型（scene 角色）」为指定镜头编写或精修确定性 HTML/CSS/Canvas 动效源码，并自动完成渲染校验与报错自修复，节省总导演上下文。',
-      parameters: object({ shotId: str('目标镜头 ID'), instruction: str('本镜头的视觉构图、动态节奏、配色与字幕排版要求') }, ['shotId', 'instruction']),
+    { name: 'delegate_scene_code', risk: 'write', description: '委派专精「场景代码模型（scene 角色）」为指定镜头编写或精修确定性 HTML/CSS/Canvas 动效源码，并同步等待渲染校验与报错自修复（受 expectedRevision 乐观锁保护，不会覆盖期间的人工编辑）。',
+      parameters: object({ expectedRevision: int('可选：当前工程版本（传入时严格校验，防止覆盖并发编辑）'), shotId: str('目标镜头 ID'), instruction: str('本镜头的视觉构图、动态节奏、配色与字幕排版要求') }, ['shotId', 'instruction']),
       async run(args, ctx) {
         if (!ctx.port.generateSceneCode) throw new Error('当前环境未配置场景代码委派接口，请使用 shot_write_source');
-        const res = await ctx.port.generateSceneCode(ctx.projectId, need(args, 'shotId'), need(args, 'instruction'), ctx.signal);
+        const expected = Number.isSafeInteger(args.expectedRevision) ? Number(args.expectedRevision) : undefined;
+        const res = await ctx.port.generateSceneCode(ctx.projectId, need(args, 'shotId'), need(args, 'instruction'), ctx.signal, expected);
         return { content: json({ ok: true, ...res }), revision: res.revision };
       } },
-    { name: 'delegate_crew', risk: 'write', description: '向虚拟影视剧组的六大专业子智能体委派专项任务（隔离局部上下文，自动推进多步只读分析与工程精修）：screenwriter(剧作拉片) / art_director(美术设定) / cinematographer(3D摄影预演) / scene_coder(动态图形代码) / sound_director(声音混音) / post_editor_qc(精剪调色与质检)。',
+    { name: 'delegate_crew', risk: 'write', description: '向虚拟影视剧组的六大专业子智能体委派专项任务（隔离局部上下文，受父运行预算与 shotIds 沙箱硬边界保护）：screenwriter(剧作拉片) / art_director(美术设定) / cinematographer(3D摄影预演) / scene_coder(动态图形代码) / sound_director(声音混音) / post_editor_qc(精剪调色与质检)。',
       parameters: object({
         department: { type: 'string', enum: Object.keys(CREW_SPECS), description: '目标剧组部门' },
         task: str('明确的专项任务指令与验收标准'),
-        shotIds: { type: 'array', items: { type: 'string' }, description: '可选：限定处理的镜头 ID 范围' },
+        shotIds: { type: 'array', items: { type: 'string' }, description: '可选：限定处理的镜头 ID 范围（强制拦截越界写入）' },
       }, ['department', 'task']),
       async run(args, ctx) {
         if (!ctx.delegateCrew) throw new Error('当前运行上下文未启用子代理委派');
-        return ctx.delegateCrew(need(args, 'department') as CrewDepartment, need(args, 'task'), Array.isArray(args.shotIds) ? args.shotIds.map(String) : undefined);
+        return ctx.delegateCrew(
+          need(args, 'department') as CrewDepartment,
+          need(args, 'task'),
+          Array.isArray(args.shotIds) ? args.shotIds.map(String) : undefined,
+          typeof args.__callId === 'string' ? args.__callId : undefined,
+        );
       } },
 
     // ==================== 5. Blender 3D 预演（关节姿态 + 走位 + 景深 + Z-Depth） ====================
@@ -717,8 +742,8 @@ export function createTools(): AgentTool[] {
           });
           return { ...current, shots, updatedAt: at };
         });
-        await syncBibleToProject(ctx, story);
-        return { content: json({ ok: true, approvedShots: approvedIds.length ? approvedIds : items.map(i => String(i.shotId)), summary: need(args, 'summary'), next: '白模预演已获批准！若已接入生图模型，推荐先调 stylize_keyframe 生成正式美术风格首帧，再调 generate_video / batch_generate_media 实际呈现。' }) };
+        const rev = await syncBibleToProject(ctx, story, { promoteApproved: true });
+        return { content: json({ ok: true, revision: rev, approvedShots: approvedIds.length ? approvedIds : items.map(i => String(i.shotId)), summary: need(args, 'summary'), next: '白模预演已获批准！若已接入生图模型，推荐先调 stylize_keyframe 生成正式美术风格首帧，再调 generate_video / batch_generate_media 实际呈现。' }), revision: rev };
       } },
 
     // ==================== 6. 多模态生成、关键帧桥梁、批次并发与口型驱动 ====================
@@ -874,29 +899,75 @@ export function createTools(): AgentTool[] {
       estimate: () => null,
       async referenceImages(args, _ctx) {
         const items = Array.isArray(args.items) ? args.items as Record<string, unknown>[] : [];
-        const refs: string[] = [];
-        let hasVideoRef = false;
+        const imageRefs: string[] = [];
+        const videoRefs: string[] = [];
         for (const it of items) {
           for (const k of ['imageAssetId', 'tailImageAssetId'] as const) {
-            if (typeof it[k] === 'string' && it[k]) { refs.push(it[k] as string); if (it.kind === 'video') hasVideoRef = true; }
+            if (typeof it[k] === 'string' && it[k]) {
+              if (it.kind === 'image') imageRefs.push(it[k] as string);
+              else videoRefs.push(it[k] as string);
+            }
           }
         }
-        return { assetIds: [...new Set(refs)], role: hasVideoRef ? 'video' : 'image' };
+        const groups: ReferenceUploadGroup[] = [];
+        if (imageRefs.length) groups.push({ role: 'image', assetIds: [...new Set(imageRefs)] });
+        if (videoRefs.length) groups.push({ role: 'video', assetIds: [...new Set(videoRefs)] });
+        return { groups };
       },
       async run(args, ctx) {
         const items = Array.isArray(args.items) ? (args.items as Record<string, unknown>[]).slice(0, 8) : [];
         if (!items.length) throw new Error('items 不能为空');
-        const allRefs = items.flatMap(it => [it.imageAssetId, it.tailImageAssetId].filter((x): x is string => typeof x === 'string' && Boolean(x)));
+        const batchKey = String(args.__toolCallId ?? args.__callId ?? '');
+        const existingReceipts = ctx.getBatchReceipt?.(batchKey) ?? {};
+
+        // 1. Atomic preflight check across ALL items BEFORE any paid remote submission!
+        const snap = await ctx.port.snapshot(ctx.projectId);
+        const project = snap.project;
+        if (!project) throw new Error('没有打开的工程');
         let rev = revision(args);
+        // If resuming a partially submitted batch whose earlier reference-binding bumped revision, allow current revision when receipts exist
+        if (project.revision !== rev && !Object.keys(existingReceipts).length) {
+          throw Object.assign(new Error('版本已变化'), { code: 'REVISION_CONFLICT' });
+        }
+        rev = project.revision;
+        const shotIdSet = new Set(project.shots.map(s => s.id));
+        const imgAssetSet = new Set(project.assets.filter(a => a.kind === 'image').map(a => a.id));
+        for (const [idx, it] of items.entries()) {
+          if (it.kind !== 'image' && it.kind !== 'video') throw new Error(`第 ${idx + 1} 项 kind 必须为 image 或 video`);
+          const sid = need(it, 'shotId');
+          if (!shotIdSet.has(sid)) throw new Error(`第 ${idx + 1} 项指定的目标镜头不存在：${sid}`);
+          need(it, 'prompt');
+          for (const k of ['imageAssetId', 'tailImageAssetId'] as const) {
+            if (typeof it[k] === 'string' && it[k] && !imgAssetSet.has(it[k] as string)) {
+              throw new Error(`第 ${idx + 1} 项引用的参考图片不存在：${String(it[k])}`);
+            }
+          }
+          if (it.tailImageAssetId && !it.imageAssetId) {
+            throw new Error(`第 ${idx + 1} 项指定尾帧 tailImageAssetId 时必须同时提供首帧 imageAssetId`);
+          }
+          if (project.schemaVersion === 3) {
+            assertProductionOperation(project, it.kind, [sid]);
+          }
+        }
+
+        // 2. Bind any unlinked reference images to their target shots
         for (const it of items) {
           const itemRefs = [it.imageAssetId, it.tailImageAssetId].filter((x): x is string => typeof x === 'string' && Boolean(x));
           if (itemRefs.length) rev = await ensureShotReferenceBindings(ctx, need(it, 'shotId'), itemRefs, rev);
         }
+
+        // 3. Submit items with durable per-item receipts so partial failure retries reuse already-accepted remote jobs!
         const taskIds: string[] = [];
         const autoApplyShots: Record<string, string> = {};
         for (const [idx, it] of items.entries()) {
           const kind = it.kind === 'image' ? 'image' : 'video';
           const shotId = need(it, 'shotId');
+          if (existingReceipts[idx]) {
+            const reusedId = existingReceipts[idx]!;
+            taskIds.push(reusedId);
+            if (args.autoApply !== false) autoApplyShots[reusedId] = shotId;
+            continue;
+          }
           const prompt = await anchored(ctx, it);
           const itemRefs = [it.imageAssetId, it.tailImageAssetId].filter((x): x is string => typeof x === 'string' && Boolean(x));
           const parameters: Record<string, string | number | boolean> = {};
@@ -912,11 +983,13 @@ export function createTools(): AgentTool[] {
             projectId: ctx.projectId, expectedRevision: rev, shotId, operation, prompt,
             ...(itemRefs.length ? { imageAssetIds: itemRefs, allowImageUpload: true, ...(operation === 'first-last-frame-video' ? { referenceRoles: ['first_frame', 'last_frame'] } : {}) } : {}),
             ...(Object.keys(parameters).length ? { parameters } : {}),
-            clientRequestId: `${ctx.runId}.${String(args.__callId ?? '')}.${idx}`,
+            clientRequestId: `${ctx.runId}.${batchKey}.${idx}`,
           };
-          const created = itemRefs.length && allRefs.length && ctx.videoReference
-            ? (kind === 'video' && ctx.port.generateVideoReference ? await ctx.port.generateVideoReference(req, ctx.videoReference.authorizeUpload) : ctx.port.generateImageReference ? await ctx.port.generateImageReference(req, ctx.videoReference.authorizeUpload) : await rpc(ctx, 'media.generate', req) as { id: string })
+          const authFn = ctx.videoReference?.authorizeRoleUpload ? ctx.videoReference.authorizeRoleUpload(kind) : ctx.videoReference?.authorizeUpload;
+          const created = itemRefs.length && authFn
+            ? (kind === 'video' && ctx.port.generateVideoReference ? await ctx.port.generateVideoReference(req, authFn) : ctx.port.generateImageReference ? await ctx.port.generateImageReference(req, authFn) : await rpc(ctx, 'media.generate', req) as { id: string })
             : await rpc(ctx, 'media.generate', req) as { id: string };
+          await ctx.saveBatchItemReceipt?.(batchKey, idx, created.id);
           taskIds.push(created.id);
           if (args.autoApply !== false) autoApplyShots[created.id] = shotId;
         }
@@ -925,30 +998,34 @@ export function createTools(): AgentTool[] {
           waitForBatch: { kind: 'media', ids: taskIds, ...(args.autoApply !== false ? { autoApplyShots } : {}) },
         };
       } },
-    { name: 'apply_lip_sync', risk: 'cost', requires: ['video'], description: '人物对白口型同步（Lip-Sync）：输入镜头已有视频素材与角色配音音频素材，调用口型驱动模型（video-gateway 或 replicate-lipsync 异步模板）生成口型匹配的新视频片段（需用户批准）。',
+    { name: 'apply_lip_sync', risk: 'cost', requires: ['video'], description: '人物对白口型同步（Lip-Sync）：输入镜头已有视频素材与角色配音音频素材，经用户授权上传并调用口型驱动模型（video-gateway 或 replicate-lipsync 异步模板）生成口型匹配的新视频片段（支持真实大小音视频文件，需用户批准）。',
       parameters: object({
         expectedRevision: int('当前工程版本'), shotId: str('目标镜头 ID'),
         videoAssetId: str('源镜头视频素材 ID'), audioAssetId: str('对白配音音频素材 ID'),
         prompt: str('可选：说话神态与面部微表情补充说明'),
       }, ['expectedRevision', 'shotId', 'videoAssetId', 'audioAssetId']),
       estimate: () => null,
+      async referenceImages(args) {
+        return { groups: [{ role: 'video', assetIds: [need(args, 'videoAssetId'), need(args, 'audioAssetId')] }] };
+      },
       async run(args, ctx) {
         const rev = revision(args);
         const shotId = need(args, 'shotId'), videoAssetId = need(args, 'videoAssetId'), audioAssetId = need(args, 'audioAssetId');
         const snap = await ctx.port.snapshot(ctx.projectId);
         if (!snap.project) throw new Error('没有打开的工程');
+        if (!snap.project.shots.some(s => s.id === shotId)) throw new Error('目标镜头不存在：' + shotId);
         if (!snap.project.assets.some(a => a.id === videoAssetId && a.kind === 'video')) throw new Error('未找到指定的视频素材：' + videoAssetId);
         if (!snap.project.assets.some(a => a.id === audioAssetId && a.kind === 'audio')) throw new Error('未找到指定的配音素材：' + audioAssetId);
-        const [videoData, audioData] = await Promise.all([
-          rpc(ctx, 'media.assetDataUrl', { assetId: videoAssetId }) as Promise<{ dataUrl: string }>,
-          rpc(ctx, 'media.assetDataUrl', { assetId: audioAssetId }) as Promise<{ dataUrl: string }>,
-        ]);
-        const task = await rpc(ctx, 'media.generate', {
-          expectedRevision: rev, shotId, operation: 'lip-sync-video',
+        const request = {
+          projectId: ctx.projectId, expectedRevision: rev, shotId, operation: 'lip-sync-video' as const,
           prompt: typeof args.prompt === 'string' && args.prompt.trim() ? args.prompt.trim() : '人物自然说话口型同步，保持面部身份与光影稳定',
-          parameters: { videoDataUrl: videoData.dataUrl, audioDataUrl: audioData.dataUrl },
+          videoAssetId, audioAssetId, allowImageUpload: true,
           clientRequestId: `${ctx.runId}.${String(args.__callId ?? '')}`,
-        }) as { id: string };
+        };
+        const authFn = ctx.videoReference?.authorizeRoleUpload ? ctx.videoReference.authorizeRoleUpload('video') : ctx.videoReference?.authorizeUpload;
+        const task = authFn && ctx.port.generateVideoReference
+          ? await ctx.port.generateVideoReference(request, authFn)
+          : await rpc(ctx, 'media.generate', request) as { id: string };
         return { content: json({ taskId: task.id, shotId, operation: 'lip-sync-video', hint: '口型同步视频就绪后请用 media_apply 采用' }), waitFor: { kind: 'media', id: task.id } };
       } },
     { name: 'media_apply', risk: 'write', description: '把已就绪的生成素材采用到工程（若关联了预演镜头且生成的是关键帧图片，可传 registerAsKeyframe="first"|"last" 登记为正式首帧或尾帧）。',

@@ -28,6 +28,7 @@
 - **`scene_coder`（动态图形与场景代码师）**：优先路由至已绑定的 `scene` 角色模型，编写帧确定性 HTML/CSS/SVG/Canvas 源码并执行 `render_check` 自修复。另提供单镜快速委派工具 `delegate_scene_code`。
 - **`sound_director`（声音与对白表演师）**：多句对白话轮顺序排布、12 种程序化拟音合成、侧链自动闪避（Auto-Ducking）与 `-14 LUFS` 响度实测。
 - **`post_editor_qc`（精剪调色与多模质检师）**：双镜叠化/擦除/闪白转场、逐镜曝光/色温/对比度/暗角调色、候选条 Takes 优选、画中画叠加、多平台画幅重构图及 5 帧时序宫格审片。
+- **剧组沙箱与持久断点护栏**：子代理受参数入口 + 宿主提交双层 `scopedShotIds` 硬边界保护（禁止越界改写非委派镜头或全局重构图），每步实时受父运行与项目 `budgetLimit` 熔断治理，并具备子步骤级持久回执 `subagentCheckpoints`（故障恢复不重复已成功的写入）与严格 `tool_calls` 1:1 响应配对。
 
 ### 2. 统一制片圣经（Unified Production Bible）
 - 彻底打通 `Story`（`agent-data/stories/<projectId>.json`）与专业契约 `DirectorDocument`（`project.extensions.directorDocument`，`src/director/contracts.ts`）的双向实时同步。
@@ -85,5 +86,5 @@
 
 ## 验证范围与尚未验收边界
 
-- **已通过本地与协议回归验证**：`tests/agent-v2-full-spectrum.test.ts` 与全量测试套件使用本机真实 FFmpeg / ffprobe / Chromium / Blender（可用时）与本地脚本化协议网关（`toolGateway` / 本地 HTTP 媒体与语音协议服务），完整覆盖 16+ 镜制片圣经双向同步、剧组子代理委派、`scene` 代码模型路由、Blender 关节姿态 + Z-Depth 渲染、`stylize_keyframe` 多图参考上传授权与首尾帧视频协议、场次并发池自动采用、双角色音色路由与顺序话轮对齐、侧链闪避混音与 `ebur128` 实测响度、`scdet` 样片切镜拆解、调色/叠化/画中画/9:16 重构图及 5 种工业交换文件导出，**零外部计费 API 请求**。
+- **已通过本地与协议回归验证**：`tests/agent-v2-full-spectrum.test.ts`、`tests/agent-v2-audit-remediation.test.ts` 与全量 648 项测试套件使用本机真实 FFmpeg / ffprobe / Chromium / Blender（可用时）与本地脚本化协议网关，实现 **59 / 59 全工具入口回归覆盖**，覆盖 16–120 镜制片圣经无损往返与分页读取、草稿与获批基线隔离、剧组子代理范围沙箱与 503 断点恢复、双目的地混合上传授权、真实大小音视频口型同步、侧链闪避混音与 `ebur128` 实测响度、CLI `--allow-images` 远程视觉时序审片及时间线自相对素材路径导出，**零外部计费 API 请求**。
 - **尚未验收（不作为真实模型质量声明）**：真实付费商业大模型（DeepSeek / OpenAI / Gemini / 可灵 / 即梦 Seedance / ElevenLabs / Replicate 等）在线长片多轮编排稳定性、生成画质审美、真实口型自然度与跨平台发行签名公证仍需使用真实账户单独验收。

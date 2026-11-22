@@ -2,6 +2,10 @@
 
 ## 未发布
 
+- 完成 **v2.0 工具与团队通信安全/一致性 16 项审计闭环加固**：
+  - **剧组子代理硬边界与持久恢复**：`runCrewSubagent` 新增参数级 + 提交级双层 `scopedShotIds` 镜头范围硬拦截（阻断越界改镜与全局重构图）、每步实时校验父运行与项目 `budgetLimit` 并累计 `steps`/`toolCalls`、子步骤级持久断点回执 `subagentCheckpoints`（中途中招 503 恢复后不重复执行已落盘写入）、严格 1:1 配对溢出 `tool_calls`、区分 `complete`/`partial`/`failed`/`step_limit_partial` 状态并同步最新 `revision`；总导演结束前复查排空 `pendingUserMessages` 防止临终纠偏丢失。
+  - **批次回执、多目标授权与真实媒体流通道**：`batch_generate_media` 增加全子项前置合法性与策略预检、逐子项持久回执 `batchReceipts` 复用及逐项独立核销 `unknownCostCalls`；`referenceGrants` 升级为按 `(execId, role, fingerprint)` 分组保存，消除生图+生视频双目的地上传授权乒乓死锁；`apply_lip_sync` 改为通过 `MediaProjectPort.readMediaAsset` 直接流式读取工程内真实大小音视频并纳入外发授权，消除 4,000 字符参数限制；`delegate_scene_code` 严格绑定初始 `baseRevision` 乐观锁并同步等待无头渲染校验与单轮报错自修复；修复采用视频与保存片段把 Schema v3 降级为 Schema 2 的问题。
+  - **制片圣经草稿隔离、百镜分页、CLI 视觉开关与时间线自寻址**：工作台保存未批草稿不再覆盖已批准 `Story` 或在美术同步时被误提权为 `approved`；补齐 `DirectorDocument ↔ Story` 与 `.yingliu` 备份还原对摄影参考、`native` 音频策略、逐拍表演、对白事件、镜头事件及验收条件的无损保留；`project_get` 支持 120 镜自适应分页且保证始终返回合法可解析 JSON；CLI `agent run` 新增 `--allow-images` 开启远程视觉与 5 帧时序审片；导出 `.otio` 与 `.fcpxml` 改为按时间线所在导出子目录计算相对素材路径（`../../assets/...`），并实现 59/59 全工具入口回归覆盖。
 - 升级智能体至 **v2.0 全链路虚拟影视剧组架构（Full-Spectrum Virtual Film Crew）**：
   - **分层剧组编排**：以 `AgentService` 作为总导演（Showrunner），新增 6 大专业部门子代理（`screenwriter`、`art_director`、`cinematographer`、`scene_coder`、`sound_director`、`post_editor_qc`）与 `delegate_crew` / `delegate_scene_code` 委派机制，收费与导出门禁统一收口至总导演。
   - **统一制片圣经与百镜分镜容量**：双向打通 `Story` 与专业契约 `DirectorDocument`（`project.extensions.directorDocument`），单轮分镜上限由 12 镜提升至 120 镜；新增固定场景母版库（`locations`）、关键道具库（`props`）、三维世界坐标（`worldLayouts`）与 180° 轴线场记日志（`continuityLog`）。

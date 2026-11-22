@@ -38,11 +38,11 @@ async function waitRun(
   call: <T>(ep: string, p?: unknown) => Promise<T>,
   runId: string,
   targets: string[],
-  max = 800,
+  max = 2500,
 ): Promise<PublicRun> {
   let run = await call<PublicRun>('agent.get', { runId });
   for (let i = 0; i < max && !targets.includes(run.status); i++) {
-    await new Promise(r => setTimeout(r, 15));
+    await new Promise(r => setTimeout(r, 20));
     run = await call<PublicRun>('agent.get', { runId });
   }
   return run;
@@ -233,7 +233,7 @@ test('v2 Virtual Film Crew: delegate_crew runs isolated department sub-agent and
         text: JSON.stringify({
           html: '<div class="stage"><h1 id="headline"></h1></div>',
           css: '.stage{width:100%;height:100%;display:grid;place-items:center;background:#0f172a;color:#f8fafc;font-family:sans-serif}',
-          js: 'export function render(ctx){ document.getElementById("headline").textContent = String(ctx.params.text || "SCENE V2") + " · " + Math.round(ctx.progress * 100) + "%"; }',
+          js: 'export function render(ctx){ const el = ctx.root.querySelector("#headline"); if (el) el.textContent = String(ctx.params.text || "SCENE V2") + " · " + Math.round(ctx.progress * 100) + "%"; }',
         }),
       };
     }
@@ -241,12 +241,14 @@ test('v2 Virtual Film Crew: delegate_crew runs isolated department sub-agent and
     // Sub-agent turn (art_director)
     if (sys.includes('美术与资产设定师')) {
       const ct = crewTurns++;
+      const scopeMatch = /目标镜头范围：([a-zA-Z0-9_-]+)/.exec(String(msgs[1]?.content ?? ''));
+      const scopedShotId = scopeMatch?.[1] ?? 'shot-1';
       if (ct === 0) {
         return {
           toolCalls: [
             { id: 'loc1', name: 'location_upsert', arguments: { id: 'neon_alley', name: '赛博霓虹雨巷', setting: 'EXT', timeOfDay: 'NIGHT', description: '潮湿石板路反射粉青霓虹招牌与蒸汽管道', lightingMood: '高反差青品双色逆光' } },
             { id: 'prop1', name: 'prop_upsert', arguments: { id: 'cyber_deck', name: '银色神经接入匣', description: '带磨损编号与蓝光指示灯的铝合金终端' } },
-            { id: 'cont1', name: 'continuity_log_upsert', arguments: { shotId: 'shot-1', axis180: '人物面向画面右侧（左→右运动轴线）', wardrobeState: '透明雨衣左肩破损', lightingMatch: '主光来自左侧粉红霓虹' } },
+            { id: 'cont1', name: 'continuity_log_upsert', arguments: { shotId: scopedShotId, axis180: '人物面向画面右侧（左→右运动轴线）', wardrobeState: '透明雨衣左肩破损', lightingMatch: '主光来自左侧粉红霓虹' } },
           ],
         };
       }

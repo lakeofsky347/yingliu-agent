@@ -12,12 +12,16 @@ export interface MediaRequest {
   /** Stable workflow step request ID; repeated requests return the original task. */
   clientRequestId?:string;
   modelId?:string;connectionId?:string;imageAssetIds?:string[];allowImageUpload?:boolean;
+  /** Source video & driving audio asset IDs for lip-sync-video (read directly from project storage, never stuffed into 4000-char string parameters). */
+  videoAssetId?:string;audioAssetId?:string;
   parameters?:Record<string,string|number|boolean>;ownerSessionId?:string;
   referenceRoles?:string[];requiresAudio?:boolean;
 }
 export interface MediaTask {
   version:1;id:string;clientRequestId:string;projectId:string;shotId?:string;startRevision:number;
-  operation:MediaOperation;prompt:string;imageAssetIds:string[];inputHashes:{assetId:string;sha256:string}[];
+  operation:MediaOperation;prompt:string;imageAssetIds:string[];
+  videoAssetId?:string;audioAssetId?:string;
+  inputHashes:{assetId:string;sha256:string}[];
   connection:ProviderConnection;model:ModelDefinition;parameters:Record<string,string|number|boolean>;
   ownerSessionId?:string;phase:MediaPhase;observation:'active'|'paused';remoteStatus?:RemoteStatus;remoteJobId?:string;
   progress:number;message:string;error?:string;createdAt:string;updatedAt:string;
@@ -37,6 +41,8 @@ export interface MediaProjectPort {
   authorizeOperation?(projectId:string,operation:MediaOperation,shotId?:string,expectedFingerprint?:string):Promise<string>;
   /** Must enforce current project/shot asset membership and filesystem boundaries. */
   readImage(projectId:string,assetId:string,shotId?:string):Promise<{bytes:Uint8Array;mime:string}>;
+  /** Read a verified project video or audio asset for lip-sync or media driving operations. */
+  readMediaAsset?(projectId:string,assetId:string,kind:'video'|'audio'):Promise<{bytes:Uint8Array;mime:string}>;
   /** Must inspect actual media, not merely trust extension or provider content type. */
   validateArtifact(path:string,mimeType:string,projectId:string,signal?:AbortSignal):Promise<Record<string,unknown>>;
   /** One CAS transaction; idempotent for provenance.taskId in case response is lost. */

@@ -4,7 +4,7 @@ import {resolve,join,relative} from 'node:path';
 import {atomicRename} from './atomic-rename.ts';
 import {projectOpenPath} from './file-opener.ts';
 import {homedir} from 'node:os';
-import {applyProductionPolicy,createProject,compileSpec,defaultProductionPolicy,defaultSceneSource,updateShot,updateTarget,validateProject,reorderShots} from '../core/index.ts';
+import {applyProductionPolicy,assetOrigin,createProject,compileSpec,defaultProductionPolicy,defaultSceneSource,updateShot,updateTarget,validateProject,reorderShots} from '../core/index.ts';
 import type {VideoProject,StudioSnapshot,TaskState,EnvironmentSettings,ProviderGroup,RpcResult,SceneSource,Shot,ModelRoute,TtsSettings,AudioClip,VideoClip,Asset,ProductionMode,ProductionPolicy} from '../shared/types.ts';
 import {approveDirectorDocument,saveDirectorDocument} from '../director/document.ts';
 import {localExportQuality,localQualityFrames,type LocalQualityFrame,type LocalQualityReport} from '../workflows/local-quality.ts';
@@ -74,6 +74,14 @@ export class StudioService {
   /** Trusted host port: generated paths never cross the public RPC or model tool surface. */
   async inspectMediaProject(){await this.initialized;const {project}=this.required();return {revision:project.revision,shotIds:project.shots.map(shot=>shot.id)};}
   async readMediaImage(assetId:string,shotId?:string){await this.initialized;const {root,project}=this.required();return readProjectImage(root,project,assetId,shotId);}
+  async readMediaAsset(assetId:string,kind:'video'|'audio'){
+    await this.initialized;const {root,project}=this.required();
+    const asset=project.assets.find(item=>item.id===assetId&&item.kind===kind);
+    if(!asset?.path)throw new Error(`未找到工程内的${kind==='video'?'视频':'音频'}素材：${assetId}`);
+    const file=await projectPath(root,asset.path);
+    const bytes=await readFile(file);
+    return {bytes:new Uint8Array(bytes),mime:asset.mime||(kind==='video'?'video/mp4':'audio/wav')};
+  }
   async validateMediaArtifact(path:string,mimeType:string,signal?:AbortSignal){await this.initialized;return inspectGeneratedMedia(path,mimeType,this.settings,signal);}
   async stageWorkflowMedia(task:MediaTask,files:GeneratedFile[],signal:AbortSignal):Promise<Asset[]>{
     await this.initialized;const {root,project}=this.required();if(task.projectId!==project.id)throw new Error('素材任务工程不匹配');
@@ -100,14 +108,18 @@ export class StudioService {
       const next=structuredClone(project),assetIds:string[]=[];
       for(const file of input.files){
         const asset=await this.store.importAsset(root,{path:file.path,mime:file.mimeType,name:file.name,description:input.provenance.prompt},this.settings);
-        Object.assign(asset,{generation:structuredClone(input.provenance)});next.assets.push(asset);assetIds.push(asset.id);next.graph.positions[asset.id]=[60,80+(next.assets.length-1)*180];
+        Object.assign(asset,{generation:structuredClone(input.provenance),provenance:{origin:'model_generation' as const,usage:'production' as const}});next.assets.push(asset);assetIds.push(asset.id);next.graph.positions[asset.id]=[60,80+(next.assets.length-1)*180];
       }
       if(!assetIds.length)throw new Error('媒体任务没有可采用的结果');
       const shot=next.shots.find(item=>item.id===input.shotId);
       if(shot){
         const imageIds=next.assets.filter(asset=>assetIds.includes(asset.id)&&asset.kind==='image').map(asset=>asset.id);shot.assetIds=[...new Set([...shot.assetIds,...imageIds])];
         const video=next.assets.find(asset=>assetIds.includes(asset.id)&&asset.kind==='video');
-        if(video){next.schemaVersion=2;next.videoClips=[...(next.videoClips??[]).filter(clip=>clip.shotId!==shot.id),{id:randomUUID(),shotId:shot.id,assetId:video.id,trimStart:0,trimEnd:video.duration,speed:1,fit:'cover',audio:'mute'}];}
+        if(video){
+          if(next.schemaVersion<2)next.schemaVersion=2;
+          if(next.schemaVersion===3&&shot.visual?.kind!=='hybrid')shot.visual={kind:'model_video'};
+          next.videoClips=[...(next.videoClips??[]).filter(clip=>clip.shotId!==shot.id),{id:randomUUID(),shotId:shot.id,assetId:video.id,trimStart:0,trimEnd:video.duration,speed:1,fit:'cover',audio:'mute'}];
+        }
       }
       const applied={assetIds,revision:project.revision+1};next.extensions.mediaApplications={...applications,[input.provenance.taskId]:applied};
       await this.persist(next,{},'采用生成媒体');return structuredClone(applied);
@@ -346,7 +358,12 @@ export class StudioService {
           const existing=(next.videoClips??[]).find(clip=>clip.shotId===raw.shotId);
           if(raw.id&&raw.id!==existing?.id)throw new Error('视频片段已变化，请刷新');
           const clip:VideoClip={id:existing?.id??randomUUID(),shotId:raw.shotId,assetId:raw.assetId,trimStart:Number(raw.trimStart??0),...(raw.trimEnd!==undefined?{trimEnd:Number(raw.trimEnd)}:{}),speed:Number(raw.speed??1),fit:raw.fit??'cover',audio:raw.audio??'mute'};
-          next.schemaVersion=2;next.videoClips=[...(next.videoClips??[]).filter(item=>item.shotId!==clip.shotId),clip];if(clip.audio==='keep')next.target.audioMode='mixed';await this.persist(next,{},'保存视频片段');break;
+          if(next.schemaVersion<2)next.schemaVersion=2;
+          if(next.schemaVersion===3){
+            const targetShot=next.shots.find(s=>s.id===clip.shotId),videoAsset=next.assets.find(a=>a.id===clip.assetId);
+            if(targetShot&&videoAsset&&targetShot.visual?.kind!=='hybrid')targetShot.visual={kind:assetOrigin(videoAsset)==='model_generation'?'model_video':'imported_video'};
+          }
+          next.videoClips=[...(next.videoClips??[]).filter(item=>item.shotId!==clip.shotId),clip];if(clip.audio==='keep')next.target.audioMode='mixed';await this.persist(next,{},'保存视频片段');break;
         }
         case 'video.clip.remove':{
           this.assertIdle();const next=structuredClone(this.required().project);if(!next.videoClips?.some(clip=>clip.id===data.clipId))throw new Error('视频片段不存在');
@@ -557,8 +574,8 @@ export class StudioService {
             let filename='',content='';
             if(fmt==='srt'){filename='subtitles.srt';content=formatSrt(cues);}
             else if(fmt==='ass'){filename='subtitles.ass';content=formatAss(cues,project.target,project.title);}
-            else if(fmt==='otio'){filename='timeline.otio';content=formatOtio(project);}
-            else if(fmt==='fcpxml'){filename='timeline.fcpxml';content=formatFcpxml(project);}
+            else if(fmt==='otio'){filename='timeline.otio';content=formatOtio(project,{relativeFromDir:folderRel});}
+            else if(fmt==='fcpxml'){filename='timeline.fcpxml';content=formatFcpxml(project,{relativeFromDir:folderRel});}
             else if(fmt==='edl'){filename='timeline.edl';content=formatEdl(project);}
             else continue;
             const targetFile=join(folder,filename);

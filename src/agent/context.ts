@@ -4,30 +4,57 @@ import type { AgentMessage } from './contracts.ts';
 
 export const MAX_TOOL_RESULT_CHARS = 12_000;
 
-/** Bounded, path-free project summary with complete shot, asset, audio-clip, and NLE metadata. */
-export function summarizeProject(project: VideoProject | null): Record<string, unknown> {
+export interface ProjectSummaryOptions {
+  shotOffset?: number;
+  shotLimit?: number;
+  shotIds?: string[];
+  maxChars?: number;
+}
+
+/** Bounded, path-free project summary with complete shot, asset, audio-clip, and NLE metadata (supports pagination for 120-shot films). */
+export function summarizeProject(project: VideoProject | null, options: ProjectSummaryOptions = {}): Record<string, unknown> {
   if (!project) return { project: null };
   const fps = project.target.fps.num / project.target.fps.den;
   const order = project.shotOrder.length ? project.shotOrder : project.shots.map(shot => shot.id);
   const byId = new Map(project.shots.map(shot => [shot.id, shot]));
   const videoStyle = videoStyleContext(project.videoStyle);
-  return {
+  const mapShot = (shot: NonNullable<ReturnType<typeof byId.get>>) => ({
+    id: shot.id, title: shot.title, intent: shot.intent, durationSeconds: +(shot.durationFrames / fps).toFixed(2),
+    composition: shot.composition, action: shot.action,
+    transition: shot.transition, ...(shot.transitionFrames ? { transitionFrames: shot.transitionFrames } : {}),
+    ...(shot.narration ? { narration: untrusted(shot.narration, 400) } : {}),
+    assetIds: shot.assetIds ?? [], referenceIds: shot.referenceIds ?? [],
+    ...(shot.visual ? { visual: shot.visual.kind } : {}),
+    ...(shot.colorGrade ? { colorGrade: shot.colorGrade } : {}),
+    ...(shot.takes?.length ? { takes: shot.takes.map(t => ({ id: t.id, assetId: t.assetId, kind: t.kind, score: t.score })) } : {}),
+    params: {
+      text: shot.params.text, subtitle: shot.params.subtitle, motion: shot.params.motion,
+      background: shot.params.background, foreground: shot.params.foreground, accent: shot.params.accent, fontSize: shot.params.fontSize,
+    },
+  });
+
+  const allOrdered = order.map(id => byId.get(id)).filter((s): s is NonNullable<typeof s> => Boolean(s));
+  const wantedSet = options.shotIds?.length ? new Set(options.shotIds) : null;
+  const offset = wantedSet ? 0 : Math.max(0, Math.min(allOrdered.length, Math.floor(options.shotOffset ?? 0)));
+  const requestedLimit = wantedSet ? allOrdered.length : Math.max(1, Math.min(120, Math.floor(options.shotLimit ?? allOrdered.length)));
+  const candidates = wantedSet ? allOrdered.filter(s => wantedSet.has(s.id)) : allOrdered.slice(offset, offset + requestedLimit);
+
+  const buildBase = (shotsSlice: typeof candidates, paged: boolean) => ({
     id: project.id, title: project.title, topic: project.topic, revision: project.revision, targetDuration: project.targetDuration,
     target: { width: project.target.width, height: project.target.height, fps, audioMode: project.target.audioMode },
-    shots: order.map(id => byId.get(id)).filter(Boolean).map(shot => ({
-      id: shot!.id, title: shot!.title, intent: shot!.intent, durationSeconds: +(shot!.durationFrames / fps).toFixed(2),
-      composition: shot!.composition, action: shot!.action,
-      transition: shot!.transition, ...(shot!.transitionFrames ? { transitionFrames: shot!.transitionFrames } : {}),
-      ...(shot!.narration ? { narration: untrusted(shot!.narration, 400) } : {}),
-      assetIds: shot!.assetIds ?? [], referenceIds: shot!.referenceIds ?? [],
-      ...(shot!.visual ? { visual: shot!.visual.kind } : {}),
-      ...(shot!.colorGrade ? { colorGrade: shot!.colorGrade } : {}),
-      ...(shot!.takes?.length ? { takes: shot!.takes.map(t => ({ id: t.id, assetId: t.assetId, kind: t.kind, score: t.score })) } : {}),
-      params: {
-        text: shot!.params.text, subtitle: shot!.params.subtitle, motion: shot!.params.motion,
-        background: shot!.params.background, foreground: shot!.params.foreground, accent: shot!.params.accent, fontSize: shot!.params.fontSize,
+    totalShots: allOrdered.length,
+    shotOrder: order,
+    shots: shotsSlice.map(mapShot),
+    ...(paged ? {
+      pagination: {
+        totalShots: allOrdered.length,
+        offset,
+        returnedShots: shotsSlice.length,
+        hasMore: !wantedSet && (offset + shotsSlice.length < allOrdered.length),
+        ...(wantedSet || offset + shotsSlice.length >= allOrdered.length ? {} : { nextOffset: offset + shotsSlice.length }),
+        hint: '当前为分页镜头详情；全部镜头顺序见 shotOrder，可用 project_get({ shotOffset, shotLimit }) 读取后续镜头',
       },
-    })),
+    } : {}),
     assets: project.assets.map(asset => ({
       id: asset.id, kind: asset.kind, name: asset.name, description: untrusted(asset.description ?? '', 300),
       ...(asset.duration !== undefined ? { duration: +(asset.duration).toFixed(2) } : {}),
@@ -49,8 +76,22 @@ export function summarizeProject(project: VideoProject | null): Record<string, u
     ...(project.audioMix ? { audioMix: project.audioMix } : {}),
     ...(project.extensions.directorDocument ? { hasDirectorDocument: true } : {}),
     ...(project.productionPolicy ? { productionPolicy: { mode: project.productionPolicy.mode, baseMode: project.productionPolicy.baseMode, allowGeneratedImages: project.productionPolicy.allowGeneratedImages, allowImportedVideo: project.productionPolicy.allowImportedVideo } } : {}),
-    ...(videoStyle ? { videoStyle: { ...videoStyle, name: untrusted(videoStyle.name), description: untrusted(videoStyle.description), prompt: untrusted(videoStyle.prompt, 4000) } } : {}),
-  };
+    ...(videoStyle ? { videoStyle: { ...videoStyle, name: untrusted(videoStyle.name), description: untrusted(videoStyle.description), prompt: untrusted(videoStyle.prompt, 1200) } } : {}),
+  });
+
+  const explicitPaging = options.shotOffset !== undefined || options.shotLimit !== undefined || Boolean(wantedSet);
+  if (!options.maxChars) {
+    return buildBase(candidates, explicitPaging || candidates.length < allOrdered.length);
+  }
+
+  // Adaptive shrink so serialized JSON is ALWAYS 100% valid and within `options.maxChars`!
+  let count = candidates.length;
+  while (count > 1) {
+    const attempt = buildBase(candidates.slice(0, count), explicitPaging || count < allOrdered.length || offset > 0);
+    if (JSON.stringify(attempt).length <= options.maxChars) return attempt;
+    count = Math.max(1, Math.floor(count * 0.65));
+  }
+  return buildBase(candidates.slice(0, 1), explicitPaging || allOrdered.length > 1);
 }
 
 /** User-supplied material may carry prompt injection: mark it as data, never instructions. */

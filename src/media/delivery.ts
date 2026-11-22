@@ -1,7 +1,16 @@
 import { randomUUID } from 'node:crypto';
+import { posix } from 'node:path';
 import type { SubtitleCue, VideoProject, VideoTarget } from '../shared/types.ts';
 import type { Story } from '../agent/story.ts';
 import { compileSpec } from '../core/index.ts';
+
+function timelineRelativePath(assetPath: string, relativeFromDir?: string): string {
+  const cleanAsset = assetPath.replace(/\\/g, '/').replace(/^\.\//, '');
+  if (!relativeFromDir) return cleanAsset;
+  const cleanFrom = relativeFromDir.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  if (!cleanFrom) return cleanAsset;
+  return posix.relative(cleanFrom, cleanAsset);
+}
 
 function pad2(n: number): string { return String(Math.floor(n)).padStart(2, '0'); }
 function pad3(n: number): string { return String(Math.floor(n)).padStart(3, '0'); }
@@ -118,7 +127,7 @@ export function formatAss(cues: SubtitleCue[], target: VideoTarget, title = '映
 }
 
 /** Export OpenTimelineIO (.otio JSON) for DaVinci Resolve / Premiere Pro / Nuke timeline handoff. */
-export function formatOtio(project: VideoProject): string {
+export function formatOtio(project: VideoProject, options: { relativeFromDir?: string } = {}): string {
   const spec = compileSpec(project);
   const rate = project.target.fps.num / project.target.fps.den;
   const videoChildren: Record<string, unknown>[] = [];
@@ -135,8 +144,8 @@ export function formatOtio(project: VideoProject): string {
         duration: { OTIO_SCHEMA: 'RationalTime.1', value: shot.durationFrames, rate },
       },
       media_reference: clipAsset?.path
-        ? { OTIO_SCHEMA: 'ExternalReference.1', target_url: clipAsset.path, available_range: { OTIO_SCHEMA: 'TimeRange.1', start_time: { OTIO_SCHEMA: 'RationalTime.1', value: 0, rate }, duration: { OTIO_SCHEMA: 'RationalTime.1', value: Math.round((clipAsset.duration ?? (shot.durationFrames / rate)) * rate), rate } } }
-        : { OTIO_SCHEMA: 'MissingReference.1', name: `${shot.sourcePath}/index.js` },
+        ? { OTIO_SCHEMA: 'ExternalReference.1', target_url: timelineRelativePath(clipAsset.path, options.relativeFromDir), available_range: { OTIO_SCHEMA: 'TimeRange.1', start_time: { OTIO_SCHEMA: 'RationalTime.1', value: 0, rate }, duration: { OTIO_SCHEMA: 'RationalTime.1', value: Math.round((clipAsset.duration ?? (shot.durationFrames / rate)) * rate), rate } } }
+        : { OTIO_SCHEMA: 'MissingReference.1', name: `${timelineRelativePath(shot.sourcePath, options.relativeFromDir)}/index.js` },
     });
     const next = spec.shots[idx + 1];
     if (next && ['dissolve', 'fade', 'wipe_left'].includes(next.transition)) {
@@ -171,7 +180,7 @@ export function formatOtio(project: VideoProject): string {
             start_time: { OTIO_SCHEMA: 'RationalTime.1', value: Math.round(clip.trimStart * rate), rate },
             duration: { OTIO_SCHEMA: 'RationalTime.1', value: Math.round(durSec * rate), rate },
           },
-          media_reference: asset?.path ? { OTIO_SCHEMA: 'ExternalReference.1', target_url: asset.path } : { OTIO_SCHEMA: 'MissingReference.1' },
+          media_reference: asset?.path ? { OTIO_SCHEMA: 'ExternalReference.1', target_url: timelineRelativePath(asset.path, options.relativeFromDir) } : { OTIO_SCHEMA: 'MissingReference.1' },
         };
       }),
     };
@@ -196,7 +205,7 @@ export function formatOtio(project: VideoProject): string {
 }
 
 /** Export Final Cut Pro XML v1.10 (.fcpxml) compatible with Final Cut Pro, DaVinci Resolve, Premiere & CapCut Pro. */
-export function formatFcpxml(project: VideoProject): string {
+export function formatFcpxml(project: VideoProject, options: { relativeFromDir?: string } = {}): string {
   const spec = compileSpec(project);
   const { num, den } = project.target.fps;
   const frameDur = `${den}/${num}s`;
@@ -211,7 +220,9 @@ export function formatFcpxml(project: VideoProject): string {
     const rid = `r${resIdx++}`;
     assetResMap.set(asset.id, rid);
     const durFrames = Math.max(1, Math.round((asset.duration ?? 10) * num / den));
-    resources.push(`    <asset id="${rid}" name="${escapeXml(asset.name)}" uid="${escapeXml(asset.id)}" src="./${escapeXml(asset.path)}" start="0s" duration="${durFrames * den}/${num}s" hasVideo="${asset.kind !== 'audio' ? 1 : 0}" hasAudio="${asset.kind === 'audio' || asset.hasAudio ? 1 : 0}"/>`);
+    const rel = timelineRelativePath(asset.path, options.relativeFromDir);
+    const srcHref = rel.startsWith('.') ? rel : `./${rel}`;
+    resources.push(`    <asset id="${rid}" name="${escapeXml(asset.name)}" uid="${escapeXml(asset.id)}" src="${escapeXml(srcHref)}" start="0s" duration="${durFrames * den}/${num}s" hasVideo="${asset.kind !== 'audio' ? 1 : 0}" hasAudio="${asset.kind === 'audio' || asset.hasAudio ? 1 : 0}"/>`);
   }
   const spineItems = spec.shots.map(shot => {
     const offset = `${shot.startFrame * den}/${num}s`;

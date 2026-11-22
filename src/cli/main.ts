@@ -30,7 +30,7 @@ export function parseArgs(argv: string[]): { positional: string[]; flags: Flags 
   }
   return { positional, flags };
 }
-const BOOL = new Set(['json', 'mock', 'no-wait', 'allow-paid', 'trace', 'force', 'help', 'include-archived', 'run', 'yes', 'skip-upload']);
+const BOOL = new Set(['json', 'mock', 'no-wait', 'allow-paid', 'allow-images', 'trace', 'force', 'help', 'include-archived', 'run', 'yes', 'skip-upload']);
 /** C01: commands that only read. They open the profile with recovery disabled, so they never settle, resume or rewrite state. */
 export function isReadOnly(pos: string[], f: Flags): boolean {
   const [g, s] = pos;
@@ -161,7 +161,7 @@ export const HELP = `yingliu — 映流智能体 headless CLI（详见 docs/CLI.
   doctor
   project create --title <t> [--topic <t>] [--style <id>] | list [--include-archived] | get <id> | export-zip <id> --out <file> | import <file>
   styles list
-  agent run --project <id> --goal <g> [--auto-approve read,write,plan] [--allow-paid --max-cost <n> [--auto-approve ...,cost,export]] [--max-steps n] [--max-review-rounds n]
+  agent run --project <id> --goal <g> [--allow-images] [--auto-approve read,write,plan] [--allow-paid --max-cost <n> [--auto-approve ...,cost,export]] [--max-steps n] [--max-review-rounds n]
   agent status <runId> [--trace] | resume <runId> [--upload-consent <id> | --skip-upload]
   agent approve <runId> --call <callId> --exec <execId> [--args-hash h] | reject <runId> --call <callId> --exec <execId> [--reason r]
   story show <projectId> | qc show <projectId> [--run] | ledger show <projectId>
@@ -200,7 +200,7 @@ async function dispatch(ctx: Ctx, pos: string[]): Promise<{ data: unknown; exit?
         const budget: Record<string, number> = {}; if (maxCost !== undefined) budget.maxCost = maxCost; const steps = num(f, 'max-steps'); if (steps !== undefined) budget.maxSteps = steps;
         const reviews = num(f, 'max-review-rounds');
         const since = new Date().toISOString();
-        const run = await call(ctx, 'agent.start', { projectId: str(f, 'project', true), goal: str(f, 'goal', true), autoApprove: risks, ...(Object.keys(budget).length ? { budget } : {}), ...(reviews !== undefined ? { maxReviewRounds: reviews } : {}) });
+        const run = await call(ctx, 'agent.start', { projectId: str(f, 'project', true), goal: str(f, 'goal', true), autoApprove: risks, ...(f['allow-images'] === true ? { allowImages: true } : {}), ...(Object.keys(budget).length ? { budget } : {}), ...(reviews !== undefined ? { maxReviewRounds: reviews } : {}) });
         return finishRun(ctx, run, since);
       }
       case 'status': { if (!arg) throw new CliError('USAGE', '用法：agent status <runId>'); const run = await call(ctx, 'agent.get', { runId: arg }); const data: Record<string, unknown> = runView(run); if (f.trace) data.trace = (await call(ctx, 'agent.trace', { runId: arg })).events; return { data, exit: EXIT.OK }; }

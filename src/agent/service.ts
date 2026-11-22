@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { AgentEvent, AgentMessage, AgentPort, AgentRun, AgentStartInput, AgentTool, CrewDepartment, PublicRun, RunStep, ToolCall, ToolResult, ToolRisk, ToolSuccessReceipt } from './contracts.ts';
+import type { AgentEvent, AgentMessage, AgentPort, AgentRun, AgentStartInput, AgentTool, CrewDepartment, PublicRun, ReferenceUploadGroup, RunStep, ToolCall, ToolResult, ToolRisk, ToolSuccessReceipt } from './contracts.ts';
 import { chatTurn, looksLikeNoToolSupport, type ChatConfig } from './model-client.ts';
 import { backoff, budgetFrom, chargeModel, chargeTool, classify, emptyUsage, needsApproval, overBudget, tokenCost } from './budget.ts';
 import { bound, capabilityPrompt, compressMessages, summarizeProject, systemPrompt } from './context.ts';
 import { RunStore } from './run-store.ts';
 import { activeTools, createTools, qualityCheck } from './tools.ts';
-import { runCrewSubagent } from './subagents.ts';
+import { runCrewSubagent, SubagentBudgetExceededError } from './subagents.ts';
 import type { AgentDocs, Capabilities, ToolContext } from './contracts.ts';
 import { join } from 'node:path';
 import { submissionOf } from './submission.ts';
@@ -65,9 +65,17 @@ export function migrateStory(v: Record<string, unknown>): Story | null {
     if (shotType === null || camera === null || dialogue === null || sh.shotId !== undefined && !str(sh.shotId) || sh.continueFromPrevious !== undefined && typeof sh.continueFromPrevious !== 'boolean') return null;
     shots.push({
       id: sh.id, ...(str(sh.shotId) ? { shotId: sh.shotId } : {}), summary: sh.summary, shotType, camera,
-      durationSeconds: sh.durationSeconds, dialogue, characters: sh.characters, continueFromPrevious: sh.continueFromPrevious === true,
+      durationSeconds: sh.durationSeconds, dialogue,
+      ...(str(sh.narration) ? { narration: sh.narration } : {}),
+      characters: sh.characters, continueFromPrevious: sh.continueFromPrevious === true,
       ...(str(sh.locationId) ? { locationId: sh.locationId } : {}),
       ...(strs(sh.propIds) ? { propIds: sh.propIds } : {}),
+      ...(str(sh.audioStrategy) && ['native', 'external', 'silent'].includes(sh.audioStrategy) ? { audioStrategy: sh.audioStrategy as Story['shots'][number]['audioStrategy'] } : {}),
+      ...(Array.isArray(sh.performance) ? { performance: sh.performance as Story['shots'][number]['performance'] } : {}),
+      ...(Array.isArray(sh.dialogueEvents) ? { dialogueEvents: sh.dialogueEvents as Story['shots'][number]['dialogueEvents'] } : {}),
+      ...(Array.isArray(sh.shotEvents) ? { shotEvents: sh.shotEvents as Story['shots'][number]['shotEvents'] } : {}),
+      ...(Array.isArray(sh.references) ? { references: sh.references as Story['shots'][number]['references'] } : {}),
+      ...(Array.isArray(sh.acceptance) ? { acceptance: sh.acceptance as Story['shots'][number]['acceptance'] } : {}),
       ...(obj(sh.previz) && ['none', 'rendered', 'approved', 'skipped'].includes(String(sh.previz.status)) ? { previz: sh.previz as unknown as Story['shots'][number]['previz'] } : {}),
     });
   }
@@ -84,7 +92,11 @@ export function migrateStory(v: Record<string, unknown>): Story | null {
     ...(Array.isArray(v.storyBeats) ? { storyBeats: v.storyBeats as Story['storyBeats'] } : {}),
     ...(Array.isArray(v.worldLayouts) ? { worldLayouts: v.worldLayouts as Story['worldLayouts'] } : {}),
     ...(Array.isArray(v.continuityLog) ? { continuityLog: v.continuityLog as Story['continuityLog'] } : {}),
-    shots, ...(str(v.approvedAt) ? { approvedAt: v.approvedAt } : {}), updatedAt: str(v.updatedAt) ? v.updatedAt : new Date(0).toISOString(),
+    shots,
+    ...(str(v.approvedAt) ? { approvedAt: v.approvedAt } : {}),
+    ...(str(v.approvedDocHash) ? { approvedDocHash: v.approvedDocHash } : {}),
+    ...(Number.isSafeInteger(v.approvedDocVersion) ? { approvedDocVersion: v.approvedDocVersion as number } : {}),
+    updatedAt: str(v.updatedAt) ? v.updatedAt : new Date(0).toISOString(),
     consistency: (v.consistency ?? {}) as Story['consistency'],
   };
   try { storyBrief({ ...story, status: 'approved' }); anchorPrompt(story, characters.map(c => c.id)); } catch { return null; }
@@ -117,9 +129,9 @@ export class AgentService {
     };
   }
   story(projectId: string) { return this.stories.get(projectId); }
-  /** Bidirectional sync: when DirectorDocument is saved or approved from the Workbench UI, keep Story / Production Bible unified. */
-  async syncFromDirectorPlan(projectId: string, plan: DirectorPlan, approved: boolean): Promise<Story> {
-    return this.stories.update(projectId, current => mergeDirectorPlanIntoStory(plan, current, approved));
+  /** Bidirectional sync: when DirectorDocument is approved from the Workbench UI, keep Story / Production Bible unified. */
+  async syncFromDirectorPlan(projectId: string, plan: DirectorPlan, approved: boolean, docMeta?: { version?: number; hash?: string }): Promise<Story> {
+    return this.stories.update(projectId, current => mergeDirectorPlanIntoStory(plan, current, approved, docMeta));
   }
   /** Agent-side project data for backups: story, budget ledger and last QC report. Missing documents are omitted. */
   async exportDocs(projectId: string): Promise<Record<'story' | 'ledger' | 'qc', unknown>> {
@@ -186,9 +198,16 @@ export class AgentService {
     const port: AgentPort = Object.create(this.port, { vision: { value: vision, enumerable: true } });
     const ctx: ToolContext = { runId, projectId, signal, port, docs: this.docs(projectId) };
     if (run) {
-      ctx.delegateCrew = async (department: CrewDepartment, task: string, scopedShotIds?: string[]) => {
+      ctx.getBatchReceipt = (batchKey: string) => run.batchReceipts?.[batchKey];
+      ctx.saveBatchItemReceipt = async (batchKey: string, index: number, taskId: string) => {
+        run.batchReceipts ??= {};
+        run.batchReceipts[batchKey] = { ...(run.batchReceipts[batchKey] ?? {}), [index]: taskId };
+        await this.save(run);
+      };
+      ctx.delegateCrew = async (department: CrewDepartment, task: string, scopedShotIds?: string[], execId?: string) => {
         const caps = await this.capabilities();
         const activeToolsList = this.runTools(run, caps.capabilities);
+        const ckKey = execId || `${department}:${task.slice(0, 60)}`;
         const result = await runCrewSubagent({
           department,
           task,
@@ -198,12 +217,33 @@ export class AgentService {
           allTools: activeToolsList,
           resolveSubModel: role => this.options.resolveSubModel ? this.options.resolveSubModel(role) : this.options.resolveModel(),
           fetch: this.options.fetch,
-          onTokenUsage: async (inputTokens, outputTokens, usageKnown, parameters) => {
+          retryDelayMs: this.options.retryBaseMs,
+          checkBudget: next => this.budgetLimit(run, next),
+          onModelTurn: async (inputTokens, outputTokens, usageKnown, parameters) => {
+            run.usage.steps += 1;
             const ledger = await this.ledgers.get(run.projectId);
             const cost = usageKnown && ledger.currency === run.usage.currency ? tokenCost(parameters, inputTokens, outputTokens, run.usage.currency) : null;
             chargeModel(run.usage, inputTokens, outputTokens, cost);
             await this.spend(run.projectId, 'director', cost);
+            await this.save(run);
           },
+          onToolCall: async (risk) => {
+            chargeTool(run.usage, 0, risk);
+            await this.save(run);
+          },
+          checkpoint: run.subagentCheckpoints?.[ckKey],
+          saveCheckpoint: async (checkpoint) => {
+            run.subagentCheckpoints ??= {};
+            run.subagentCheckpoints[ckKey] = checkpoint;
+            await this.save(run);
+          },
+          clearCheckpoint: async () => {
+            if (run.subagentCheckpoints && ckKey in run.subagentCheckpoints) {
+              delete run.subagentCheckpoints[ckKey];
+              await this.save(run);
+            }
+          },
+          trace: entry => this.store.trace(run.id, entry),
         });
         await this.store.trace(run.id, { event: 'subagent.complete', department, task: bound(task, 200) });
         return result;
@@ -390,6 +430,7 @@ export class AgentService {
           const call = run.queue.find(item => item.execId === reference.execId);
           if (call) { run.queue = run.queue.filter(item => item !== call); run.messages.push({ role: 'tool', tool_call_id: call.id, content: '用户拒绝上传参考图片，本次参考图生成未提交。' }); }
           run.approvals = run.approvals?.filter(item => item.execId !== reference.execId);
+          run.referenceGrants = run.referenceGrants?.filter(item => item.execId !== reference.execId);
           delete run.videoReferenceGrant; delete run.pendingVideoReference;
         } else { run.allowImages = false; delete run.visionGrant; }
         delete run.visionConsentRequired; delete run.visionChallengeFingerprint;
@@ -404,7 +445,15 @@ export class AgentService {
         if (challenge.purpose === 'review') run.visionGrant = target.fingerprint;
         else {
           if (!run.pendingVideoReference || run.queue[0]?.execId !== run.pendingVideoReference.execId) throw new Error('原参考图生成工具调用已变更');
-          run.videoReferenceGrant = { ...run.pendingVideoReference, fingerprint: target.fingerprint }; delete run.pendingVideoReference;
+          const p = run.pendingVideoReference;
+          const role = p.role ?? 'video';
+          const assetIds = p.assetIds ?? [p.assetId];
+          run.referenceGrants = [
+            ...(run.referenceGrants ?? []).filter(g => !(g.execId === p.execId && g.role === role)),
+            { execId: p.execId, role, assetIds, fingerprint: target.fingerprint },
+          ];
+          run.videoReferenceGrant = { ...p, fingerprint: target.fingerprint };
+          delete run.pendingVideoReference;
         }
         delete run.visionConsentRequired; delete run.visionChallengeFingerprint;
       }
@@ -509,6 +558,7 @@ export class AgentService {
         catch (error) { if (!(error instanceof UploadConsentRequired)) throw error; this.setVisionChallenge(run, error); await this.save(run); return; }
         delete run.pendingSelfCheck; run.reviewRounds++; meta.dirty = false;
         if (review && !review.pass) { run.messages.push({ role: 'user', content: `自检（第 ${run.reviewRounds} 轮）发现问题，请修复后再总结：\n${review.text}` }); await this.save(run); continue; }
+        if (run.pendingUserMessages?.length) { await this.save(run); continue; }
         const content = run.messages.at(-1)?.content;
         return this.complete(run, typeof content === 'string' ? content : '');
       }
@@ -597,6 +647,7 @@ export class AgentService {
       await this.finishStep(run, step, { status: 'complete', summary: turn.toolCalls.length ? '计划调用：' + turn.toolCalls.map(call => call.name).join(', ') : bound(turn.content, 200) });
       if (turn.toolCalls.length) { run.queue = turn.toolCalls.map(call => ({ ...call, execId: randomUUID() })); await this.save(run); continue; }
       if (turn.finish === 'length') { run.messages.push({ role: 'user', content: '上一条输出被截断，请更简短地继续。' }); continue; }
+      if (run.pendingUserMessages?.length) { await this.save(run); continue; }
       if (meta.dirty && run.reviewRounds < (meta.maxReviewRounds ?? 2)) {
         run.pendingSelfCheck = true; await this.save(run); continue;
       }
@@ -642,31 +693,59 @@ export class AgentService {
       const resolvedRefs = tool.referenceImages
         ? await tool.referenceImages(args, ctx)
         : { assetIds: [await tool.referenceImage!(args, ctx)].filter(Boolean), role: 'video' as const };
-      const assetIds = resolvedRefs.assetIds.filter(Boolean);
-      const primaryImage = assetIds[0] ?? '';
-      if (primaryImage) {
-        const execId = call.execId, grant = run.videoReferenceGrant;
-        const destResolver = resolvedRefs.role === 'image' ? this.port.imageReferenceDestination : this.port.videoReferenceDestination;
-        const target = await destResolver?.call(this.port);
-        const sameAssets = JSON.stringify(grant?.assetIds ?? (grant?.assetId ? [grant.assetId] : [])) === JSON.stringify(assetIds);
-        if (target && (grant?.execId !== execId || !sameAssets || grant.fingerprint !== target.fingerprint)) {
-          this.invalidateVideoApproval(run, call);
-          if (run.pendingVideoReference?.execId !== call.execId || JSON.stringify(run.pendingVideoReference?.assetIds ?? [run.pendingVideoReference?.assetId]) !== JSON.stringify(assetIds)) delete run.visionChallengeFingerprint;
-          delete run.videoReferenceGrant;
-          run.pendingVideoReference = { execId: call.execId!, assetId: primaryImage, assetIds, role: resolvedRefs.role };
-          this.setVisionChallenge(run, new UploadConsentRequired('video-reference', target));
-          await this.save(run); return 'suspend';
+      const groups: ReferenceUploadGroup[] = 'groups' in resolvedRefs
+        ? resolvedRefs.groups.map(g => ({ role: g.role, assetIds: g.assetIds.filter(Boolean) })).filter(g => g.assetIds.length > 0)
+        : (() => {
+            const cleaned = resolvedRefs.assetIds.filter(Boolean);
+            return cleaned.length ? [{ role: resolvedRefs.role, assetIds: cleaned }] : [];
+          })();
+
+      if (groups.length) {
+        const execId = call.execId!;
+        for (const group of groups) {
+          const destResolver = group.role === 'image' ? this.port.imageReferenceDestination : this.port.videoReferenceDestination;
+          const target = await destResolver?.call(this.port);
+          if (!target) continue;
+          const matchingGrant = (run.referenceGrants ?? []).find(g =>
+            g.execId === execId
+            && g.role === group.role
+            && JSON.stringify(g.assetIds) === JSON.stringify(group.assetIds)
+            && g.fingerprint === target.fingerprint,
+          );
+          if (!matchingGrant) {
+            this.invalidateVideoApproval(run, call);
+            const curExecId = call.execId!;
+            if (curExecId !== execId) {
+              run.referenceGrants = (run.referenceGrants ?? []).filter(g => g.execId !== execId);
+            }
+            const p = run.pendingVideoReference;
+            if (p?.execId !== curExecId || p.role !== group.role || JSON.stringify(p.assetIds ?? [p.assetId]) !== JSON.stringify(group.assetIds)) {
+              delete run.visionChallengeFingerprint;
+            }
+            run.pendingVideoReference = { execId: curExecId, assetId: group.assetIds[0]!, assetIds: group.assetIds, role: group.role };
+            this.setVisionChallenge(run, new UploadConsentRequired('video-reference', target));
+            await this.save(run);
+            return 'suspend';
+          }
         }
+        const allAssetIds = [...new Set(groups.flatMap(g => g.assetIds))];
+        const primaryGroup = groups[0]!;
         ctx.videoReference = {
-          assetId: primaryImage,
-          assetIds,
-          role: resolvedRefs.role,
+          assetId: primaryGroup.assetIds[0]!,
+          assetIds: allAssetIds,
+          role: primaryGroup.role,
           authorizeUpload: destination => {
-            if (!grant || grant.fingerprint !== destination.fingerprint) throw new UploadConsentRequired('video-reference', destination);
+            const ok = (run.referenceGrants ?? []).some(g => g.execId === execId && g.fingerprint === destination.fingerprint);
+            if (!ok) throw new UploadConsentRequired('video-reference', destination);
+          },
+          authorizeRoleUpload: role => destination => {
+            const ok = (run.referenceGrants ?? []).some(g => g.execId === execId && g.role === role && g.fingerprint === destination.fingerprint);
+            if (!ok) throw new UploadConsentRequired('video-reference', destination);
           },
         };
       } else {
         if (run.videoReferenceGrant?.execId === call.execId) { this.invalidateVideoApproval(run, call); delete run.videoReferenceGrant; }
+        run.referenceGrants = (run.referenceGrants ?? []).filter(g => g.execId !== call.execId);
         if (run.pendingVideoReference?.execId === call.execId) { delete run.pendingVideoReference; delete run.visionConsentRequired; delete run.visionChallengeFingerprint; }
       }
     }
@@ -688,7 +767,8 @@ export class AgentService {
     run.message = '执行工具：' + tool.name; await this.save(run);
     let result: ToolResult;
     const sideEffect = tool.risk === 'cost' || tool.risk === 'export';
-    const work = () => tool.run({ ...args, __callId: call.execId }, ctx);
+    const noOuterRetry = sideEffect || tool.name === 'delegate_crew' || tool.name === 'delegate_scene_code';
+    const work = () => tool.run({ ...args, __callId: call.execId, __toolCallId: call.id }, ctx);
     if (sideEffect) { run.inFlight = { execId: call.execId!, tool: tool.name, argsHash: hash, startedAt: now() }; await this.save(run); }
     let finalLimit: string | null;
     try { finalLimit = await this.budgetLimit(run, 'tool'); signal.throwIfAborted(); }
@@ -700,17 +780,37 @@ export class AgentService {
       await this.store.trace(run.id, { event: 'budget', reason: finalLimit, usage: run.usage, pendingCalls: run.queue.map(call => call.name) });
       await this.save(run); return 'suspend';
     }
-    try { result = sideEffect ? await (async () => { step.attempts = 1; return work(); })() : await this.withRetry(run, step, work, signal); }
+    try { result = noOuterRetry ? await (async () => { step.attempts = 1; return work(); })() : await this.withRetry(run, step, work, signal); }
     catch (error) {
       if (signal.aborted) throw error;
       delete run.inFlight;
+      if (error instanceof SubagentBudgetExceededError) {
+        await this.finishStep(run, step, { status: 'skipped', summary: '子代理触及预算上限：' + error.reason });
+        run.status = 'budget_exceeded'; run.message = '已停止：' + error.reason;
+        await this.store.trace(run.id, { event: 'budget', reason: error.reason, usage: run.usage, pendingCalls: run.queue.map(c => c.name) });
+        await this.save(run); return 'suspend';
+      }
       if (error instanceof UploadConsentRequired) {
         if (error.purpose === 'video-reference' && ctx.videoReference) {
           if (grant >= 0) call.execId = randomUUID();
           delete run.videoReferenceGrant;
+          run.referenceGrants = (run.referenceGrants ?? []).filter(g => g.execId !== call.execId);
           run.pendingVideoReference = { execId: call.execId, assetId: ctx.videoReference.assetId, assetIds: ctx.videoReference.assetIds, role: ctx.videoReference.role };
         }
         await this.finishStep(run, step, { status: 'skipped', summary: error.message }); this.setVisionChallenge(run, error); await this.save(run); return 'suspend';
+      }
+      // If a partially submitted batch failed on item k>0 after submitting item 0..k-1, preserve call in queue & pause!
+      if (tool.name === 'batch_generate_media' && run.batchReceipts?.[call.id] && Object.keys(run.batchReceipts[call.id]!).length > 0) {
+        const msg = errorText(error);
+        await this.finishStep(run, step, { status: 'failed', error: '批次部分子项已提交，保留回执待恢复：' + msg });
+        run.status = 'paused'; run.error = msg; run.message = `批次生成中途暂停（已保存已受理子项回执，点继续可衔接剩余子项，不会重复计费）：${msg}`;
+        await this.save(run); return 'suspend';
+      }
+      // If delegate_crew exhausted per-turn model retries on a 503/network error, keep call at queue[0] so resume() picks up from subagentCheckpoints[execId]!
+      if (tool.name === 'delegate_crew' && classify(error) === 'retry') {
+        const msg = errorText(error);
+        await this.finishStep(run, step, { status: 'failed', error: msg });
+        throw error;
       }
       const state = submissionOf(error) ?? (classify(error) === 'retry' ? 'unknown' : undefined);
       if (sideEffect && state === 'unknown') {
@@ -733,6 +833,8 @@ export class AgentService {
     const receipt: ToolSuccessReceipt = { execId: call.execId!, tool: tool.name, argsHash: hash, risk: tool.risk, stepIndex: step.index, at: now(), result };
     if (sideEffect) await this.store.saveToolSuccess(run.id, receipt);
     if (run.videoReferenceGrant?.execId === call.execId) delete run.videoReferenceGrant;
+    run.referenceGrants = (run.referenceGrants ?? []).filter(g => g.execId !== call.execId);
+    if (run.batchReceipts && call.id in run.batchReceipts) delete run.batchReceipts[call.id];
     await this.settleToolSuccess(run, receipt);
     signal.throwIfAborted(); return 'next';
   }
@@ -756,9 +858,20 @@ export class AgentService {
     const meta = run as AgentRun & { dirty?: boolean };
     let result = receipt.result;
     if (!(run.settledToolExecIds ?? []).includes(key)) {
-      chargeTool(run.usage, result.cost, receipt.risk); (run.settledToolExecIds ??= []).push(key);
+      chargeTool(run.usage, result.cost, receipt.risk);
+      if (receipt.risk === 'cost' && result.waitForBatch && result.waitForBatch.ids.length > 1) {
+        run.usage.unknownCostCalls += result.waitForBatch.ids.length - 1;
+      }
+      (run.settledToolExecIds ??= []).push(key);
     }
-    if (receipt.risk === 'cost') await this.spend(run.projectId, receipt.tool, (result.waitFor || result.waitForBatch) ? null : result.cost, false, key);
+    if (receipt.risk === 'cost') {
+      await this.spend(run.projectId, receipt.tool, (result.waitFor || result.waitForBatch) ? null : result.cost, false, key);
+      if (result.waitForBatch && result.waitForBatch.ids.length > 1) {
+        for (let extra = 1; extra < result.waitForBatch.ids.length; extra++) {
+          await this.spend(run.projectId, receipt.tool, null, false, `${key}.item.${extra}`);
+        }
+      }
+    }
     if (receipt.risk === 'write') meta.dirty = true;
     if (result.images?.length) result = { ...result, content: result.content + '（旧回执含截取画面，请重新使用 capture_frame 获取视觉描述）' };
     const step = run.steps[receipt.stepIndex]; if (step) await this.finishStep(run, step, { status: 'complete', summary: bound(result.content, 300) });
@@ -803,14 +916,20 @@ export class AgentService {
       }));
       const finishedCount = states.filter(s => !s.ok || terminal.has(s.state)).length;
       if (finishedCount === states.length) {
-        let knownBatchCost = 0, anyKnown = false;
         const outcomes: Record<string, unknown>[] = [];
-        for (const item of states) {
+        for (const [idx, item] of states.entries()) {
           if (item.value.usage && typeof (item.value.usage as { cost?: unknown }).cost === 'number') {
-            knownBatchCost += (item.value.usage as { cost: number }).cost;
-            anyKnown = true;
+            const itemCost = (item.value.usage as { cost: number }).cost;
+            const itemKey = `${run.id}.${batch.execId ?? batch.callId}.item.${idx}.settled`;
+            if (!run.settledToolExecIds?.includes(itemKey)) {
+              run.usage.cost += itemCost;
+              run.usage.unknownCostCalls = Math.max(0, run.usage.unknownCostCalls - 1);
+              (run.settledToolExecIds ??= []).push(itemKey);
+            }
+            await this.spend(run.projectId, 'media', itemCost, true, itemKey);
           }
           let appliedAssetIds: string[] | undefined;
+          let applyError: string | undefined;
           if (item.state === 'ready' && batch.autoApplyShots?.[item.id]) {
             try {
               const cur = await this.port.snapshot(run.projectId);
@@ -820,32 +939,40 @@ export class AgentService {
                   const av = applied.value as { applied?: { assetIds?: string[] }; assetIds?: string[] };
                   appliedAssetIds = av.applied?.assetIds ?? av.assetIds;
                   (run as AgentRun & { dirty?: boolean }).dirty = true;
+                } else if (!applied.ok) {
+                  applyError = applied.error?.message;
                 }
               }
-            } catch { /* Caller can still apply manually if concurrent edit occurred */ }
+            } catch (err) {
+              applyError = errorText(err);
+            }
           }
           outcomes.push({
             taskId: item.id,
             shotId: batch.autoApplyShots?.[item.id],
             state: appliedAssetIds ? 'applied' : item.state,
             ...(appliedAssetIds ? { assetIds: appliedAssetIds } : {}),
-            ...(item.value.error || item.error ? { error: item.value.error ?? item.error } : {}),
+            ...(item.value.error || item.error || applyError ? { error: item.value.error ?? item.error ?? applyError } : {}),
           });
         }
-        if (anyKnown) {
-          const key = run.id + '.' + (batch.execId ?? batch.callId) + '.batch_settled';
-          if (!run.settledToolExecIds?.includes(key)) {
-            run.usage.cost += knownBatchCost;
-            run.usage.unknownCostCalls = Math.max(0, run.usage.unknownCostCalls - 1);
-            (run.settledToolExecIds ??= []).push(key);
-          }
-          await this.spend(run.projectId, 'media', knownBatchCost, true, key);
-        }
+        const succeededCount = outcomes.filter(o => o.state === 'applied' || o.state === 'ready' || o.state === 'complete').length;
+        const failedCount = outcomes.length - succeededCount;
         const latestRev = (await this.port.snapshot(run.projectId)).project?.revision;
-        run.messages.push({ role: 'tool', tool_call_id: batch.callId, content: bound(JSON.stringify({ ok: true, revision: latestRev, results: outcomes })) });
+        run.messages.push({
+          role: 'tool',
+          tool_call_id: batch.callId,
+          content: bound(JSON.stringify({
+            ok: failedCount === 0,
+            partial: succeededCount > 0 && failedCount > 0,
+            succeededCount,
+            failedCount,
+            revision: latestRev,
+            results: outcomes,
+          })),
+        });
         delete run.waitingBatch;
         run.status = 'running';
-        run.message = `批次并发生成已完成（${outcomes.length} 项）`;
+        run.message = failedCount === 0 ? `批次并发生成已完成（${outcomes.length} 项）` : `批次并发生成已结束（成功 ${succeededCount}/${outcomes.length}，失败 ${failedCount} 项）`;
         await this.save(run);
         return;
       }
