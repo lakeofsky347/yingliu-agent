@@ -8,10 +8,12 @@ export interface ProjectSummaryOptions {
   shotOffset?: number;
   shotLimit?: number;
   shotIds?: string[];
+  assetOffset?: number;
+  assetLimit?: number;
   maxChars?: number;
 }
 
-/** Bounded, path-free project summary with complete shot, asset, audio-clip, and NLE metadata (supports pagination for 120-shot films). */
+/** Bounded, path-free project summary with complete shot, asset, audio-clip, and NLE metadata (supports pagination for 120-shot & multi-asset films). */
 export function summarizeProject(project: VideoProject | null, options: ProjectSummaryOptions = {}): Record<string, unknown> {
   if (!project) return { project: null };
   const fps = project.target.fps.num / project.target.fps.den;
@@ -39,59 +41,130 @@ export function summarizeProject(project: VideoProject | null, options: ProjectS
   const requestedLimit = wantedSet ? allOrdered.length : Math.max(1, Math.min(120, Math.floor(options.shotLimit ?? allOrdered.length)));
   const candidates = wantedSet ? allOrdered.filter(s => wantedSet.has(s.id)) : allOrdered.slice(offset, offset + requestedLimit);
 
-  const buildBase = (shotsSlice: typeof candidates, paged: boolean) => ({
-    id: project.id, title: project.title, topic: project.topic, revision: project.revision, targetDuration: project.targetDuration,
-    target: { width: project.target.width, height: project.target.height, fps, audioMode: project.target.audioMode },
-    totalShots: allOrdered.length,
-    shotOrder: order,
-    shots: shotsSlice.map(mapShot),
-    ...(paged ? {
-      pagination: {
-        totalShots: allOrdered.length,
-        offset,
-        returnedShots: shotsSlice.length,
-        hasMore: !wantedSet && (offset + shotsSlice.length < allOrdered.length),
-        ...(wantedSet || offset + shotsSlice.length >= allOrdered.length ? {} : { nextOffset: offset + shotsSlice.length }),
-        hint: '当前为分页镜头详情；全部镜头顺序见 shotOrder，可用 project_get({ shotOffset, shotLimit }) 读取后续镜头',
-      },
-    } : {}),
-    assets: project.assets.map(asset => ({
-      id: asset.id, kind: asset.kind, name: asset.name, description: untrusted(asset.description ?? '', 300),
-      ...(asset.duration !== undefined ? { duration: +(asset.duration).toFixed(2) } : {}),
-      ...(asset.width !== undefined && asset.height !== undefined ? { width: asset.width, height: asset.height } : {}),
-      ...(asset.fps ? { fps: +(asset.fps.num / asset.fps.den).toFixed(2) } : {}),
-      ...(asset.hasAudio !== undefined ? { hasAudio: asset.hasAudio } : {}),
-      ...(asset.provenance ? { provenance: asset.provenance } : {}),
-    })),
-    videoClips: (project.videoClips ?? []).map(clip => ({ id: clip.id, shotId: clip.shotId, assetId: clip.assetId, trimStart: clip.trimStart, trimEnd: clip.trimEnd, speed: clip.speed, fit: clip.fit, audio: clip.audio })),
-    audio: project.audioClips?.length ?? 0,
-    audioClips: (project.audioClips ?? []).map(clip => ({
-      id: clip.id, assetId: clip.assetId, role: clip.role, ...(clip.shotId ? { shotId: clip.shotId } : {}),
-      startSeconds: clip.startSeconds, trimStart: clip.trimStart, ...(clip.trimEnd !== undefined ? { trimEnd: clip.trimEnd } : {}),
-      volume: clip.volume, fadeIn: clip.fadeIn, fadeOut: clip.fadeOut, ...(clip.loop ? { loop: true } : {}),
-      ...(clip.characterId ? { characterId: clip.characterId } : {}), ...(clip.speaker ? { speaker: clip.speaker } : {}),
-    })),
-    ...(project.overlayClips?.length ? { overlayClips: project.overlayClips } : {}),
-    ...(project.subtitles?.length ? { subtitlesCount: project.subtitles.length } : {}),
-    ...(project.audioMix ? { audioMix: project.audioMix } : {}),
-    ...(project.extensions.directorDocument ? { hasDirectorDocument: true } : {}),
-    ...(project.productionPolicy ? { productionPolicy: { mode: project.productionPolicy.mode, baseMode: project.productionPolicy.baseMode, allowGeneratedImages: project.productionPolicy.allowGeneratedImages, allowImportedVideo: project.productionPolicy.allowImportedVideo } } : {}),
-    ...(videoStyle ? { videoStyle: { ...videoStyle, name: untrusted(videoStyle.name), description: untrusted(videoStyle.description), prompt: untrusted(videoStyle.prompt, 1200) } } : {}),
+  const assetOff = Math.max(0, Math.min(project.assets.length, Math.floor(options.assetOffset ?? 0)));
+  const requestedAssetLimit = Math.max(1, Math.min(500, Math.floor(options.assetLimit ?? project.assets.length)));
+  const assetCandidates = project.assets.slice(assetOff, assetOff + requestedAssetLimit);
+  const explicitAssetPaging = options.assetOffset !== undefined || options.assetLimit !== undefined;
+
+  const mapAsset = (asset: VideoProject['assets'][number], descMax = 300) => ({
+    id: asset.id, kind: asset.kind, name: asset.name, description: untrusted(asset.description ?? '', descMax),
+    ...(asset.duration !== undefined ? { duration: +(asset.duration).toFixed(2) } : {}),
+    ...(asset.width !== undefined && asset.height !== undefined ? { width: asset.width, height: asset.height } : {}),
+    ...(asset.fps ? { fps: +(asset.fps.num / asset.fps.den).toFixed(2) } : {}),
+    ...(asset.hasAudio !== undefined ? { hasAudio: asset.hasAudio } : {}),
+    ...(asset.provenance ? { provenance: asset.provenance } : {}),
   });
+
+  const buildBase = (
+    shotsSlice: typeof candidates,
+    pagedShots: boolean,
+    assetsSlice: typeof assetCandidates,
+    compactMode = false,
+  ) => {
+    const activeShotIds = new Set(shotsSlice.map(s => s.id));
+    const vClipsAll = project.videoClips ?? [];
+    const aClipsAll = project.audioClips ?? [];
+    const oClipsAll = project.overlayClips ?? [];
+    const vClips = compactMode && pagedShots ? vClipsAll.filter(c => activeShotIds.has(c.shotId)) : vClipsAll;
+    const aClips = compactMode && pagedShots ? aClipsAll.filter(c => !c.shotId || activeShotIds.has(c.shotId)) : aClipsAll;
+    const oClips = compactMode && pagedShots ? oClipsAll.filter(c => activeShotIds.has(c.shotId)) : oClipsAll;
+    const pagedAssets = explicitAssetPaging || assetsSlice.length < project.assets.length;
+    return {
+      id: project.id, title: project.title, topic: project.topic, revision: project.revision, targetDuration: project.targetDuration,
+      target: { width: project.target.width, height: project.target.height, fps, audioMode: project.target.audioMode },
+      totalShots: allOrdered.length,
+      shotOrder: order,
+      shots: shotsSlice.map(mapShot),
+      ...(pagedShots ? {
+        pagination: {
+          totalShots: allOrdered.length,
+          offset,
+          returnedShots: shotsSlice.length,
+          hasMore: !wantedSet && (offset + shotsSlice.length < allOrdered.length),
+          ...(wantedSet || offset + shotsSlice.length >= allOrdered.length ? {} : { nextOffset: offset + shotsSlice.length }),
+          hint: '当前为分页镜头详情；全部镜头顺序见 shotOrder，可用 project_get({ shotOffset, shotLimit }) 读取后续镜头',
+        },
+      } : {}),
+      totalAssets: project.assets.length,
+      assets: assetsSlice.map(a => mapAsset(a, compactMode ? 60 : 300)),
+      ...(pagedAssets ? {
+        assetsPagination: {
+          totalAssets: project.assets.length,
+          offset: assetOff,
+          returnedAssets: assetsSlice.length,
+          hasMore: assetOff + assetsSlice.length < project.assets.length,
+          ...(assetOff + assetsSlice.length < project.assets.length ? { nextAssetOffset: assetOff + assetsSlice.length } : {}),
+          hint: '素材较多已分页返回；可用 project_get({ assetOffset, assetLimit }) 读取后续素材',
+        },
+      } : {}),
+      videoClips: vClips.map(clip => ({ id: clip.id, shotId: clip.shotId, assetId: clip.assetId, trimStart: clip.trimStart, trimEnd: clip.trimEnd, speed: clip.speed, fit: clip.fit, audio: clip.audio })),
+      audio: aClipsAll.length,
+      audioClips: aClips.map(clip => ({
+        id: clip.id, assetId: clip.assetId, role: clip.role, ...(clip.shotId ? { shotId: clip.shotId } : {}),
+        startSeconds: clip.startSeconds, trimStart: clip.trimStart, ...(clip.trimEnd !== undefined ? { trimEnd: clip.trimEnd } : {}),
+        volume: clip.volume, fadeIn: clip.fadeIn, fadeOut: clip.fadeOut, ...(clip.loop ? { loop: true } : {}),
+        ...(clip.characterId ? { characterId: clip.characterId } : {}), ...(clip.speaker ? { speaker: clip.speaker } : {}),
+      })),
+      ...(oClips.length ? { overlayClips: oClips } : {}),
+      ...(project.subtitles?.length ? { subtitlesCount: project.subtitles.length } : {}),
+      ...(project.audioMix ? { audioMix: project.audioMix } : {}),
+      ...(project.extensions.directorDocument ? { hasDirectorDocument: true } : {}),
+      ...(project.productionPolicy ? { productionPolicy: { mode: project.productionPolicy.mode, baseMode: project.productionPolicy.baseMode, allowGeneratedImages: project.productionPolicy.allowGeneratedImages, allowImportedVideo: project.productionPolicy.allowImportedVideo } } : {}),
+      ...(videoStyle ? { videoStyle: { ...videoStyle, name: untrusted(videoStyle.name), description: untrusted(videoStyle.description), prompt: untrusted(videoStyle.prompt, 1200) } } : {}),
+    };
+  };
 
   const explicitPaging = options.shotOffset !== undefined || options.shotLimit !== undefined || Boolean(wantedSet);
   if (!options.maxChars) {
-    return buildBase(candidates, explicitPaging || candidates.length < allOrdered.length);
+    return buildBase(candidates, explicitPaging || candidates.length < allOrdered.length, assetCandidates, false);
   }
 
-  // Adaptive shrink so serialized JSON is ALWAYS 100% valid and within `options.maxChars`!
-  let count = candidates.length;
-  while (count > 1) {
-    const attempt = buildBase(candidates.slice(0, count), explicitPaging || count < allOrdered.length || offset > 0);
-    if (JSON.stringify(attempt).length <= options.maxChars) return attempt;
-    count = Math.max(1, Math.floor(count * 0.65));
+  // Phase 1: Try keeping full assets while shrinking shot slice (when assets themselves fit comfortably)
+  const assetsRawEstimate = JSON.stringify(assetCandidates).length;
+  if (assetsRawEstimate <= options.maxChars * 0.55) {
+    let count = Math.max(candidates.length, 0);
+    while (count > 1) {
+      const attempt = buildBase(candidates.slice(0, count), explicitPaging || count < allOrdered.length || offset > 0, assetCandidates, false);
+      if (JSON.stringify(attempt).length <= options.maxChars) return attempt;
+      count = Math.max(1, Math.floor(count * 0.65));
+    }
+    const singleShotSlice = candidates.slice(0, Math.min(1, candidates.length));
+    const fullAssetsAttempt = buildBase(singleShotSlice, explicitPaging || singleShotSlice.length < allOrdered.length || offset > 0, assetCandidates, false);
+    if (JSON.stringify(fullAssetsAttempt).length <= options.maxChars) return fullAssetsAttempt;
   }
-  return buildBase(candidates.slice(0, 1), explicitPaging || allOrdered.length > 1);
+
+  // Phase 2: Many assets/clips (e.g. 60+ assets) — preserve requested shot page first while compacting & paginating assets so JSON NEVER exceeds maxChars!
+  let shotCount = Math.max(candidates.length, 0);
+  while (shotCount >= 1) {
+    const targetShots = candidates.slice(0, shotCount);
+    const referencedIds = new Set<string>();
+    for (const s of targetShots) {
+      for (const id of s.assetIds ?? []) referencedIds.add(id);
+      for (const id of s.referenceIds ?? []) referencedIds.add(id);
+    }
+    const prioritizedAssets = explicitAssetPaging
+      ? assetCandidates
+      : [
+          ...assetCandidates.filter(a => referencedIds.has(a.id)),
+          ...assetCandidates.filter(a => !referencedIds.has(a.id)),
+        ];
+    let assetCount = prioritizedAssets.length;
+    while (assetCount >= 0) {
+      const attempt = buildBase(
+        targetShots,
+        explicitPaging || targetShots.length < allOrdered.length || offset > 0,
+        prioritizedAssets.slice(0, assetCount),
+        true,
+      );
+      if (JSON.stringify(attempt).length <= options.maxChars) return attempt;
+      if (assetCount === 0) break;
+      assetCount = assetCount === 1 ? 0 : Math.max(1, Math.floor(assetCount * 0.6));
+    }
+    if (shotCount === 1) break;
+    shotCount = Math.max(1, Math.floor(shotCount * 0.65));
+  }
+  const fallbackShots = candidates.slice(0, Math.min(1, candidates.length));
+  return buildBase(fallbackShots, explicitPaging || fallbackShots.length < allOrdered.length || offset > 0, [], true);
 }
 
 /** User-supplied material may carry prompt injection: mark it as data, never instructions. */

@@ -10,6 +10,13 @@ export type CrewDepartment = 'screenwriter' | 'art_director' | 'cinematographer'
 
 export interface ReferenceUploadGroup { role: 'image' | 'video'; assetIds: string[] }
 
+export interface SubagentSkippedTool {
+  id?: string;
+  tool: string;
+  reason: string;
+  kind: 'precondition' | 'turn_limit';
+}
+
 export interface SubagentCheckpoint {
   department: CrewDepartment;
   messages: AgentMessage[];
@@ -17,13 +24,17 @@ export interface SubagentCheckpoint {
   pendingCalls: ToolCall[];
   executedTools: string[];
   failedTools: { tool: string; error: string }[];
+  skippedTools?: SubagentSkippedTool[];
   latestRevision?: number;
+  completedResult?: ToolResult;
 }
 
 export interface ToolContext {
   runId: string; projectId: string; signal: AbortSignal; port: AgentPort;
   /** Per-project structured plan (story.json / Production Bible) and spend ledger. */
   docs: AgentDocs;
+  /** Non-empty when running inside a shot-scoped crew sub-agent sandbox. */
+  scopedShotIds?: ReadonlySet<string>;
   videoReference?: {
     assetId: string;
     assetIds?: string[];
@@ -35,7 +46,7 @@ export interface ToolContext {
   delegateCrew?: (department: CrewDepartment, task: string, shotIds?: string[], execId?: string) => Promise<ToolResult>;
   /** Durable per-item submission receipts for batch media tools so partial failures never duplicate paid requests. */
   getBatchReceipt?: (batchKey: string) => Record<number, string> | undefined;
-  saveBatchItemReceipt?: (batchKey: string, index: number, taskId: string) => Promise<void>;
+  saveBatchItemReceipt?: (batchKey: string, index: number, taskId: string, shotId?: string) => Promise<void>;
 }
 export interface AgentDocs {
   story(): Promise<Story>;
@@ -117,7 +128,7 @@ export interface AgentRun {
   queue: ToolCall[];
   pending?: PendingApproval;
   waiting?: { kind: 'media' | 'workflow'; id: string; callId: string; execId?: string };
-  waitingBatch?: { kind: 'media'; ids: string[]; callId: string; execId?: string; autoApplyShots?: Record<string, string> };
+  waitingBatch?: { kind: 'media'; ids: string[]; callId: string; execId?: string; autoApplyShots?: Record<string, string>; uncertainCount?: number; uncertainError?: string };
   taskRefs?: (ProjectTaskRef & { callId: string; execId?: string })[];
   /** Usage settlement keys already applied to this snapshot; the project ledger has its own atomic deduplication. */
   settledToolExecIds?: string[];
@@ -135,6 +146,7 @@ export interface AgentRun {
   pendingVideoReference?: { execId: string; assetId: string; assetIds?: string[]; role?: 'image' | 'video' };
   subagentCheckpoints?: Record<string, SubagentCheckpoint>;
   batchReceipts?: Record<string, Record<number, string>>;
+  batchReceiptShots?: Record<string, Record<number, string>>;
   /** Reflection was interrupted before a request was authorized. */
   pendingSelfCheck?: boolean;
   /** Paid/side-effect submissions whose outcome is unknown (accepted-then-lost response). Never auto-resubmitted. */
@@ -152,7 +164,7 @@ export interface AgentStartInput {
   allowImages?: boolean; maxReviewRounds?: number;
 }
 export type AgentEvent = { type: 'run'; run: PublicRun } | { type: 'step'; runId: string; step: RunStep } | { type: 'delta'; runId: string; text: string };
-export type PublicRun = Omit<AgentRun, 'messages'|'visionGrant'|'visionChallengeFingerprint'|'pendingSelfCheck'|'videoReferenceGrant'|'referenceGrants'|'pendingVideoReference'|'subagentCheckpoints'|'batchReceipts'> & { transcript: { role: string; content: string; tool?: string }[] };
+export type PublicRun = Omit<AgentRun, 'messages'|'visionGrant'|'visionChallengeFingerprint'|'pendingSelfCheck'|'videoReferenceGrant'|'referenceGrants'|'pendingVideoReference'|'subagentCheckpoints'|'batchReceipts'|'batchReceiptShots'> & { transcript: { role: string; content: string; tool?: string }[] };
 
 /** Narrow host surface the agent may touch. Never exposes file paths or credentials. */
 export interface AgentPort {

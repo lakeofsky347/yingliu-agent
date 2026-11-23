@@ -69,3 +69,12 @@ export function templateMaxImages(parameters: Record<string, unknown>): number {
   return 0;
 }
 
+export function templateAcceptsLipSync(parameters: Record<string, unknown>): boolean {
+  const preset = typeof parameters.preset === 'string' ? TEMPLATE_PRESETS[parameters.preset] : undefined;
+  const body = parameters.submitBody ?? preset?.template.submitBody;
+  if (typeof body !== 'string') return false;
+  const hasVideo = /\{\{\s*(?:video|param\.videoDataUrl)\s*(?:\|[^}]*)?\}\}/.test(body);
+  const hasAudio = /\{\{\s*(?:audio|param\.audioDataUrl)\s*(?:\|[^}]*)?\}\}/.test(body);
+  return hasVideo && hasAudio;
+}
+

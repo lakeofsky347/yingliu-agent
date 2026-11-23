@@ -32,35 +32,35 @@ export const CREW_SPECS: Record<CrewDepartment, CrewSpec> = {
     department: 'art_director',
     title: '美术与资产设定师',
     preferRole: 'director',
-    allowedTools: ['project_get', 'bible_get', 'styles_list', 'project_set_style', 'character_upsert', 'location_upsert', 'prop_upsert', 'continuity_log_upsert', 'skill_read'],
+    allowedTools: ['project_get', 'bible_get', 'story_get', 'styles_list', 'project_set_style', 'character_upsert', 'location_upsert', 'prop_upsert', 'continuity_log_upsert', 'skill_read'],
     systemRole: '你是剧组的「美术与资产设定师」。负责统一全片视觉美学、色彩体系（Palette），建立并完善角色外观特征库、固定场景母版库（Locations）、关键叙事道具库（Props）与场记连续性设定。',
   },
   cinematographer: {
     department: 'cinematographer',
     title: '3D 预演与摄影指导 (DP)',
     preferRole: 'director',
-    allowedTools: ['project_get', 'bible_get', 'env_check', 'skill_read', 'blender_render_previz', 'continuity_log_upsert', 'shot_patch'],
+    allowedTools: ['project_get', 'bible_get', 'story_get', 'env_check', 'skill_read', 'blender_render_previz', 'continuity_log_upsert', 'shot_patch'],
     systemRole: '你是剧组的「3D 预演与摄影指导（DP）」。精通焦距景别（24/35/50/85mm）、景深光圈 fStop、180° 轴线规则、演员走位调度与电影布光，使用 Blender 渲染带姿态走位与 Z-Depth 深度图的预演资产。',
   },
   scene_coder: {
     department: 'scene_coder',
     title: '动态图形与场景代码师',
     preferRole: 'scene',
-    allowedTools: ['project_get', 'bible_get', 'shot_read_source', 'shot_write_source', 'shot_patch', 'render_check', 'skill_read'],
+    allowedTools: ['project_get', 'bible_get', 'story_get', 'shot_read_source', 'shot_write_source', 'shot_patch', 'render_check', 'skill_read'],
     systemRole: '你是剧组的「动态图形与场景代码师」。专注编写高审美、帧确定性的 HTML/CSS/SVG/Canvas 2D 镜头源码（严禁使用非确定性定时器或外链），每次写入后必须执行 render_check 确保零报错。',
   },
   sound_director: {
     department: 'sound_director',
     title: '声音与对白表演师',
     preferRole: 'director',
-    allowedTools: ['project_get', 'bible_get', 'audio_edit', 'align_to_voice', 'synthesize_sfx', 'audio_mix_master', 'audio_analyze', 'video_clip_extract', 'skill_read'],
+    allowedTools: ['project_get', 'bible_get', 'story_get', 'audio_edit', 'align_to_voice', 'synthesize_sfx', 'audio_mix_master', 'audio_analyze', 'video_clip_extract', 'skill_read'],
     systemRole: '你是剧组的「声音与对白表演师」。负责音轨精修、多句对白话轮顺序排布、离线程序化拟音合成（雨声/脚步/心跳/Riser）、人声触发 BGM 自动闪避（Ducking）与 -14 LUFS 响度达标检查。',
   },
   post_editor_qc: {
     department: 'post_editor_qc',
     title: '精剪调色与多模质检师',
     preferRole: 'director',
-    allowedTools: ['project_get', 'bible_get', 'shot_patch', 'video_clip_save', 'shot_take_manage', 'post_overlay_subtitle', 'reframe_project', 'render_check', 'quality_check', 'audio_analyze', 'visual_review', 'temporal_video_review', 'consistency_review', 'skill_read'],
+    allowedTools: ['project_get', 'bible_get', 'story_get', 'shot_patch', 'video_clip_save', 'shot_take_manage', 'post_overlay_subtitle', 'reframe_project', 'render_check', 'quality_check', 'audio_analyze', 'visual_review', 'temporal_video_review', 'consistency_review', 'skill_read'],
     systemRole: '你是剧组的「精剪调色与多模质检师」。负责双镜头叠化转场、B-Roll 画中画、逐镜色温曝光匹配调色、全局时间轴字幕精修，以及执行 5 帧时序宫格视觉审片与声画导出前全量质检。',
   },
 };
@@ -185,6 +185,16 @@ function buildScopedToolContext(baseCtx: ToolContext, scope: ReadonlySet<string>
         throw new Error(`越界拦截：范围外镜头 ${oldShot.id} 的画中画图层被改动`);
       }
     }
+    const oldUnscopedSubs = (before.subtitles ?? []).filter(c => !c.shotId || !scope.has(c.shotId));
+    const newUnscopedSubs = (after.subtitles ?? []).filter(c => !c.shotId || !scope.has(c.shotId));
+    if (JSON.stringify(oldUnscopedSubs) !== JSON.stringify(newUnscopedSubs)) {
+      throw new Error('越界拦截：禁止修改或清空范围外镜头的字幕');
+    }
+    const oldGlobalAClips = (before.audioClips ?? []).filter(c => !c.shotId);
+    const newGlobalAClips = (after.audioClips ?? []).filter(c => !c.shotId);
+    if (JSON.stringify(oldGlobalAClips) !== JSON.stringify(newGlobalAClips)) {
+      throw new Error('越界拦截：限定镜头范围时禁止修改全局背景音轨');
+    }
   };
 
   const scopedPort: AgentPort = Object.create(baseCtx.port, {
@@ -217,7 +227,7 @@ function buildScopedToolContext(baseCtx: ToolContext, scope: ReadonlySet<string>
       },
     },
   });
-  return { ...baseCtx, port: scopedPort };
+  return { ...baseCtx, port: scopedPort, scopedShotIds: scope };
 }
 
 export interface SubagentRunOptions {
@@ -246,6 +256,10 @@ export interface SubagentRunOptions {
 export async function runCrewSubagent(opts: SubagentRunOptions): Promise<ToolResult> {
   const spec = CREW_SPECS[opts.department];
   if (!spec) throw new Error('未知的剧组部门：' + String(opts.department));
+  if (opts.checkpoint?.completedResult) {
+    return structuredClone(opts.checkpoint.completedResult);
+  }
+
   const allowed = new Set(spec.allowedTools);
   const subTools = opts.allTools.filter(tool =>
     allowed.has(tool.name)
@@ -285,8 +299,10 @@ export async function runCrewSubagent(opts: SubagentRunOptions): Promise<ToolRes
         pendingCalls: [],
         executedTools: [],
         failedTools: [],
+        skippedTools: [],
         latestRevision: snapshot.project?.revision,
       };
+  state.skippedTools ??= [];
 
   const persistCheckpoint = async () => {
     await opts.saveCheckpoint?.(structuredClone(state));
@@ -314,10 +330,24 @@ export async function runCrewSubagent(opts: SubagentRunOptions): Promise<ToolRes
         assertSubagentToolScope(tool, parsed as Record<string, unknown>, scope);
         const res = await tool.run({ ...(parsed as Record<string, unknown>), __callId: call.execId ?? randomUUID() }, scopedCtx);
         await opts.onToolCall(tool.risk);
-        state.executedTools.push(tool.name);
+        let skipReason: string | null = null;
+        try {
+          const outObj = JSON.parse(res.content);
+          if (outObj && typeof outObj === 'object' && !Array.isArray(outObj) && (outObj as { skipped?: unknown }).skipped === true) {
+            skipReason = String((outObj as { reason?: unknown; error?: unknown }).reason ?? (outObj as { error?: unknown }).error ?? '前置条件未满足而跳过');
+          }
+        } catch { /* non-JSON output such as skill_read markdown */ }
+        if (skipReason !== null) {
+          state.skippedTools!.push({ id: call.id, tool: tool.name, reason: skipReason, kind: 'precondition' });
+          await opts.trace?.({ event: 'subagent.tool', department: spec.department, tool: tool.name, status: 'skipped', reason: bound(skipReason, 300) });
+        } else {
+          state.executedTools.push(tool.name);
+          const overflowIdx = state.skippedTools!.findIndex(s => s.kind === 'turn_limit' && s.tool === tool.name);
+          if (overflowIdx >= 0) state.skippedTools!.splice(overflowIdx, 1);
+          await opts.trace?.({ event: 'subagent.tool', department: spec.department, tool: tool.name, status: 'complete', revision: res.revision });
+        }
         if (res.revision !== undefined) state.latestRevision = res.revision;
-        state.messages.push({ role: 'tool', tool_call_id: call.id, content: bound(res.content, 4000) });
-        await opts.trace?.({ event: 'subagent.tool', department: spec.department, tool: tool.name, status: 'complete', revision: res.revision });
+        state.messages.push({ role: 'tool', tool_call_id: call.id, content: bound(res.content, 12_000) });
       } catch (error) {
         if (opts.parentCtx.signal.aborted || error instanceof SubagentBudgetExceededError) throw error;
         await opts.onToolCall('read');
@@ -373,10 +403,15 @@ export async function runCrewSubagent(opts: SubagentRunOptions): Promise<ToolRes
     if (!turn.toolCalls.length) {
       const finalSnap = await opts.parentCtx.port.snapshot(opts.parentCtx.projectId).catch(() => null);
       const finalRev = finalSnap?.project?.revision ?? state.latestRevision;
-      const status = state.failedTools.length === 0 ? 'complete' : state.executedTools.length > 0 ? 'partial' : 'failed';
-      await opts.clearCheckpoint?.();
-      await opts.trace?.({ event: 'subagent.finish', department: spec.department, status, stepsUsed: state.stepIdx, executedTools: state.executedTools, failedCount: state.failedTools.length, revision: finalRev });
-      return {
+      const skippedList = state.skippedTools ?? [];
+      const status = state.failedTools.length === 0 && skippedList.length === 0
+        ? 'complete'
+        : state.executedTools.length > 0
+          ? 'partial'
+          : state.failedTools.length > 0
+            ? 'failed'
+            : 'skipped';
+      const finalResult: ToolResult = {
         content: JSON.stringify({
           ok: status === 'complete',
           status,
@@ -385,11 +420,17 @@ export async function runCrewSubagent(opts: SubagentRunOptions): Promise<ToolRes
           stepsUsed: state.stepIdx,
           executedTools: state.executedTools,
           ...(state.failedTools.length ? { failedTools: state.failedTools } : {}),
+          ...(skippedList.length ? { skippedTools: skippedList } : {}),
           revision: finalRev,
-          report: bound(turn.content || (status === 'complete' ? '专项任务已完成' : '专项任务存在失败操作'), 3000),
+          report: bound(turn.content || (status === 'complete' ? '专项任务已完成' : status === 'skipped' ? '前置条件未满足，操作已跳过' : '专项任务存在未执行或失败操作'), 3000),
         }),
         revision: finalRev,
       };
+      // Keep durable completedResult in checkpoint until parent settleToolSuccess atomically dequeues the parent call!
+      state.completedResult = finalResult;
+      await persistCheckpoint();
+      await opts.trace?.({ event: 'subagent.finish', department: spec.department, status, stepsUsed: state.stepIdx, executedTools: state.executedTools, failedCount: state.failedTools.length, skippedCount: skippedList.length, revision: finalRev });
+      return finalResult;
     }
 
     // Preserve strict 1-to-1 tool_call_id pairing even if the model emitted >6 tool calls in one turn!
@@ -397,10 +438,12 @@ export async function runCrewSubagent(opts: SubagentRunOptions): Promise<ToolRes
     const overflow = turn.toolCalls.slice(maxToolsPerTurn);
     state.pendingCalls = executable;
     for (const skipped of overflow) {
+      const reason = `单轮最多执行 ${maxToolsPerTurn} 个工具调用，请下一轮继续调用该操作`;
+      state.skippedTools!.push({ id: skipped.id, tool: skipped.name, reason, kind: 'turn_limit' });
       state.messages.push({
         role: 'tool',
         tool_call_id: skipped.id,
-        content: JSON.stringify({ skipped: true, error: `单轮最多执行 ${maxToolsPerTurn} 个工具调用，请下一轮继续调用该操作` }),
+        content: JSON.stringify({ skipped: true, error: reason }),
       });
     }
     await persistCheckpoint();
@@ -410,11 +453,10 @@ export async function runCrewSubagent(opts: SubagentRunOptions): Promise<ToolRes
   // Exhausted maxSteps without reaching a clean stop turn
   const finalSnap = await opts.parentCtx.port.snapshot(opts.parentCtx.projectId).catch(() => null);
   const finalRev = finalSnap?.project?.revision ?? state.latestRevision;
-  const status = state.executedTools.length > 0 ? 'step_limit_partial' : 'failed';
+  const skippedList = state.skippedTools ?? [];
+  const status = state.executedTools.length > 0 ? 'step_limit_partial' : state.failedTools.length > 0 ? 'failed' : skippedList.length > 0 ? 'skipped' : 'failed';
   const lastAssistant = [...state.messages].reverse().find(m => m.role === 'assistant');
-  await opts.clearCheckpoint?.();
-  await opts.trace?.({ event: 'subagent.finish', department: spec.department, status, exhausted: true, stepsUsed: maxSteps, executedTools: state.executedTools, failedCount: state.failedTools.length, revision: finalRev });
-  return {
+  const exhaustedResult: ToolResult = {
     content: JSON.stringify({
       ok: false,
       status,
@@ -424,9 +466,14 @@ export async function runCrewSubagent(opts: SubagentRunOptions): Promise<ToolRes
       stepsUsed: maxSteps,
       executedTools: state.executedTools,
       ...(state.failedTools.length ? { failedTools: state.failedTools } : {}),
+      ...(skippedList.length ? { skippedTools: skippedList } : {}),
       revision: finalRev,
       report: bound(typeof lastAssistant?.content === 'string' && lastAssistant.content ? lastAssistant.content : (status === 'failed' ? '子代理多轮调用均未成功完成写入' : '已达子代理局部步数上限，仅完成阶段性操作'), 3000),
     }),
     revision: finalRev,
   };
+  state.completedResult = exhaustedResult;
+  await persistCheckpoint();
+  await opts.trace?.({ event: 'subagent.finish', department: spec.department, status, exhausted: true, stepsUsed: maxSteps, executedTools: state.executedTools, failedCount: state.failedTools.length, skippedCount: skippedList.length, revision: finalRev });
+  return exhaustedResult;
 }

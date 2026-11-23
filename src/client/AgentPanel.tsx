@@ -18,7 +18,7 @@ export function AgentPanel({controller,project,externalRuns,externalLive,externa
   assetUrl?:(asset:Asset)=>string;compact?:boolean;hideStory?:boolean;
 }){
   const state=useSyncExternalStore(controller.subscribe,controller.getSnapshot,controller.getSnapshot);
-  const [goal,setGoal]=useState(''),[followup,setFollowup]=useState(''),[internalRuns,setInternalRuns]=useState<PublicRun[]>([]),[selected,setSelected]=useState<string>(''),[busy,setBusy]=useState(false),[error,setError]=useState('');
+  const [goal,setGoal]=useState(''),[followup,setFollowup]=useState(''),[internalRuns,setInternalRuns]=useState<PublicRun[]>([]),[selected,setSelected]=useState<string>(()=>externalRuns?.[0]?.id??''),[busy,setBusy]=useState(false),[error,setError]=useState('');
   const [allowWrite,setAllowWrite]=useState(true),[allowImages,setAllowImages]=useState(false),[maxSteps,setMaxSteps]=useState(24),[maxCost,setMaxCost]=useState(''),[internalLive,setInternalLive]=useState(false),[autoPlan,setAutoPlan]=useState(false);
   const [internalStream,setInternalStream]=useState<Record<string,string>>({});
   const [optionsOpen,setOptionsOpen]=useState(false);
@@ -59,10 +59,17 @@ export function AgentPanel({controller,project,externalRuns,externalLive,externa
     if(actionBusy.current||state.pending)return;actionBusy.current=true;setBusy(true);setError('');
     try{await work();await (onExternalRefresh?onExternalRefresh():feed.current?.refresh());}catch(cause){if(active.current)setError(cause instanceof Error?cause.message:String(cause));}finally{actionBusy.current=false;if(active.current)setBusy(false);}
   }
-  const run=runs.find(item=>item.id===selected);
+  const run=runs.find(item=>item.id===selected)??runs[0];
   const consent=run?.visionConsentRequired;
   const videoReference=consent?.purpose==='video-reference';
-  const referenceName=consent?.assetId?project.assets.find(asset=>asset.id===consent.assetId)?.name:undefined;
+  const consentAssetIds=consent?.assetIds?.length?consent.assetIds:(consent?.assetId?[consent.assetId]:[]);
+  const consentAssets=consentAssetIds.map(id=>{
+    const found=project.assets.find(asset=>asset.id===id);
+    const kindLabel=found?.kind==='video'?'视频':found?.kind==='audio'?'配音':'参考图';
+    return {id,kind:found?.kind??'image',label:`${kindLabel}「${found?.name??id}」`};
+  });
+  const referenceDescription=consentAssets.length?consentAssets.map(a=>a.label).join('、'):(consent?.role==='image'?'生图参考素材':'视频生成参考素材');
+  const hasNonImageConsent=consentAssets.some(a=>a.kind==='video'||a.kind==='audio');
   const autoApprove:ToolRisk[]=allowWrite?['read','write']:['read'];if(autoPlan)autoApprove.push('plan');
   const liveDelta=run&&run.status==='running'?streamText[run.id]:'';
   const canSendFollowup=!!run&&!['awaiting_approval','cancelled','budget_exceeded'].includes(run.status);
@@ -127,12 +134,12 @@ export function AgentPanel({controller,project,externalRuns,externalLive,externa
           </div>
         </div>}
         {consent&&<p className="vs-media-help" role="status">
-          继续前请确认将{videoReference?(referenceName?`参考图「${referenceName}」`:'视频生成参考图'):'截图'}发送给 {consent.model}（{consent.origin}）。
+          继续前请确认将{videoReference?referenceDescription:'截图'}发送给 {consent.model}（{consent.origin}）。
         </p>}
         <div className="vs-agent-actions">
           {['running','waiting_task'].includes(run.status)&&<button type="button" disabled={disabled} onClick={()=>void act(()=>controller.api.call('agent.pause',{runId:run.id}))}>暂停</button>}
           {['paused','failed'].includes(run.status)&&<button type="button" className="vs-primary" disabled={disabled} onClick={()=>void act(()=>controller.mediaCommand('agent.resume',{runId:run.id,...(consent?{visionConsentId:consent.id}:{})}))}>{consent?'授权并继续':'继续'}</button>}
-          {['paused','failed'].includes(run.status)&&consent&&<button type="button" disabled={disabled} onClick={()=>void act(()=>controller.mediaCommand('agent.resume',{runId:run.id,disableVision:true}))}>{videoReference?'跳过图生视频':'仅做本地检查'}</button>}
+          {['paused','failed'].includes(run.status)&&consent&&<button type="button" disabled={disabled} onClick={()=>void act(()=>controller.mediaCommand('agent.resume',{runId:run.id,disableVision:true}))}>{videoReference?(hasNonImageConsent?'取消媒体上传':consent?.role==='image'?'跳过参考图上传':'跳过图生视频'):'仅做本地检查'}</button>}
           {!['complete','cancelled','failed','budget_exceeded'].includes(run.status)&&<button type="button" disabled={disabled} onClick={()=>void act(()=>controller.api.call('agent.cancel',{runId:run.id}))}>取消</button>}
           <button type="button" disabled={disabled} onClick={()=>void act(async()=>{await controller.load();})}>刷新工程</button>
         </div>

@@ -51,6 +51,7 @@ export function migrateStory(v: Record<string, unknown>): Story | null {
     const description = opt(c.description, ''); if (description === null || c.voice !== undefined && !str(c.voice)) return null;
     characters.push({
       id: c.id, name: c.name, description, features: c.features, referenceAssetIds: c.referenceAssetIds,
+      ...(str(c.identityAssetId) ? { identityAssetId: c.identityAssetId } : {}),
       ...(str(c.objective) ? { objective: c.objective } : {}),
       ...(str(c.baselineEmotion) ? { baselineEmotion: c.baselineEmotion } : {}),
       ...(str(c.voice) ? { voice: c.voice } : {}),
@@ -199,9 +200,20 @@ export class AgentService {
     const ctx: ToolContext = { runId, projectId, signal, port, docs: this.docs(projectId) };
     if (run) {
       ctx.getBatchReceipt = (batchKey: string) => run.batchReceipts?.[batchKey];
-      ctx.saveBatchItemReceipt = async (batchKey: string, index: number, taskId: string) => {
+      ctx.saveBatchItemReceipt = async (batchKey: string, index: number, taskId: string, shotId?: string) => {
         run.batchReceipts ??= {};
         run.batchReceipts[batchKey] = { ...(run.batchReceipts[batchKey] ?? {}), [index]: taskId };
+        if (shotId) {
+          run.batchReceiptShots ??= {};
+          run.batchReceiptShots[batchKey] = { ...(run.batchReceiptShots[batchKey] ?? {}), [index]: shotId };
+        }
+        const acceptedKey = `${run.id}.${batchKey}.accepted.${index}`;
+        if (!(run.settledToolExecIds ?? []).includes(acceptedKey)) {
+          if (index === 0) chargeTool(run.usage, null, 'cost');
+          else run.usage.unknownCostCalls += 1;
+          (run.settledToolExecIds ??= []).push(acceptedKey);
+        }
+        await this.spend(run.projectId, 'batch_generate_media', null, false, acceptedKey);
         await this.save(run);
       };
       ctx.delegateCrew = async (department: CrewDepartment, task: string, scopedShotIds?: string[], execId?: string) => {
@@ -218,7 +230,14 @@ export class AgentService {
           resolveSubModel: role => this.options.resolveSubModel ? this.options.resolveSubModel(role) : this.options.resolveModel(),
           fetch: this.options.fetch,
           retryDelayMs: this.options.retryBaseMs,
-          checkBudget: next => this.budgetLimit(run, next),
+          checkBudget: async next => {
+            if (next === 'tool') {
+              // Reserve 1 slot for the outer delegate_crew call itself so total toolCalls never exceeds maxToolCalls!
+              const reservedLimit = overBudget(run.budget, { ...run.usage, toolCalls: run.usage.toolCalls + 1 }, 'tool');
+              if (reservedLimit) return reservedLimit;
+            }
+            return this.budgetLimit(run, next);
+          },
           onModelTurn: async (inputTokens, outputTokens, usageKnown, parameters) => {
             run.usage.steps += 1;
             const ledger = await this.ledgers.get(run.projectId);
@@ -257,11 +276,27 @@ export class AgentService {
     return run.allowImages === true ? tools : tools.filter(tool => !(tool.requires ?? []).includes('vision'));
   }
   private setVisionChallenge(run: AgentRun, error: UploadConsentRequired) {
-    if (run.visionConsentRequired?.purpose !== error.purpose || run.visionChallengeFingerprint !== error.destination.fingerprint) {
-      run.visionConsentRequired = { ...consentChallenge(error.purpose, error.destination), ...(error.purpose === 'video-reference' && run.pendingVideoReference ? { assetId: run.pendingVideoReference.assetId } : {}) };
+    const ref = error.purpose === 'video-reference' ? run.pendingVideoReference : undefined;
+    const refIds = ref ? (ref.assetIds?.length ? ref.assetIds : [ref.assetId]) : undefined;
+    if (
+      run.visionConsentRequired?.purpose !== error.purpose
+      || run.visionChallengeFingerprint !== error.destination.fingerprint
+      || JSON.stringify(run.visionConsentRequired?.assetIds ?? []) !== JSON.stringify(refIds ?? [])
+    ) {
+      run.visionConsentRequired = {
+        ...consentChallenge(error.purpose, error.destination),
+        ...(ref ? {
+          assetId: ref.assetId,
+          ...(refIds && refIds.length > 1 ? { assetIds: refIds } : {}),
+          ...(ref.role && ref.role !== 'video' ? { role: ref.role } : {}),
+        } : {}),
+      };
       run.visionChallengeFingerprint = error.destination.fingerprint;
     }
-    run.status = 'paused'; run.message = error.message;
+    run.status = 'paused';
+    run.message = refIds && refIds.length > 1
+      ? `请确认将 ${refIds.length} 份本地参考媒体（${refIds.join('、')}）发送至 ${error.destination.origin}（${error.destination.model}）`
+      : error.message;
   }
   private invalidateVideoApproval(run: AgentRun, call: ToolCall) {
     const execId = call.execId;
@@ -301,7 +336,7 @@ export class AgentService {
   subscribe(listener: (event: AgentEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   private emit(event: AgentEvent) { for (const listener of this.listeners) { try { listener(event); } catch { /* listener errors never break the loop */ } } }
   public(run: AgentRun): PublicRun {
-    const { messages, visionGrant, visionChallengeFingerprint, pendingSelfCheck, videoReferenceGrant, pendingVideoReference, ...rest } = structuredClone(run);
+    const { messages, visionGrant, visionChallengeFingerprint, pendingSelfCheck, videoReferenceGrant, referenceGrants, pendingVideoReference, subagentCheckpoints, batchReceipts, batchReceiptShots, ...rest } = structuredClone(run);
     const transcript = messages.slice(1).map(message => ({
       role: message.role,
       content: typeof message.content === 'string' ? bound(message.content, 2000) : Array.isArray(message.content) ? message.content.map(part => part.type === 'text' ? part.text : '[图片]').join('\n') : '',
@@ -377,8 +412,43 @@ export class AgentService {
     const entry = { execId: flight.execId, tool: flight.tool, at: now(), error: '运行中断时收费请求已发出，结果未知（可能已受理并计费）', attempts: 1 };
     (run.uncertainSubmissions ??= []).push(entry); delete run.inFlight;
     const call = run.queue.find(item => item.execId === flight.execId);
-    if (call) { run.queue = run.queue.filter(item => item !== call); run.messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ error: entry.error, submissionUncertain: true, hint: '系统没有重新提交。不要自行重复调用；等待用户确认。' }) }); }
-    chargeTool(run.usage, null, 'cost');
+    const savedReceipts = call && flight.tool === 'batch_generate_media' ? run.batchReceipts?.[call.id] : undefined;
+    const knownEntries = savedReceipts ? Object.entries(savedReceipts).sort(([a], [b]) => Number(a) - Number(b)) : [];
+    if (call && knownEntries.length > 0) {
+      // Partial batch crash: known items already charged via saveBatchItemReceipt; track them via waitingBatch while recording the in-flight item as uncertain!
+      const knownIds = knownEntries.map(([, tid]) => tid);
+      const savedShots = run.batchReceiptShots?.[call.id] ?? {};
+      const autoApplyShots: Record<string, string> = {};
+      for (const [idxStr, tid] of knownEntries) {
+        if (savedShots[Number(idxStr)]) autoApplyShots[tid] = savedShots[Number(idxStr)]!;
+      }
+      const uncKey = `${run.id}.${flight.execId}.uncertain`;
+      if (!(run.settledToolExecIds ?? []).includes(uncKey)) {
+        run.usage.unknownCostCalls += 1;
+        (run.settledToolExecIds ??= []).push(uncKey);
+      }
+      await this.spend(run.projectId, flight.tool, null, false, uncKey);
+      run.waitingBatch = {
+        kind: 'media',
+        ids: knownIds,
+        callId: call.id,
+        execId: flight.execId,
+        ...(Object.keys(autoApplyShots).length ? { autoApplyShots } : {}),
+        uncertainCount: 1,
+        uncertainError: entry.error,
+      };
+      run.queue = run.queue.filter(item => item !== call);
+      delete run.batchReceipts![call.id];
+      if (run.batchReceiptShots) delete run.batchReceiptShots[call.id];
+    } else {
+      if (call) { run.queue = run.queue.filter(item => item !== call); run.messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ error: entry.error, submissionUncertain: true, hint: '系统没有重新提交。不要自行重复调用；等待用户确认。' }) }); }
+      const uncKey = `${run.id}.${flight.execId}.uncertain`;
+      if (!(run.settledToolExecIds ?? []).includes(uncKey)) {
+        chargeTool(run.usage, null, 'cost');
+        (run.settledToolExecIds ??= []).push(uncKey);
+      }
+      await this.spend(run.projectId, flight.tool, null, false, uncKey);
+    }
     await this.store.trace(run.id, { event: 'submission.uncertain', reason: 'interrupted', ...entry }); await this.save(run); return true;
   }
   private async settled(id: string) { const active = this.active.get(id); if (active) await active.promise.catch(() => {}); }
@@ -479,6 +549,7 @@ export class AgentService {
       if (this.stopped) throw new Error('应用正在关闭');
       if (this.active.has(id) || run.status === 'running' || run.status === 'waiting_task') {
         (run.pendingUserMessages ??= []).push(message);
+        if (run.status === 'complete') { run.status = 'running'; delete run.final; }
         run.message = '已收到补充指令，将在本步后应用';
         await this.store.trace(run.id, { event: 'run.steer', message: bound(message, 400) });
         await this.save(run);
@@ -560,7 +631,8 @@ export class AgentService {
         if (review && !review.pass) { run.messages.push({ role: 'user', content: `自检（第 ${run.reviewRounds} 轮）发现问题，请修复后再总结：\n${review.text}` }); await this.save(run); continue; }
         if (run.pendingUserMessages?.length) { await this.save(run); continue; }
         const content = run.messages.at(-1)?.content;
-        return this.complete(run, typeof content === 'string' ? content : '');
+        if (await this.complete(run, typeof content === 'string' ? content : '')) return;
+        continue;
       }
       if (run.queue.length) {
         const limit = await this.budgetLimit(run, 'tool');
@@ -651,17 +723,33 @@ export class AgentService {
       if (meta.dirty && run.reviewRounds < (meta.maxReviewRounds ?? 2)) {
         run.pendingSelfCheck = true; await this.save(run); continue;
       }
-      return this.complete(run, turn.content);
+      if (await this.complete(run, turn.content)) return;
+      continue;
     }
   }
 
-  private async complete(run: AgentRun, content: string) {
+  private async complete(run: AgentRun, content: string): Promise<boolean> {
+    if (run.pendingUserMessages?.length) return false;
     await this.store.trace(run.id, { event: 'run.complete', usage: run.usage });
-    const final = { ...run, status: 'complete' as const, final: content, message: '已完成', updatedAt: now() };
+    if (run.pendingUserMessages?.length) {
+      await this.save(run);
+      return false;
+    }
+    const final: AgentRun = { ...run, status: 'complete' as const, final: content, message: '已完成', updatedAt: now() };
     delete final.visionConsentRequired; delete final.visionChallengeFingerprint;
-    await this.store.save(final); Object.assign(run, final);
+    await this.store.save(final);
+    if (run.pendingUserMessages?.length) {
+      run.status = 'running';
+      delete run.final;
+      run.message = '继续处理新指令';
+      await this.save(run);
+      return false;
+    }
+    Object.assign(run, final);
     delete run.visionConsentRequired; delete run.visionChallengeFingerprint;
+    this.active.delete(run.id);
     this.emit({ type: 'run', run: this.public(run) });
+    return true;
   }
 
   private async selfCheck(run: AgentRun, signal: AbortSignal): Promise<{ pass: boolean; text: string } | null> {
@@ -785,6 +873,7 @@ export class AgentService {
       if (signal.aborted) throw error;
       delete run.inFlight;
       if (error instanceof SubagentBudgetExceededError) {
+        if (run.usage.toolCalls < run.budget.maxToolCalls) chargeTool(run.usage, 0, tool.risk);
         await this.finishStep(run, step, { status: 'skipped', summary: '子代理触及预算上限：' + error.reason });
         run.status = 'budget_exceeded'; run.message = '已停止：' + error.reason;
         await this.store.trace(run.id, { event: 'budget', reason: error.reason, usage: run.usage, pendingCalls: run.queue.map(c => c.name) });
@@ -835,6 +924,7 @@ export class AgentService {
     if (run.videoReferenceGrant?.execId === call.execId) delete run.videoReferenceGrant;
     run.referenceGrants = (run.referenceGrants ?? []).filter(g => g.execId !== call.execId);
     if (run.batchReceipts && call.id in run.batchReceipts) delete run.batchReceipts[call.id];
+    if (run.batchReceiptShots && call.id in run.batchReceiptShots) delete run.batchReceiptShots[call.id];
     await this.settleToolSuccess(run, receipt);
     signal.throwIfAborted(); return 'next';
   }
@@ -858,18 +948,29 @@ export class AgentService {
     const meta = run as AgentRun & { dirty?: boolean };
     let result = receipt.result;
     if (!(run.settledToolExecIds ?? []).includes(key)) {
-      chargeTool(run.usage, result.cost, receipt.risk);
-      if (receipt.risk === 'cost' && result.waitForBatch && result.waitForBatch.ids.length > 1) {
-        run.usage.unknownCostCalls += result.waitForBatch.ids.length - 1;
+      const preChargedBatch = receipt.risk === 'cost' && result.waitForBatch
+        ? result.waitForBatch.ids.map((_, idx) => Boolean(run.settledToolExecIds?.includes(`${run.id}.${call.id}.accepted.${idx}`)))
+        : null;
+      if (preChargedBatch && preChargedBatch.some(Boolean)) {
+        const missingUnknowns = preChargedBatch.filter(v => !v).length;
+        if (missingUnknowns > 0) run.usage.unknownCostCalls += missingUnknowns;
+      } else {
+        chargeTool(run.usage, result.cost, receipt.risk);
+        if (receipt.risk === 'cost' && result.waitForBatch && result.waitForBatch.ids.length > 1) {
+          run.usage.unknownCostCalls += result.waitForBatch.ids.length - 1;
+        }
       }
       (run.settledToolExecIds ??= []).push(key);
     }
     if (receipt.risk === 'cost') {
-      await this.spend(run.projectId, receipt.tool, (result.waitFor || result.waitForBatch) ? null : result.cost, false, key);
-      if (result.waitForBatch && result.waitForBatch.ids.length > 1) {
-        for (let extra = 1; extra < result.waitForBatch.ids.length; extra++) {
-          await this.spend(run.projectId, receipt.tool, null, false, `${key}.item.${extra}`);
+      if (result.waitForBatch) {
+        for (let idx = 0; idx < result.waitForBatch.ids.length; idx++) {
+          const acceptedKey = `${run.id}.${call.id}.accepted.${idx}`;
+          if ((run.settledToolExecIds ?? []).includes(acceptedKey)) continue;
+          await this.spend(run.projectId, receipt.tool, null, false, idx === 0 ? key : `${key}.item.${idx}`);
         }
+      } else {
+        await this.spend(run.projectId, receipt.tool, result.waitFor ? null : result.cost, false, key);
       }
     }
     if (receipt.risk === 'write') meta.dirty = true;
@@ -880,6 +981,7 @@ export class AgentService {
     else if (result.waitForBatch) { run.waitingBatch = { ...result.waitForBatch, callId: call.id, execId: call.execId }; run.status = 'waiting_task'; run.message = `等待 ${result.waitForBatch.ids.length} 项并发生成任务完成`; }
     else run.messages.push({ role: 'tool', tool_call_id: call.id, content: result.content });
     run.queue = run.queue.filter(item => item !== call);
+    if (run.subagentCheckpoints && receipt.execId in run.subagentCheckpoints) delete run.subagentCheckpoints[receipt.execId];
     if (run.inFlight?.execId === receipt.execId) delete run.inFlight;
     await this.save(run);
     await this.store.removeToolSuccess(run.id, receipt.execId);
@@ -891,14 +993,33 @@ export class AgentService {
       signal.throwIfAborted();
       const result = await this.port.route(waiting.kind === 'media' ? 'media.get' : 'workflows.get', waiting.kind === 'media' ? { taskId: waiting.id } : { workflowId: waiting.id });
       const value = (result.value ?? {}) as Record<string, unknown>, state = String(value.phase ?? value.status ?? '');
-      if (!result.ok || terminal.has(state) || (waiting.kind === 'workflow' && state !== 'running')) {
+      const observation = String(value.observation ?? '');
+      const pausedObservation = waiting.kind === 'media' && observation === 'paused' && !terminal.has(state);
+      if (!result.ok || terminal.has(state) || pausedObservation || (waiting.kind === 'workflow' && state !== 'running')) {
         if (waiting.kind === 'media' && value.usage && typeof (value.usage as { cost?: unknown }).cost === 'number') {
           const key = run.id + '.' + (waiting.execId ?? waiting.id) + '.settled';
           if (!run.settledToolExecIds?.includes(key)) { run.usage.cost += (value.usage as { cost: number }).cost; run.usage.unknownCostCalls = Math.max(0, run.usage.unknownCostCalls - 1); (run.settledToolExecIds ??= []).push(key); }
           await this.spend(run.projectId, 'media', (value.usage as { cost: number }).cost, true, key);
         }
-        run.messages.push({ role: 'tool', tool_call_id: waiting.callId, content: bound(JSON.stringify(result.ok ? { id: waiting.id, state, message: value.message, error: value.error, hint: state === 'ready' ? '素材已就绪：调用 media_apply 采用' : undefined } : { error: result.error?.message })) });
-        delete run.waiting; run.status = 'running'; run.message = '生成任务已结束'; await this.save(run); return;
+        const effectiveState = pausedObservation ? 'paused' : state;
+        run.messages.push({
+          role: 'tool',
+          tool_call_id: waiting.callId,
+          content: bound(JSON.stringify(result.ok ? {
+            id: waiting.id,
+            ok: state === 'ready' || state === 'complete',
+            state: effectiveState,
+            ...(pausedObservation ? { mediaPhase: state, observation: 'paused' } : {}),
+            message: value.message,
+            error: value.error,
+            hint: pausedObservation
+              ? '生成产物下载或校验已暂停，需要检查错误或重试获取后再采用'
+              : state === 'ready'
+                ? '素材已就绪：调用 media_apply 采用'
+                : undefined,
+          } : { ok: false, error: result.error?.message })),
+        });
+        delete run.waiting; run.status = 'running'; run.message = pausedObservation ? '生成素材获取已暂停，交回总导演处理' : '生成任务已结束'; await this.save(run); return;
       }
       await sleep(this.options.pollMs ?? 1000, signal);
     }
@@ -912,11 +1033,16 @@ export class AgentService {
       const states = await Promise.all(batch.ids.map(async id => {
         const res = await this.port.route('media.get', { taskId: id });
         const val = (res.value ?? {}) as Record<string, unknown>;
-        return { id, ok: res.ok, state: String(val.phase ?? val.status ?? ''), value: val, error: res.error?.message };
+        const phase = String(val.phase ?? val.status ?? '');
+        const observation = String(val.observation ?? '');
+        const pausedObservation = observation === 'paused' && !terminal.has(phase);
+        return { id, ok: res.ok, state: pausedObservation ? 'paused' : phase, rawPhase: phase, observation, pausedObservation, value: val, error: res.error?.message };
       }));
       const finishedCount = states.filter(s => !s.ok || terminal.has(s.state)).length;
       if (finishedCount === states.length) {
         const outcomes: Record<string, unknown>[] = [];
+        let succeededCount = 0;
+        let readyUnappliedCount = 0;
         for (const [idx, item] of states.entries()) {
           if (item.value.usage && typeof (item.value.usage as { cost?: unknown }).cost === 'number') {
             const itemCost = (item.value.usage as { cost: number }).cost;
@@ -928,9 +1054,10 @@ export class AgentService {
             }
             await this.spend(run.projectId, 'media', itemCost, true, itemKey);
           }
+          const wantsAutoApply = Boolean(batch.autoApplyShots?.[item.id]);
           let appliedAssetIds: string[] | undefined;
           let applyError: string | undefined;
-          if (item.state === 'ready' && batch.autoApplyShots?.[item.id]) {
+          if (item.state === 'ready' && wantsAutoApply) {
             try {
               const cur = await this.port.snapshot(run.projectId);
               if (cur.project) {
@@ -940,23 +1067,37 @@ export class AgentService {
                   appliedAssetIds = av.applied?.assetIds ?? av.assetIds;
                   (run as AgentRun & { dirty?: boolean }).dirty = true;
                 } else if (!applied.ok) {
-                  applyError = applied.error?.message;
+                  applyError = applied.error?.message ?? '自动采用失败';
                 }
+              } else {
+                applyError = '工程未打开，无法自动采用';
               }
             } catch (err) {
               applyError = errorText(err);
             }
           }
+          const finalState = appliedAssetIds
+            ? 'applied'
+            : (item.state === 'ready' && wantsAutoApply)
+              ? 'apply_failed'
+              : item.state;
+          if (finalState === 'applied' || finalState === 'complete' || (finalState === 'ready' && !wantsAutoApply)) {
+            succeededCount += 1;
+          } else if (finalState === 'apply_failed') {
+            readyUnappliedCount += 1;
+          }
           outcomes.push({
             taskId: item.id,
             shotId: batch.autoApplyShots?.[item.id],
-            state: appliedAssetIds ? 'applied' : item.state,
+            state: finalState,
+            ...(finalState === 'apply_failed' ? { mediaPhase: 'ready', hint: '生成素材已就绪保留，但自动采用失败；请读取最新 revision 或检查制作模式后处理' } : {}),
+            ...(item.pausedObservation ? { mediaPhase: item.rawPhase, observation: 'paused', hint: '素材下载或校验已暂停，可调用重试或检查服务端产物地址' } : {}),
             ...(appliedAssetIds ? { assetIds: appliedAssetIds } : {}),
             ...(item.value.error || item.error || applyError ? { error: item.value.error ?? item.error ?? applyError } : {}),
           });
         }
-        const succeededCount = outcomes.filter(o => o.state === 'applied' || o.state === 'ready' || o.state === 'complete').length;
-        const failedCount = outcomes.length - succeededCount;
+        const uncertainCount = batch.uncertainCount ?? 0;
+        const failedCount = (outcomes.length - succeededCount) + uncertainCount;
         const latestRev = (await this.port.snapshot(run.projectId)).project?.revision;
         run.messages.push({
           role: 'tool',
@@ -966,13 +1107,17 @@ export class AgentService {
             partial: succeededCount > 0 && failedCount > 0,
             succeededCount,
             failedCount,
+            ...(readyUnappliedCount > 0 ? { readyUnappliedCount } : {}),
+            ...(uncertainCount > 0 ? { submissionUncertain: true, uncertainCount, uncertainError: batch.uncertainError } : {}),
             revision: latestRev,
             results: outcomes,
           })),
         });
         delete run.waitingBatch;
         run.status = 'running';
-        run.message = failedCount === 0 ? `批次并发生成已完成（${outcomes.length} 项）` : `批次并发生成已结束（成功 ${succeededCount}/${outcomes.length}，失败 ${failedCount} 项）`;
+        run.message = failedCount === 0
+          ? `批次并发生成已完成（${outcomes.length} 项）`
+          : `批次并发生成已结束（成功 ${succeededCount}/${outcomes.length + uncertainCount}，未完成/需处理 ${failedCount} 项）`;
         await this.save(run);
         return;
       }

@@ -5,9 +5,9 @@ import {join,resolve,sep} from 'node:path';
 import {type AdapterContext,type AdapterInput} from '../models/adapters/media.ts';
 import {artifactAuth,cancelGeneration,pollGeneration,submitGeneration} from '../models/adapters/official.ts';
 import {cancelTemplate,pollTemplate,resolveTemplate,submitTemplate} from '../models/adapters/template.ts';
-import {validateMediaRequest} from '../models/capabilities.ts';
+import {MediaCapabilityError,validateMediaRequest} from '../models/capabilities.ts';
 import {ROLE_PROTOCOLS} from '../models/contracts.ts';
-import {templateAcceptsImage, templateMaxImages} from '../models/template-presets.ts';
+import {templateAcceptsImage, templateAcceptsLipSync, templateMaxImages} from '../models/template-presets.ts';
 import {uploadDestination,type AuthorizeUpload} from '../models/upload-consent.ts';
 import type {RemoteJob as Job} from './contracts.ts';
 // Protocol dispatch: official providers use official.ts; async-task uses the configurable template adapter.
@@ -22,7 +22,7 @@ async function submitAsync(context:AdapterContext,input:AdapterInput):Promise<Jo
   const videoInput=input.inputs.find(i=>i.type==='video');
   const audioInput=input.inputs.find(i=>i.type==='audio');
   const mergedParams={...input.parameters,...(videoInput?{videoDataUrl:videoInput.dataUrl}:{}),...(audioInput?{audioDataUrl:audioInput.dataUrl}:{})};
-  const result=await submitTemplate(context,{clientRequestId:input.clientRequestId,model:input.model,prompt:input.prompt,image:imgInputs[0]?.dataUrl,tailImage:imgInputs[1]?.dataUrl,images:imgInputs.length?imgInputs.map(i=>i.dataUrl):undefined,duration:typeof input.parameters.durationSeconds==='number'?input.parameters.durationSeconds:typeof input.parameters.duration==='number'?input.parameters.duration:undefined,parameters:mergedParams},outputOf(input.operation));
+  const result=await submitTemplate(context,{clientRequestId:input.clientRequestId,model:input.model,prompt:input.prompt,image:imgInputs[0]?.dataUrl,tailImage:imgInputs[1]?.dataUrl,images:imgInputs.length?imgInputs.map(i=>i.dataUrl):undefined,video:videoInput?.dataUrl,audio:audioInput?.dataUrl,duration:typeof input.parameters.durationSeconds==='number'?input.parameters.durationSeconds:typeof input.parameters.duration==='number'?input.parameters.duration:undefined,parameters:mergedParams},outputOf(input.operation));
   if('kind' in result)return {jobId:input.clientRequestId,status:'succeeded',artifacts:[{base64:Buffer.from(result.bytes).toString('base64'),mimeType:result.mimeType}]};
   return result;
 }
@@ -102,6 +102,14 @@ export class MediaTaskService {
     if(!validProtocols.includes(resolved.connection.protocol)||!resolved.model.outputModalities.includes(output))throw new Error('所选模型不支持此生成操作');
     if(!resolved.model.inputModalities.includes('text'))throw new Error('所选模型不支持文字提示输入');
     if(needsImageInput(input.operation)&&!resolved.model.inputModalities.includes('image'))throw new Error('所选模型不支持图片输入');
+    if(input.operation==='lip-sync-video'){
+      if(resolved.connection.protocol==='async-task'&&!templateAcceptsLipSync(resolved.model.parameters)){
+        throw new MediaCapabilityError('此服务模板缺少视频或配音输入字段，不支持口型同步能力');
+      }
+      if(resolved.connection.protocol!=='async-task'&&resolved.connection.protocol!=='video-gateway'){
+        throw new MediaCapabilityError('所选协议不支持口型同步能力：'+resolved.connection.protocol);
+      }
+    }
     const policyFingerprint=this.projects.authorizeOperation?await this.projects.authorizeOperation(input.projectId,input.operation,input.shotId):undefined;
     if(needsMediaUpload(input.operation)&&authorizeUpload)authorizeUpload(uploadDestination(resolved));
     // Resolve now to reject unavailable credentials before registering work. Resolve again per HTTP operation.

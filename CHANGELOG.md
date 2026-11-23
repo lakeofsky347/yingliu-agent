@@ -2,6 +2,11 @@
 
 ## 未发布
 
+- 完成 **v2.0 二轮复审全部 14 项次生边界问题清零加固**：
+  - **制作策略入轨复核与口型模板能力门禁（P0）**：`ProjectHub.mediaPort` 接入 `authorizeOperation` 并在 `applyMediaResult` / `video.clip.save` 入轨前实时复核当前 Schema v3 `assertProductionOperation`（切换纯代码模式后保留历史生成素材可查，但拦截新视频计费请求与旧视频重新激活镜头）；新增 `templateAcceptsLipSync` 校验异步模板是否同时包含视频与配音占位符，在发出请求前阻断不具备口型能力的普通视频模板。
+  - **受限部门字幕保护、名额预留、原子检查点与跳过回执（P0–P3）**：限定 `scopedShotIds` 时 `post_overlay_subtitle` 仅替换授权镜头字幕并严守范围外字幕与全局音轨不变性；`delegate_crew` 预留外层工具名额确保总调用次数不超 `maxToolCalls`；检查点持久化 `completedResult` 并随父队列 `settleToolSuccess` 同一次落盘原子清理，消除极端崩溃恢复重复写入窗口；新增 `skippedTools` 区分前置跳过（`skipped`）与单轮上限溢出跳过（`partial`）。
+  - **媒体异常回传、预览取消门禁、多素材授权展示与终态串行收件（P1–P3）**：下载 404 导致本地观察 `paused` 时父运行及时退出等待并向上回传；`autoApply` 失败诚实标记 `apply_failed` 并计入未完成项；批次子项受理即刻记入未知费用并在中断重启后继续由 `waitingBatch` 跟踪已知首项；`generateSceneCode` 仅在宿主预览记录为 `complete` 时报告通过校验（取消或超时明确报错）；`AgentPanel` 展示口型同步等全部待上传素材名称、类型与目的地；`complete()` 写轨迹与落盘期间收到 `sendMessage` 自动中止收尾回到主循环。
+  - **草稿字段级增量合并、视频参考/身份绑定无损回写与百镜多素材分页（P1–P2）**：资产/场记更新与单镜预演批准对工作台未批草稿按实际变更字段做局部合并，保留草稿角色身份等用户编辑；`Story -> DirectorDocument` 与 `.yingliu` 备份完整保留合法视频运动参考（`motion`）与非首张定妆图身份绑定（`identityAssetId`）；子代理工具回包上限提升至 `12,000` 字符，`summarizeProject` 支持 60+ 素材紧凑分页保真指定镜头页，`bible_get` 与 `story_get` 新增百镜分页参数。
 - 完成 **v2.0 工具与团队通信安全/一致性 16 项审计闭环加固**：
   - **剧组子代理硬边界与持久恢复**：`runCrewSubagent` 新增参数级 + 提交级双层 `scopedShotIds` 镜头范围硬拦截（阻断越界改镜与全局重构图）、每步实时校验父运行与项目 `budgetLimit` 并累计 `steps`/`toolCalls`、子步骤级持久断点回执 `subagentCheckpoints`（中途中招 503 恢复后不重复执行已落盘写入）、严格 1:1 配对溢出 `tool_calls`、区分 `complete`/`partial`/`failed`/`step_limit_partial` 状态并同步最新 `revision`；总导演结束前复查排空 `pendingUserMessages` 防止临终纠偏丢失。
   - **批次回执、多目标授权与真实媒体流通道**：`batch_generate_media` 增加全子项前置合法性与策略预检、逐子项持久回执 `batchReceipts` 复用及逐项独立核销 `unknownCostCalls`；`referenceGrants` 升级为按 `(execId, role, fingerprint)` 分组保存，消除生图+生视频双目的地上传授权乒乓死锁；`apply_lip_sync` 改为通过 `MediaProjectPort.readMediaAsset` 直接流式读取工程内真实大小音视频并纳入外发授权，消除 4,000 字符参数限制；`delegate_scene_code` 严格绑定初始 `baseRevision` 乐观锁并同步等待无头渲染校验与单轮报错自修复；修复采用视频与保存片段把 Schema v3 降级为 Schema 2 的问题。

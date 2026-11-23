@@ -12,7 +12,7 @@ import type { AudioClip, OverlayClip, ProductionMode, Shot, ShotColorGrade, Shot
 import {
   anchorPrompt, buildDirectorDocumentFromStory, dataChecks, frameIssue, mergeDirectorPlanIntoStory,
   normalizeCharacter, normalizeLocation, normalizeProp, normalizeShots, normalizeStyle,
-  pngLuma, qcStatus, type QcIssue, type QcReport, type Story,
+  pngLuma, qcStatus, type DirectorSyncOptions, type QcIssue, type QcReport, type Story,
 } from './story.ts';
 import { SKILLS, skillIndex } from './skills.ts';
 import { CREW_SPECS } from './subagents.ts';
@@ -42,7 +42,7 @@ function projectTask(snapshot: StudioSnapshot): ProjectTaskRef {
 function agentInput(ctx: ToolContext, message: string): ChatInput { return { message, projectId: ctx.projectId, provider: 'agent', model: 'agent', intent: 'modify' }; }
 
 /** Synchronize Story into project.extensions.directorDocument whenever possible, returning the latest project revision. */
-async function syncBibleToProject(ctx: ToolContext, story: Story, options: { promoteApproved?: boolean } = {}): Promise<number | undefined> {
+async function syncBibleToProject(ctx: ToolContext, story: Story, options: DirectorSyncOptions = {}): Promise<number | undefined> {
   try {
     const snap = await ctx.port.snapshot(ctx.projectId);
     if (!snap.project) return undefined;
@@ -255,14 +255,51 @@ export async function qualityCheck(ctx: ToolContext): Promise<QcReport> {
   return report;
 }
 
+function paginateStoryView(
+  story: Story,
+  args: Record<string, unknown>,
+  maxChars = 10_200,
+): Story | (Omit<Story, 'shots'> & { shots: Story['shots']; shotOrder: string[]; pagination: { totalShots: number; offset: number; returnedShots: number; hasMore: boolean; nextOffset?: number; hint: string } }) {
+  const explicit = args.shotOffset !== undefined || args.shotLimit !== undefined || Array.isArray(args.shotIds);
+  if (!explicit && JSON.stringify(story).length <= maxChars) return story;
+  const allShots = story.shots;
+  const wantedSet = Array.isArray(args.shotIds) && args.shotIds.length ? new Set(args.shotIds.map(String)) : null;
+  const offset = wantedSet ? 0 : Math.max(0, Math.min(allShots.length, Number.isSafeInteger(args.shotOffset) ? Number(args.shotOffset) : 0));
+  const limit = wantedSet ? allShots.length : Math.max(1, Math.min(120, Number.isSafeInteger(args.shotLimit) ? Number(args.shotLimit) : allShots.length || 1));
+  const candidates = wantedSet ? allShots.filter(s => wantedSet.has(s.shotId ?? s.id) || wantedSet.has(s.id)) : allShots.slice(offset, offset + limit);
+  const shotOrder = allShots.map(s => s.shotId ?? s.id);
+  const buildPage = (slice: Story['shots']) => ({
+    ...story,
+    shotOrder,
+    shots: slice,
+    pagination: {
+      totalShots: allShots.length,
+      offset,
+      returnedShots: slice.length,
+      hasMore: !wantedSet && (offset + slice.length < allShots.length),
+      ...(wantedSet || offset + slice.length >= allShots.length ? {} : { nextOffset: offset + slice.length }),
+      hint: '分镜较多已分页返回；完整分镜顺序见 shotOrder，可传 shotOffset / shotLimit 读取后续分镜',
+    },
+  });
+  let count = candidates.length;
+  while (count > 1) {
+    const attempt = buildPage(candidates.slice(0, count));
+    if (JSON.stringify(attempt).length <= maxChars) return attempt;
+    count = Math.max(1, Math.floor(count * 0.65));
+  }
+  return buildPage(candidates.slice(0, Math.min(1, candidates.length)));
+}
+
 export function createTools(): AgentTool[] {
   const tools: AgentTool[] = [
     // ==================== 1. 感知、环境与拉片拆解 ====================
-    { name: 'project_get', risk: 'read', description: '读取当前工程完整摘要：版本号、镜头（含转场/调色/参数/候选条，长片支持 shotOffset/shotLimit 分页且始终返回完整 shotOrder）、素材（含时长/分辨率）、视频片段、音轨明细（含 clipId）、画中画、字幕与制作策略。修改前必调。',
+    { name: 'project_get', risk: 'read', description: '读取当前工程完整摘要：版本号、镜头（含转场/调色/参数/候选条，长片支持 shotOffset/shotLimit 分页且始终返回完整 shotOrder）、素材（含时长/分辨率，多素材支持 assetOffset/assetLimit 分页）、视频片段、音轨明细（含 clipId）、画中画、字幕与制作策略。修改前必调。',
       parameters: object({
         shotOffset: int('可选：百镜长片分页起始索引，默认 0'),
         shotLimit: int('可选：单次读取镜头详情数量上限（1–60）'),
         shotIds: { type: 'array', items: { type: 'string' }, description: '可选：按镜头 ID 精确读取指定镜头详情' },
+        assetOffset: int('可选：多素材工程分页起始索引，默认 0'),
+        assetLimit: int('可选：单次读取素材详情数量上限'),
       }),
       async run(args, ctx) {
         const snapshot = await ctx.port.snapshot(ctx.projectId);
@@ -270,19 +307,35 @@ export function createTools(): AgentTool[] {
           ...(Number.isSafeInteger(args.shotOffset) ? { shotOffset: Number(args.shotOffset) } : {}),
           ...(Number.isSafeInteger(args.shotLimit) ? { shotLimit: Number(args.shotLimit) } : {}),
           ...(Array.isArray(args.shotIds) ? { shotIds: args.shotIds.map(String) } : {}),
+          ...(Number.isSafeInteger(args.assetOffset) ? { assetOffset: Number(args.assetOffset) } : {}),
+          ...(Number.isSafeInteger(args.assetLimit) ? { assetLimit: Number(args.assetLimit) } : {}),
           maxChars: 10_800,
         });
         return { content: JSON.stringify({ ...summary, task: snapshot.task ? { kind: snapshot.task.kind, status: snapshot.task.status, message: snapshot.task.message } : null }), revision: snapshot.project?.revision };
       } },
-    { name: 'bible_get', risk: 'read', description: '读取统一制片圣经（剧本梗概、视觉风格、角色库、固定场景母版库 Locations、道具库 Props、三维世界布局、戏剧节拍、场记连续性与分镜表）。', parameters: object({}),
-      async run(_args, ctx) {
+    { name: 'bible_get', risk: 'read', description: '读取统一制片圣经（剧本梗概、视觉风格、角色库、固定场景母版库 Locations、道具库 Props、三维世界布局、戏剧节拍、场记连续性与分镜表；百镜长片支持 shotOffset/shotLimit/shotIds 分页）。',
+      parameters: object({
+        shotOffset: int('可选：百镜分镜分页起始索引'),
+        shotLimit: int('可选：单次读取分镜数量上限'),
+        shotIds: { type: 'array', items: { type: 'string' }, description: '可选：按分镜/镜头 ID 精确读取' },
+      }),
+      async run(args, ctx) {
         const [story, snap] = await Promise.all([ctx.docs.story(), ctx.port.snapshot(ctx.projectId)]);
         let directorDoc = null;
         if (snap.project) { try { directorDoc = readDirectorDocument(snap.project) ?? null; } catch { directorDoc = null; } }
-        return { content: json({ story, directorDocument: directorDoc ? { version: directorDoc.version, status: directorDoc.status, hash: directorDoc.hash } : null, productionPolicy: snap.project?.productionPolicy ?? null }) };
+        const pagedStory = paginateStoryView(story, args, 9_800);
+        return { content: JSON.stringify({ story: pagedStory, directorDocument: directorDoc ? { version: directorDoc.version, status: directorDoc.status, hash: directorDoc.hash } : null, productionPolicy: snap.project?.productionPolicy ?? null }) };
       } },
-    { name: 'story_get', risk: 'read', description: '读取创作计划与制片圣经摘要（剧本、风格、角色库、场景库、道具库、分镜表、一致性分数）。', parameters: object({}),
-      async run(_args, ctx) { return { content: json(await ctx.docs.story()) }; } },
+    { name: 'story_get', risk: 'read', description: '读取创作计划与制片圣经摘要（剧本、风格、角色库、场景库、道具库、分镜表、一致性分数；百镜长片支持 shotOffset/shotLimit/shotIds 分页）。',
+      parameters: object({
+        shotOffset: int('可选：百镜分镜分页起始索引'),
+        shotLimit: int('可选：单次读取分镜数量上限'),
+        shotIds: { type: 'array', items: { type: 'string' }, description: '可选：按分镜/镜头 ID 精确读取' },
+      }),
+      async run(args, ctx) {
+        const story = await ctx.docs.story();
+        return { content: JSON.stringify(paginateStoryView(story, args, 10_600)) };
+      } },
     { name: 'shot_read_source', risk: 'read', description: '读取一个镜头的 HTML/CSS/JS 源码。', parameters: object({ shotId: str('镜头 ID') }, ['shotId']),
       async run(args, ctx) { return { content: json(await ctx.port.readSource(ctx.projectId, need(args, 'shotId'))) }; } },
     { name: 'env_check', risk: 'read', description: '检查本机 Chrome/FFmpeg/ffprobe/Blender 是否可用（渲染、声学质检、导出与 3D 白模预演所需）。', parameters: object({}),
@@ -344,7 +397,13 @@ export function createTools(): AgentTool[] {
         const target = Number(args.targetSeconds);
         const filmKind = ['general', 'suspense_short', 'product', 'explainer', 'lyrical'].includes(String(args.filmKind)) ? String(args.filmKind) as Story['filmKind'] : undefined;
         const story = await ctx.docs.updateStory(current => {
-          const characters = incoming.map(c => { const old = current.characters.find(o => o.id === c.id); return old ? { ...c, referenceAssetIds: c.referenceAssetIds.length ? c.referenceAssetIds : old.referenceAssetIds } : c; });
+          const characters = incoming.map(c => {
+            const old = current.characters.find(o => o.id === c.id);
+            if (!old) return c;
+            const mergedRefs = c.referenceAssetIds.length ? c.referenceAssetIds : old.referenceAssetIds;
+            const keptIdentity = c.identityAssetId ?? (old.identityAssetId && mergedRefs.includes(old.identityAssetId) ? old.identityAssetId : undefined);
+            return { ...c, referenceAssetIds: mergedRefs, ...(keptIdentity ? { identityAssetId: keptIdentity } : {}) };
+          });
           const kept = current.characters.filter(c => !characters.some(n => n.id === c.id) && current.shots.some(s => s.characters.includes(c.id)));
           const locations = incomingLocs ? incomingLocs.map(l => { const old = (current.locations ?? []).find(o => o.id === l.id); return old ? { ...l, referenceAssetIds: l.referenceAssetIds?.length ? l.referenceAssetIds : old.referenceAssetIds } : l; }) : current.locations;
           const props = incomingProps ? incomingProps.map(p => { const old = (current.props ?? []).find(o => o.id === p.id); return old ? { ...p, referenceAssetIds: p.referenceAssetIds?.length ? p.referenceAssetIds : old.referenceAssetIds } : p; }) : current.props;
@@ -411,13 +470,13 @@ export function createTools(): AgentTool[] {
       } },
 
     // ==================== 3. 美术资产库与场记管理（Characters / Locations / Props / Continuity） ====================
-    { name: 'character_upsert', risk: 'write', description: '新增或更新角色库中的一个角色（身份动机、可见特征、定妆参考图素材 ID、专属音色 voice）。参考图须是工程内图片素材。',
-      parameters: object({ id: str('角色 ID'), name: str('名字'), description: str('描述'), objective: str('可选：戏剧目标'), features: { type: 'array', items: { type: 'string' } }, referenceAssetIds: { type: 'array', items: { type: 'string' } }, voice: str('音色 ID，如 alloy / nova / shimmer / echo') }, ['id', 'name']),
+    { name: 'character_upsert', risk: 'write', description: '新增或更新角色库中的一个角色（身份动机、可见特征、定妆参考图素材 ID、主身份绑定图 identityAssetId、专属音色 voice）。参考图须是工程内图片素材。',
+      parameters: object({ id: str('角色 ID'), name: str('名字'), description: str('描述'), objective: str('可选：戏剧目标'), features: { type: 'array', items: { type: 'string' } }, referenceAssetIds: { type: 'array', items: { type: 'string' } }, identityAssetId: str('可选：显式指定角色主身份绑定的参考图 ID'), voice: str('音色 ID，如 alloy / nova / shimmer / echo') }, ['id', 'name']),
       async run(args, ctx) {
         const snapshot = await ctx.port.snapshot(ctx.projectId); const character = normalizeCharacter(args, 0);
         const bad = character.referenceAssetIds.filter(id => !snapshot.project?.assets.some(a => a.id === id && a.kind === 'image')); if (bad.length) throw new Error('参考图不是工程中的图片素材：' + bad.join(', '));
         const story = await ctx.docs.updateStory(current => ({ ...current, characters: [...current.characters.filter(c => c.id !== character.id), character], updatedAt: new Date().toISOString() }));
-        const rev = await syncBibleToProject(ctx, story, { promoteApproved: false });
+        const rev = await syncBibleToProject(ctx, story, { promoteApproved: false, patch: { characterId: character.id } });
         return { content: json({ ok: true, version: story.version, revision: rev, character }), revision: rev };
       } },
     { name: 'location_upsert', risk: 'write', description: '新增或更新固定场景母版库（Location：内/外景、昼夜、环境建筑陈设、光影基调、空镜母版参考图 ID 与世界布局 ID），保障同场戏背景一致。',
@@ -432,7 +491,7 @@ export function createTools(): AgentTool[] {
         const snapshot = await ctx.port.snapshot(ctx.projectId); const loc = normalizeLocation(args, 0);
         const bad = (loc.referenceAssetIds ?? []).filter(id => !snapshot.project?.assets.some(a => a.id === id && a.kind === 'image')); if (bad.length) throw new Error('场景参考图不是工程中的图片素材：' + bad.join(', '));
         const story = await ctx.docs.updateStory(current => ({ ...current, locations: [...(current.locations ?? []).filter(l => l.id !== loc.id), loc], updatedAt: new Date().toISOString() }));
-        const rev = await syncBibleToProject(ctx, story, { promoteApproved: false });
+        const rev = await syncBibleToProject(ctx, story, { promoteApproved: false, patch: { locationId: loc.id } });
         return { content: json({ ok: true, version: story.version, revision: rev, location: loc }), revision: rev };
       } },
     { name: 'prop_upsert', risk: 'write', description: '新增或更新关键叙事道具库（Prop：名称、外观细节、所属角色与参考图素材 ID），保障特写与远景道具一致。',
@@ -441,7 +500,7 @@ export function createTools(): AgentTool[] {
         const snapshot = await ctx.port.snapshot(ctx.projectId); const prop = normalizeProp(args, 0);
         const bad = (prop.referenceAssetIds ?? []).filter(id => !snapshot.project?.assets.some(a => a.id === id && a.kind === 'image')); if (bad.length) throw new Error('道具参考图不是工程中的图片素材：' + bad.join(', '));
         const story = await ctx.docs.updateStory(current => ({ ...current, props: [...(current.props ?? []).filter(p => p.id !== prop.id), prop], updatedAt: new Date().toISOString() }));
-        const rev = await syncBibleToProject(ctx, story, { promoteApproved: false });
+        const rev = await syncBibleToProject(ctx, story, { promoteApproved: false, patch: { propId: prop.id } });
         return { content: json({ ok: true, version: story.version, revision: rev, prop }), revision: rev };
       } },
     { name: 'continuity_log_upsert', risk: 'write', description: '记录或更新场记连续性日志（180° 轴线方向、人物服装道具状态、前后镜光影衔接备注）。',
@@ -456,7 +515,7 @@ export function createTools(): AgentTool[] {
           updatedAt: new Date().toISOString(),
         };
         const story = await ctx.docs.updateStory(current => ({ ...current, continuityLog: [...(current.continuityLog ?? []).filter(e => e.shotId !== entry.shotId), entry], updatedAt: entry.updatedAt }));
-        const rev = await syncBibleToProject(ctx, story, { promoteApproved: false });
+        const rev = await syncBibleToProject(ctx, story, { promoteApproved: false, patch: { continuityShotId: entry.shotId } });
         return { content: json({ ok: true, version: story.version, revision: rev, entry }), revision: rev };
       } },
     { name: 'project_set_style', risk: 'write', description: '从风格库选择风格 ID 应用到当前工程（传空字符串清除）。', parameters: object({ expectedRevision: int('当前工程版本'), styleId: str('风格库中的风格 ID') }, ['expectedRevision', 'styleId']),
@@ -742,8 +801,9 @@ export function createTools(): AgentTool[] {
           });
           return { ...current, shots, updatedAt: at };
         });
-        const rev = await syncBibleToProject(ctx, story, { promoteApproved: true });
-        return { content: json({ ok: true, revision: rev, approvedShots: approvedIds.length ? approvedIds : items.map(i => String(i.shotId)), summary: need(args, 'summary'), next: '白模预演已获批准！若已接入生图模型，推荐先调 stylize_keyframe 生成正式美术风格首帧，再调 generate_video / batch_generate_media 实际呈现。' }), revision: rev };
+        const targetPrevizIds = approvedIds.length ? approvedIds : items.map(i => String(i.shotId));
+        const rev = await syncBibleToProject(ctx, story, { promoteApproved: true, patch: { previzShotIds: targetPrevizIds } });
+        return { content: json({ ok: true, revision: rev, approvedShots: targetPrevizIds, summary: need(args, 'summary'), next: '白模预演已获批准！若已接入生图模型，推荐先调 stylize_keyframe 生成正式美术风格首帧，再调 generate_video / batch_generate_media 实际呈现。' }), revision: rev };
       } },
 
     // ==================== 6. 多模态生成、关键帧桥梁、批次并发与口型驱动 ====================
@@ -782,7 +842,8 @@ export function createTools(): AgentTool[] {
         const charIds = ids(args.characterIds).length ? ids(args.characterIds) : planned?.characters ?? [];
         for (const cid of charIds) {
           const c = story.characters.find(x => x.id === cid || x.name === cid);
-          if (c?.referenceAssetIds[0] && refs.length < 4) refs.push(c.referenceAssetIds[0]);
+          const chosen = c?.identityAssetId ?? c?.referenceAssetIds[0];
+          if (chosen && refs.length < 4) refs.push(chosen);
         }
         const locId = typeof args.locationId === 'string' && args.locationId ? args.locationId : planned?.locationId;
         if (locId && refs.length < 4) {
@@ -858,7 +919,8 @@ export function createTools(): AgentTool[] {
           const charIds = ids(args.characterIds).length ? ids(args.characterIds) : planned?.characters ?? [];
           for (const cid of charIds) {
             const c = story.characters.find(x => x.id === cid || x.name === cid);
-            if (c?.referenceAssetIds[0] && list.length < 1) list.push(c.referenceAssetIds[0]);
+            const chosen = c?.identityAssetId ?? c?.referenceAssetIds[0];
+            if (chosen && list.length < 1) list.push(chosen);
           }
         }
         const tail = typeof args.tailImageAssetId === 'string' && args.tailImageAssetId ? args.tailImageAssetId : planned?.previz?.styledTailAssetId ?? '';
@@ -989,7 +1051,7 @@ export function createTools(): AgentTool[] {
           const created = itemRefs.length && authFn
             ? (kind === 'video' && ctx.port.generateVideoReference ? await ctx.port.generateVideoReference(req, authFn) : ctx.port.generateImageReference ? await ctx.port.generateImageReference(req, authFn) : await rpc(ctx, 'media.generate', req) as { id: string })
             : await rpc(ctx, 'media.generate', req) as { id: string };
-          await ctx.saveBatchItemReceipt?.(batchKey, idx, created.id);
+          await ctx.saveBatchItemReceipt?.(batchKey, idx, created.id, args.autoApply !== false ? shotId : undefined);
           taskIds.push(created.id);
           if (args.autoApply !== false) autoApplyShots[created.id] = shotId;
         }
@@ -1287,23 +1349,38 @@ export function createTools(): AgentTool[] {
         const snap = await ctx.port.snapshot(ctx.projectId); if (!snap.project) throw new Error('没有打开的工程');
         const expected = revision(args); if (expected !== snap.project.revision) throw Object.assign(new Error('版本已变化'), { code: 'REVISION_CONFLICT' });
         const next = structuredClone(snap.project);
+        const scope = ctx.scopedShotIds?.size ? ctx.scopedShotIds : null;
         if (Array.isArray(args.setSubtitles)) {
-          next.subtitles = (args.setSubtitles as Record<string, unknown>[]).map((c, idx) => ({
-            id: typeof c.id === 'string' && c.id ? c.id : `sub-${idx + 1}`,
-            startSeconds: Number(c.startSeconds),
-            endSeconds: Number(c.endSeconds),
-            text: need(c, 'text').trim(),
-            ...(typeof c.speaker === 'string' && c.speaker ? { speaker: c.speaker } : {}),
-            ...(typeof c.shotId === 'string' && c.shotId ? { shotId: c.shotId } : {}),
-          }));
+          const incoming = (args.setSubtitles as Record<string, unknown>[]).map((c, idx) => {
+            const cueShotId = typeof c.shotId === 'string' && c.shotId ? c.shotId : undefined;
+            if (scope && (!cueShotId || !scope.has(cueShotId))) {
+              throw new Error(`限定镜头范围时设置字幕必须关联范围内的 shotId（收到 ${cueShotId ?? '空'}）`);
+            }
+            return {
+              id: typeof c.id === 'string' && c.id ? c.id : `sub-${scope ? `${[...scope][0]}-${idx + 1}` : idx + 1}`,
+              startSeconds: Number(c.startSeconds),
+              endSeconds: Number(c.endSeconds),
+              text: need(c, 'text').trim(),
+              ...(typeof c.speaker === 'string' && c.speaker ? { speaker: c.speaker } : {}),
+              ...(cueShotId ? { shotId: cueShotId } : {}),
+            };
+          });
+          if (scope) {
+            const preserved = (snap.project.subtitles ?? []).filter(c => !c.shotId || !scope.has(c.shotId));
+            next.subtitles = [...preserved, ...incoming].sort((a, b) => a.startSeconds - b.startSeconds);
+          } else {
+            next.subtitles = incoming;
+          }
         }
         if (args.addOverlay && typeof args.addOverlay === 'object') {
           const ov = args.addOverlay as Record<string, unknown>;
+          const ovShotId = need(ov, 'shotId');
+          if (scope && !scope.has(ovShotId)) throw new Error(`画中画图层不能挂载到范围外镜头 ${ovShotId}`);
           const asset = next.assets.find(a => a.id === need(ov, 'assetId') && (a.kind === 'image' || a.kind === 'video'));
           if (!asset) throw new Error('画中画素材须为工程内已有的图片或视频');
           const entry: OverlayClip = {
             id: `ov-${randomUUID().slice(0, 8)}`,
-            shotId: need(ov, 'shotId'),
+            shotId: ovShotId,
             assetId: asset.id,
             kind: asset.kind as 'image' | 'video',
             x: Number(ov.x), y: Number(ov.y), width: Number(ov.width), height: Number(ov.height),
@@ -1315,6 +1392,10 @@ export function createTools(): AgentTool[] {
           next.overlayClips = [...(next.overlayClips ?? []), entry];
         }
         if (typeof args.removeOverlayId === 'string' && args.removeOverlayId) {
+          const targetOv = (next.overlayClips ?? []).find(o => o.id === args.removeOverlayId);
+          if (scope && targetOv && !scope.has(targetOv.shotId)) {
+            throw new Error(`越界拦截：禁止移除范围外镜头 ${targetOv.shotId} 的画中画图层`);
+          }
           next.overlayClips = (next.overlayClips ?? []).filter(o => o.id !== args.removeOverlayId);
         }
         const committed = await ctx.port.commit(ctx.projectId, expected, next, {}, '智能体：编辑画中画叠加层与时间轴字幕');

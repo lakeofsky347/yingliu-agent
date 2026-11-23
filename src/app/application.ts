@@ -228,15 +228,34 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
           .catch(()=>providers.complete([{role:'user',content:prompt}],'你是映流智能体的专精动态图形与场景代码工程师。只返回合法 JSON 对象 {html,css,js}。',signal,undefined,'director'));
         return parseSceneSource(raw);
       };
-      const waitPreviewTask=async(taskId:string|undefined)=>{
-        if(!taskId)return null;
+      const waitPreviewTask=async(taskId:string|undefined):Promise<{status:'complete'|'failed'|'cancelled'|'timeout'|'missing';error?:string;message?:string}>=>{
+        if(!taskId)return {status:'missing',error:'保存镜头源码后未返回预览校验任务 ID'};
         for(let i=0;i<240;i++){
           signal.throwIfAborted();
           const snap=await backend.call('current',{projectId:id});
-          if(!snap.task||snap.task.id!==taskId||snap.task.status!=='running')return snap;
+          if(snap.task?.id===taskId){
+            if(snap.task.status!=='running')return {status:snap.task.status as 'complete'|'failed'|'cancelled',error:snap.task.error,message:snap.task.message};
+          }else{
+            const recorded=await backend.route('tasks',{projectId:id}).catch(()=>({ok:false,value:undefined}));
+            const list=recorded.ok&&recorded.value&&typeof recorded.value==='object'?((recorded.value as {tasks?:{id?:string;status?:string;error?:string;message?:string}[]}).tasks??[]):[];
+            const match=list.find(t=>t.id===taskId);
+            if(match&&match.status&&match.status!=='running'){
+              return {status:match.status as 'complete'|'failed'|'cancelled',error:match.error,message:match.message};
+            }
+          }
           await new Promise(r=>setTimeout(r,60));
         }
-        return await backend.call('current',{projectId:id});
+        return {status:'timeout',error:'镜头预览渲染校验等待超时'};
+      };
+      const assertPreviewVerified=(outcome:{status:'complete'|'failed'|'cancelled'|'timeout'|'missing';error?:string;message?:string})=>{
+        if(outcome.status==='complete')return;
+        if(outcome.status==='cancelled'){
+          throw Object.assign(new Error('镜头源码已保存，但预览渲染校验已被取消，未通过渲染校验'),{code:'PREVIEW_CANCELLED'});
+        }
+        if(outcome.status==='timeout'||outcome.status==='missing'){
+          throw Object.assign(new Error(`镜头源码已保存，但预览渲染校验未完成（${outcome.error||outcome.status}），未确认通过渲染校验`),{code:'PREVIEW_UNVERIFIED'});
+        }
+        throw new Error(`专精场景模型自动修复后镜头渲染仍报错：${outcome.error||outcome.message||'渲染校验失败'}`);
       };
       const basePayload={
         shot:{id:shot.id,title:shot.title,intent:shot.intent,composition:shot.composition,action:shot.action,params:shot.params,hasVideo:Boolean(project.videoClips?.some(c=>c.shotId===shot.id))},
@@ -250,15 +269,13 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
       // CAS-protected: bind strictly to `baseRevision` so concurrent manual edits are NEVER overwritten!
       let saved=await backend.call('saveSource',{projectId:id,shotId,expectedRevision:baseRevision,source:{html:parsed.html,css:parsed.css,js:parsed.js}});
       let checked=await waitPreviewTask(saved.task?.id);
-      if(checked?.task?.id===saved.task?.id&&checked?.task?.status==='failed'){
-        const errDetail=checked.task.error||checked.task.message||'渲染校验失败';
+      if(checked.status==='failed'){
+        const errDetail=checked.error||checked.message||'渲染校验失败';
         parsed=await askSceneModel({...basePayload,currentSource:parsed,instruction:`${instruction}\n\n【紧急修复】上一版镜头源码在无头浏览器渲染校验时报错：${errDetail}。请修复该错误并返回完整合法 JSON {html,css,js}。`});
         saved=await backend.call('saveSource',{projectId:id,shotId,expectedRevision:saved.project?.revision,source:{html:parsed.html,css:parsed.css,js:parsed.js}});
         checked=await waitPreviewTask(saved.task?.id);
-        if(checked?.task?.id===saved.task?.id&&checked?.task?.status==='failed'){
-          throw new Error(`专精场景模型自动修复后镜头渲染仍报错：${checked.task.error||checked.task.message}`);
-        }
       }
+      assertPreviewVerified(checked);
       return {shotId,revision:saved.project?.revision??0,summary:`已由专精场景模型更新并通过渲染校验：${shot.title}`};
     },
   };

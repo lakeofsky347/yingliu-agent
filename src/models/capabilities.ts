@@ -1,6 +1,6 @@
 import type { ModelProtocol, ResolvedModel } from './contracts.ts';
 import type { MediaOperation } from '../jobs/contracts.ts';
-import { templateAcceptsImage, templateMaxImages } from './template-presets.ts';
+import { templateAcceptsImage, templateAcceptsLipSync, templateMaxImages } from './template-presets.ts';
 
 export type MediaReferenceRole = 'reference' | 'first_frame' | 'last_frame' | 'character' | 'style' | 'layout' | 'depth' | 'location' | 'prop';
 export interface MediaReferenceInput { type:'image'|'video'|'audio'; dataUrl?:string; role?:string }
@@ -59,7 +59,10 @@ export function getMediaCapabilities(resolved:ResolvedModel):MediaCapabilities {
       result.parameters=[...IMAGE_PARAMETERS];
     }else if(resolved.model.outputModalities.includes('video')){
       const acceptsImage=templateAcceptsImage(resolved.model.parameters);
-      result.operations=maxImgs>=2?['text-to-video','image-to-video','first-last-frame-video','lip-sync-video']:acceptsImage?['text-to-video','image-to-video','lip-sync-video']:['text-to-video','lip-sync-video'];
+      const acceptsLipSync=templateAcceptsLipSync(resolved.model.parameters);
+      const ops:MediaOperation[]=maxImgs>=2?['text-to-video','image-to-video','first-last-frame-video']:acceptsImage?['text-to-video','image-to-video']:['text-to-video'];
+      if(acceptsLipSync)ops.push('lip-sync-video');
+      result.operations=ops;
       result.references=acceptsImage?{max:maxImgs||1,roles:['first_frame','last_frame','reference','character','style','layout','depth'],defaultRole:'first_frame'}:{max:0,roles:[],defaultRole:'first_frame'};
       result.parameters=[...VIDEO_PARAMETERS];
       result.duration={integer:false,min:0,max:120};

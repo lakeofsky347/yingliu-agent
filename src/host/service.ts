@@ -4,7 +4,7 @@ import {resolve,join,relative} from 'node:path';
 import {atomicRename} from './atomic-rename.ts';
 import {projectOpenPath} from './file-opener.ts';
 import {homedir} from 'node:os';
-import {applyProductionPolicy,assetOrigin,createProject,compileSpec,defaultProductionPolicy,defaultSceneSource,updateShot,updateTarget,validateProject,reorderShots} from '../core/index.ts';
+import {applyProductionPolicy,assertProductionOperation,assetOrigin,createProject,compileSpec,defaultProductionPolicy,defaultSceneSource,productionPolicyFingerprint,updateShot,updateTarget,validateProject,reorderShots} from '../core/index.ts';
 import type {VideoProject,StudioSnapshot,TaskState,EnvironmentSettings,ProviderGroup,RpcResult,SceneSource,Shot,ModelRoute,TtsSettings,AudioClip,VideoClip,Asset,ProductionMode,ProductionPolicy} from '../shared/types.ts';
 import {approveDirectorDocument,saveDirectorDocument} from '../director/document.ts';
 import {localExportQuality,localQualityFrames,type LocalQualityFrame,type LocalQualityReport} from '../workflows/local-quality.ts';
@@ -18,9 +18,8 @@ import {BlenderRunner,type PrevizSceneSpec} from './blender.ts';
 import {synthesizeLocalSfx} from '../media/local-sfx.ts';
 import {analyzeAudioAcoustics,deconstructReferenceVideo} from '../media/deconstruct.ts';
 import {deriveSubtitles,formatAss,formatEdl,formatFcpxml,formatOtio,formatSrt} from '../media/delivery.ts';
-import type {MediaProjectPort} from '../jobs/contracts.ts';
 import {inspectGeneratedMedia,readProjectImage} from '../media/inspect.ts';
-import type { GeneratedFile, MediaTask } from '../jobs/contracts.ts';
+import type { GeneratedFile, MediaOperation, MediaProjectPort, MediaTask } from '../jobs/contracts.ts';
 import {inspectCredential,isCredentialError,updateCredential} from '../app/secrets.ts';
 import {defaultTtsSettings,validateTtsSettings} from '../shared/tts-capability.ts';
 import {normalizeVideoStyle} from '../shared/video-style.ts';
@@ -73,6 +72,16 @@ export class StudioService {
   }
   /** Trusted host port: generated paths never cross the public RPC or model tool surface. */
   async inspectMediaProject(){await this.initialized;const {project}=this.required();return {revision:project.revision,shotIds:project.shots.map(shot=>shot.id)};}
+  async authorizeMediaOperation(operation:MediaOperation,shotId?:string):Promise<string>{
+    await this.initialized;
+    const {project}=this.required();
+    if(project.schemaVersion===3){
+      const op=(operation==='text-to-image'||operation==='image-compose')?'image':'video';
+      assertProductionOperation(project,op,shotId?[shotId]:undefined);
+      return productionPolicyFingerprint(project);
+    }
+    return '';
+  }
   async readMediaImage(assetId:string,shotId?:string){await this.initialized;const {root,project}=this.required();return readProjectImage(root,project,assetId,shotId);}
   async readMediaAsset(assetId:string,kind:'video'|'audio'){
     await this.initialized;const {root,project}=this.required();
@@ -105,6 +114,10 @@ export class StudioService {
       const applications=(project.extensions.mediaApplications??{}) as Record<string,{assetIds:string[];revision:number}>;
       const prior=applications[input.provenance.taskId];if(prior)return structuredClone(prior);
       this.assertRevision(input,true);if(input.shotId&&!project.shots.some(shot=>shot.id===input.shotId))throw new Error('媒体任务镜头已不存在');
+      if(project.schemaVersion===3){
+        const isImgOp=input.provenance.operation==='text-to-image'||input.provenance.operation==='image-compose'||input.files.every(f=>f.mimeType.startsWith('image/'));
+        assertProductionOperation(project,isImgOp?'image':'video',input.shotId?[input.shotId]:undefined);
+      }
       const next=structuredClone(project),assetIds:string[]=[];
       for(const file of input.files){
         const asset=await this.store.importAsset(root,{path:file.path,mime:file.mimeType,name:file.name,description:input.provenance.prompt},this.settings);
@@ -360,7 +373,12 @@ export class StudioService {
           const clip:VideoClip={id:existing?.id??randomUUID(),shotId:raw.shotId,assetId:raw.assetId,trimStart:Number(raw.trimStart??0),...(raw.trimEnd!==undefined?{trimEnd:Number(raw.trimEnd)}:{}),speed:Number(raw.speed??1),fit:raw.fit??'cover',audio:raw.audio??'mute'};
           if(next.schemaVersion<2)next.schemaVersion=2;
           if(next.schemaVersion===3){
+            assertProductionOperation(next,'video',[clip.shotId]);
             const targetShot=next.shots.find(s=>s.id===clip.shotId),videoAsset=next.assets.find(a=>a.id===clip.assetId);
+            if(videoAsset?.provenance?.usage==='reference_only')throw Object.assign(new Error(`参考专用视频 ${videoAsset.id} 不得进入成片`),{code:'PRODUCTION_POLICY_VIOLATION'});
+            if(videoAsset&&assetOrigin(videoAsset)!=='model_generation'&&!next.productionPolicy?.allowImportedVideo){
+              throw Object.assign(new Error(`镜头 ${clip.shotId} 使用自有或未知来源视频前须得到用户许可`),{code:'PRODUCTION_POLICY_VIOLATION'});
+            }
             if(targetShot&&videoAsset&&targetShot.visual?.kind!=='hybrid')targetShot.visual={kind:assetOrigin(videoAsset)==='model_generation'?'model_video':'imported_video'};
           }
           next.videoClips=[...(next.videoClips??[]).filter(item=>item.shotId!==clip.shotId),clip];if(clip.audio==='keep')next.target.audioMode='mixed';await this.persist(next,{},'保存视频片段');break;

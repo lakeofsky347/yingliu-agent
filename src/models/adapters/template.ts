@@ -33,7 +33,7 @@ export function templateOutput(parameters: Record<string, unknown>): 'image' | '
   return typeof parameters.preset === 'string' ? TEMPLATE_PRESETS[parameters.preset]?.output : undefined;
 }
 
-export interface TemplateVars { prompt: string; model: string; clientRequestId: string; image?: string; tailImage?: string; images?: string[]; duration?: number; parameters: Record<string, unknown>; id?: string }
+export interface TemplateVars { prompt: string; model: string; clientRequestId: string; image?: string; tailImage?: string; images?: string[]; video?: string; audio?: string; duration?: number; parameters: Record<string, unknown>; id?: string }
 function lookupVar(vars: TemplateVars, name: string): unknown {
   if (name.startsWith('param.')) return vars.parameters[name.slice(6)];
   if (name === 'modelOwner' || name === 'modelName') {
@@ -41,7 +41,7 @@ function lookupVar(vars: TemplateVars, name: string): unknown {
     if (parts.length !== 2 || parts.some(part => !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(part))) throw new Error('此模型模板需要 owner/name；社区模型请选择 Replicate 指定版本模板并填写版本标识');
     return parts[name === 'modelOwner' ? 0 : 1];
   }
-  return ({ prompt: vars.prompt, model: vars.model, clientRequestId: vars.clientRequestId, image: vars.image, tailImage: vars.tailImage, images: vars.images, duration: vars.duration, id: vars.id } as Record<string, unknown>)[name];
+  return ({ prompt: vars.prompt, model: vars.model, clientRequestId: vars.clientRequestId, image: vars.image, tailImage: vars.tailImage, images: vars.images, video: vars.video, audio: vars.audio, duration: vars.duration, id: vars.id } as Record<string, unknown>)[name];
 }
 function token(vars: TemplateVars, expression: string): unknown {
   const [name, fallback] = expression.split('|', 2); const value = lookupVar(vars, name.trim());
@@ -130,12 +130,12 @@ async function readJson(response: Response, key?: string): Promise<unknown> {
   if (!response.ok) { const body = key ? text.split(key).join('[redacted]') : text; throw Object.assign(new Error(`媒体接口请求失败（HTTP ${response.status}）：${body.slice(0, 300)}`), { httpStatus: response.status, status: response.status, retryable: response.status === 429 || response.status >= 500 }); }
   try { return JSON.parse(text); } catch { throw new Error('媒体接口返回无效 JSON'); }
 }
-export interface TemplateInput { clientRequestId: string; model: ModelDefinition; prompt: string; image?: string; tailImage?: string; images?: string[]; duration?: number; parameters: Record<string, unknown> }
+export interface TemplateInput { clientRequestId: string; model: ModelDefinition; prompt: string; image?: string; tailImage?: string; images?: string[]; video?: string; audio?: string; duration?: number; parameters: Record<string, unknown> }
 export interface BinaryResult { kind: 'binary'; bytes: Uint8Array; mimeType: string }
 
 export async function submitTemplate(context: TemplateContext, input: TemplateInput, output: 'image' | 'video' | 'audio'): Promise<RemoteJob | BinaryResult> {
   const template = resolveTemplate(input.model.parameters);
-  const vars: TemplateVars = { prompt: input.prompt, model: input.model.model, clientRequestId: input.clientRequestId, image: input.image, tailImage: input.tailImage, images: input.images, duration: input.duration, parameters: { ...input.model.parameters, ...input.parameters } };
+  const vars: TemplateVars = { prompt: input.prompt, model: input.model.model, clientRequestId: input.clientRequestId, image: input.image, tailImage: input.tailImage, images: input.images, video: input.video, audio: input.audio, duration: input.duration, parameters: { ...input.model.parameters, ...input.parameters } };
   const response = await (context.fetch ?? fetch)(url(context.connection, fillPath(template.submitPath, vars)), { method: template.submitMethod, redirect: 'error', headers: headers(context, template, true), body: JSON.stringify(fillBody(template.submitBody, vars)), signal: AbortSignal.any([context.signal, AbortSignal.timeout(context.connection.requestTimeoutMs)]) });
   if (template.responseType === 'binary') {
     if (!response.ok) await readJson(response, context.key);

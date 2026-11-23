@@ -8,7 +8,7 @@ import { directorPlanHash } from '../director/document.ts';
 import { writeDurableFile } from './durable-file.ts';
 
 export interface StoryStyle { look: string; palette: string; typography: string; motion: string; negative: string }
-export interface StoryCharacter { id: string; name: string; description: string; objective?: string; baselineEmotion?: string; features: string[]; referenceAssetIds: string[]; voice?: string }
+export interface StoryCharacter { id: string; name: string; description: string; objective?: string; baselineEmotion?: string; features: string[]; referenceAssetIds: string[]; identityAssetId?: string; voice?: string }
 export type StoryLocation = DirectorLocation;
 export type StoryProp = DirectorProp;
 export interface StoryPreviz {
@@ -51,11 +51,15 @@ export function emptyStory(projectId: string): Story {
 export function normalizeStyle(value: unknown): StoryStyle { const v = (value ?? {}) as Record<string, unknown>; return { look: text(v.look, 400), palette: text(v.palette, 200), typography: text(v.typography, 200), motion: text(v.motion, 300), negative: text(v.negative, 300) }; }
 export function normalizeCharacter(value: unknown, index: number): StoryCharacter {
   const v = (value ?? {}) as Record<string, unknown>; const name = text(v.name, 40); if (!name) throw new Error(`角色 ${index + 1} 缺少 name`);
+  const refs = list(v.referenceAssetIds, 6, 80);
+  const explicitIdentity = text(v.identityAssetId, 80);
   return {
     id: id(v.id, 'c' + (index + 1)), name, description: text(v.description ?? v.identity, 600),
     ...(text(v.objective, 200) ? { objective: text(v.objective, 200) } : {}),
     ...(text(v.baselineEmotion, 120) ? { baselineEmotion: text(v.baselineEmotion, 120) } : {}),
-    features: list(v.features, 12, 80), referenceAssetIds: list(v.referenceAssetIds, 6, 80),
+    features: list(v.features, 12, 80),
+    referenceAssetIds: explicitIdentity && !refs.includes(explicitIdentity) ? [...refs, explicitIdentity] : refs,
+    ...(explicitIdentity ? { identityAssetId: explicitIdentity } : {}),
     ...(text(v.voice, 80) ? { voice: text(v.voice, 80) } : {}),
   };
 }
@@ -155,41 +159,121 @@ export function storyBrief(story: Story | null): string {
   return `已批准的创作计划（制片圣经与分镜，按此执行，偏离前先用 plan_shots / bible_save_plan 更新）：\n《${story.title}》${story.filmKind ? `[${story.filmKind}] ` : ''}${story.logline}\n风格：${JSON.stringify(story.style)}\n角色：${story.characters.map(c => `${c.id}=${c.name}${c.voice ? '[音色:' + c.voice + ']' : ''}（${c.features.join('，')}）`).join('；') || '无'}${locLine}${propLine}${layoutLine}\n分镜：\n${shots}`.slice(0, 8500);
 }
 
+export interface DirectorSyncOptions {
+  promoteApproved?: boolean;
+  /** When set, applies a surgical field-level patch onto an existing draft DirectorDocument so workbench user edits are never clobbered! */
+  patch?: {
+    characterId?: string;
+    locationId?: string;
+    propId?: string;
+    continuityShotId?: string;
+    previzShotIds?: string[];
+  };
+}
+
 /** Build a canonical DirectorDocument from the unified Story whenever project shots match. */
 export function buildDirectorDocumentFromStory(
   story: Story,
   project: VideoProject,
   existingDoc?: DirectorDocument,
-  options: { promoteApproved?: boolean } = {},
+  options: DirectorSyncOptions = {},
 ): DirectorDocument | null {
+  const allAssetIds = new Set(project.assets.map(a => a.id));
   const imageIds = new Set(project.assets.filter(a => a.kind === 'image').map(a => a.id));
-  const mapChars = () => story.characters.map(c => ({
+  const mapChar = (c: StoryCharacter) => ({
     id: c.id, name: c.name, identity: c.description || c.features.join('，') || c.name,
     ...(c.objective ? { objective: c.objective } : {}),
     ...(c.baselineEmotion ? { baselineEmotion: c.baselineEmotion } : {}),
     features: c.features,
     referenceAssetIds: c.referenceAssetIds.filter(id => imageIds.has(id)),
     ...(c.voice ? { voice: c.voice } : {}),
-  }));
+  });
+  const mapChars = () => story.characters.map(mapChar);
   const mapLocs = () => story.locations?.length ? story.locations.map(l => ({ ...l, referenceAssetIds: (l.referenceAssetIds ?? []).filter(id => imageIds.has(id)) })) : undefined;
   const mapProps = () => story.props?.length ? story.props.map(p => ({ ...p, referenceAssetIds: (p.referenceAssetIds ?? []).filter(id => imageIds.has(id)) })) : undefined;
+  const pickIdentityAsset = (c: StoryCharacter): string | undefined => {
+    if (c.identityAssetId && imageIds.has(c.identityAssetId)) return c.identityAssetId;
+    const prior = existingDoc?.plan.identityMap.find(m => m.characterId === c.id)?.assetId;
+    if (prior && imageIds.has(prior) && c.referenceAssetIds.includes(prior)) return prior;
+    return c.referenceAssetIds.find(id => imageIds.has(id));
+  };
 
-  // Never promote an unapproved workbench draft to 'approved' during background asset/continuity sync!
-  if (existingDoc?.status === 'draft' && options.promoteApproved !== true) {
-    const draftPlan: DirectorPlan = {
-      ...structuredClone(existingDoc.plan),
-      characters: mapChars().length ? mapChars() : existingDoc.plan.characters,
-      ...(mapLocs() ? { locations: mapLocs() } : {}),
-      ...(mapProps() ? { props: mapProps() } : {}),
-      ...(story.continuityLog?.length ? { continuityLog: structuredClone(story.continuityLog) } : {}),
-    };
+  // Never clobber unapproved workbench draft edits OR promote a draft during incremental entity/previz sync!
+  if (existingDoc && (existingDoc.status === 'draft' && options.promoteApproved !== true || (existingDoc.status === 'draft' && Boolean(options.patch)))) {
+    const draftPlan: DirectorPlan = structuredClone(existingDoc.plan);
+    const p = options.patch;
+    if (p) {
+      if (p.characterId) {
+        const updatedChar = story.characters.find(c => c.id === p.characterId);
+        if (updatedChar) {
+          const mapped = mapChar(updatedChar);
+          const idx = draftPlan.characters.findIndex(c => c.id === p.characterId);
+          if (idx >= 0) draftPlan.characters[idx] = mapped;
+          else draftPlan.characters.push(mapped);
+          const chosenAsset = pickIdentityAsset(updatedChar);
+          draftPlan.identityMap = [
+            ...draftPlan.identityMap.filter(m => m.characterId !== p.characterId),
+            ...(chosenAsset ? [{ characterId: p.characterId, assetId: chosenAsset }] : []),
+          ];
+        }
+      }
+      if (p.locationId) {
+        const updatedLoc = (story.locations ?? []).find(l => l.id === p.locationId);
+        if (updatedLoc) {
+          const mappedLoc = { ...updatedLoc, referenceAssetIds: (updatedLoc.referenceAssetIds ?? []).filter(id => imageIds.has(id)) };
+          const locs = [...(draftPlan.locations ?? [])];
+          const idx = locs.findIndex(l => l.id === p.locationId);
+          if (idx >= 0) locs[idx] = mappedLoc;
+          else locs.push(mappedLoc);
+          draftPlan.locations = locs;
+        }
+      }
+      if (p.propId) {
+        const updatedProp = (story.props ?? []).find(pr => pr.id === p.propId);
+        if (updatedProp) {
+          const mappedProp = { ...updatedProp, referenceAssetIds: (updatedProp.referenceAssetIds ?? []).filter(id => imageIds.has(id)) };
+          const props = [...(draftPlan.props ?? [])];
+          const idx = props.findIndex(pr => pr.id === p.propId);
+          if (idx >= 0) props[idx] = mappedProp;
+          else props.push(mappedProp);
+          draftPlan.props = props;
+        }
+      }
+      if (p.continuityShotId) {
+        const updatedEntry = (story.continuityLog ?? []).find(e => e.shotId === p.continuityShotId);
+        if (updatedEntry) {
+          const logs = [...(draftPlan.continuityLog ?? []).filter(e => e.shotId !== p.continuityShotId), structuredClone(updatedEntry)];
+          draftPlan.continuityLog = logs;
+        }
+      }
+      if (p.previzShotIds?.length) {
+        const targetSet = new Set(p.previzShotIds);
+        draftPlan.shots = draftPlan.shots.map(ds => {
+          if (!targetSet.has(ds.shotId)) return ds;
+          const storyShot = story.shots.find(ss => ss.shotId === ds.shotId || ss.id === ds.shotId);
+          if (!storyShot?.previz) return ds;
+          const refs = [...ds.references.map(r => structuredClone(r))];
+          const ensureImgRef = (assetId: string | undefined, purpose: DirectorReference['purpose']) => {
+            if (!assetId || !imageIds.has(assetId)) return;
+            if (!refs.some(r => r.assetId === assetId && r.purpose === purpose)) {
+              refs.push({ assetId, purpose, usage: 'reference_only' });
+            }
+          };
+          ensureImgRef(storyShot.previz.imageAssetId, 'blocking');
+          ensureImgRef(storyShot.previz.depthAssetId, 'depth');
+          return { ...ds, previz: structuredClone(storyShot.previz), references: refs };
+        });
+      }
+    }
     const checkedDraft = validateDirectorPlan(draftPlan);
     if (!checkedDraft.ok || !checkedDraft.plan) return existingDoc;
+    const nextHash = directorPlanHash(checkedDraft.plan);
+    if (nextHash === existingDoc.hash) return existingDoc;
     return {
       schemaVersion: 1,
       version: existingDoc.version + 1,
       status: 'draft',
-      hash: directorPlanHash(checkedDraft.plan),
+      hash: nextHash,
       plan: checkedDraft.plan,
       updatedAt: new Date().toISOString(),
     };
@@ -207,7 +291,8 @@ export function buildDirectorDocumentFromStory(
     const dialogue: DialogueEvent[] = validDlg.length ? validDlg : (s.dialogue && validChars[0] && audioStrategy !== 'silent'
       ? [{ id: `dlg-${idx + 1}`, characterId: validChars[0], start: 0, end: Math.max(0.2, Math.min(s.durationSeconds, s.durationSeconds - 0.1)), text: s.dialogue }]
       : []);
-    const preservedRefs: DirectorReference[] = (s.references ?? []).filter(r => imageIds.has(r.assetId)).map(r => structuredClone(r));
+    // Preserve all valid project asset references (including video motion/pacing references, not just images!)
+    const preservedRefs: DirectorReference[] = (s.references ?? []).filter(r => allAssetIds.has(r.assetId)).map(r => structuredClone(r));
     const addRef = (assetId: string | undefined, purpose: DirectorReference['purpose']) => {
       if (!assetId || !imageIds.has(assetId)) return;
       if (!preservedRefs.some(r => r.assetId === assetId && r.purpose === purpose)) {
@@ -255,8 +340,8 @@ export function buildDirectorDocumentFromStory(
     storyBeats: (story.storyBeats ?? []).filter(b => b.shotIds.every(id => seenShotIds.has(id))),
     worldLayouts: story.worldLayouts ?? [],
     identityMap: story.characters
-      .filter(c => c.referenceAssetIds.some(id => imageIds.has(id)))
-      .map(c => ({ characterId: c.id, assetId: c.referenceAssetIds.find(id => imageIds.has(id))! })),
+      .map(c => ({ characterId: c.id, assetId: pickIdentityAsset(c) }))
+      .filter((entry): entry is { characterId: string; assetId: string } => Boolean(entry.assetId)),
     ...(story.continuityLog?.length ? { continuityLog: story.continuityLog } : {}),
     shots: uniqueShots,
   };
@@ -297,14 +382,18 @@ export function mergeDirectorPlanIntoStory(
     logline: plan.logline ?? (current.logline || plan.storyBeats.map(b => b.change).join('；').slice(0, 600) || '按导演计划执行'),
     targetSeconds: plan.targetSeconds ?? plan.shots.reduce((sum, s) => sum + s.durationSeconds, 0),
     style: plan.style ? normalizeStyle(plan.style) : current.style,
-    characters: plan.characters.map(c => ({
-      id: c.id, name: c.name, description: c.identity,
-      ...(c.objective ? { objective: c.objective } : {}),
-      ...(c.baselineEmotion ? { baselineEmotion: c.baselineEmotion } : {}),
-      features: c.features ?? [],
-      referenceAssetIds: [...new Set([...(c.referenceAssetIds ?? []), ...plan.identityMap.filter(m => m.characterId === c.id).map(m => m.assetId)])],
-      ...(c.voice ? { voice: c.voice } : {}),
-    })),
+    characters: plan.characters.map(c => {
+      const explicitIdentity = plan.identityMap.find(m => m.characterId === c.id)?.assetId;
+      return {
+        id: c.id, name: c.name, description: c.identity,
+        ...(c.objective ? { objective: c.objective } : {}),
+        ...(c.baselineEmotion ? { baselineEmotion: c.baselineEmotion } : {}),
+        features: c.features ?? [],
+        referenceAssetIds: [...new Set([...(c.referenceAssetIds ?? []), ...plan.identityMap.filter(m => m.characterId === c.id).map(m => m.assetId)])],
+        ...(explicitIdentity ? { identityAssetId: explicitIdentity } : {}),
+        ...(c.voice ? { voice: c.voice } : {}),
+      };
+    }),
     ...(plan.locations ? { locations: structuredClone(plan.locations) } : {}),
     ...(plan.props ? { props: structuredClone(plan.props) } : {}),
     storyBeats: structuredClone(plan.storyBeats),

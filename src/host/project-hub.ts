@@ -46,6 +46,7 @@ export class ProjectHub {
   mediaPort():MediaProjectPort {
     return {
       inspect:async id=>{await this.initialized;return (await this.service(id)).inspectMediaProject();},
+      authorizeOperation:async(id,operation,shotId)=>{await this.initialized;return (await this.service(id)).authorizeMediaOperation(operation,shotId);},
       readImage:async(id,assetId,shotId)=>{await this.initialized;return (await this.service(id)).readMediaImage(assetId,shotId);},
       readMediaAsset:async(id,assetId,kind)=>{await this.initialized;return (await this.service(id)).readMediaAsset(assetId,kind);},
       validateArtifact:async(path,mime,id,signal)=>{await this.initialized;return (await this.service(id)).validateMediaArtifact(path,mime,signal);},

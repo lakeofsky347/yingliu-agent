@@ -4,7 +4,7 @@ import { resolveTemplate } from './adapters/template.ts';
 
 export type UploadPurpose = 'review' | 'video-reference';
 export interface UploadDestination { fingerprint:string; origin:string; model:string }
-export interface UploadConsentChallenge { id:string; purpose:UploadPurpose; origin:string; model:string; assetId?:string }
+export interface UploadConsentChallenge { id:string; purpose:UploadPurpose; origin:string; model:string; assetId?:string; assetIds?:string[]; role?: 'image' | 'video' }
 export type AuthorizeUpload = (destination:UploadDestination)=>void;
 
 export function uploadDestination({connection,model}:ResolvedModel):UploadDestination {

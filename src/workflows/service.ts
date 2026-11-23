@@ -350,7 +350,8 @@ export class WorkflowService {
       if(visual.taskId)next.extensions.mediaApplications={...(next.extensions.mediaApplications as object??{}),[visual.taskId]:{assetIds:assets.map(asset=>asset.id),revision:expectedRevision+1}};
       if(record.request.narration){const speech=this.step(record,'speech',plan.shotId),audio=record.assets?.[speech.id]?.[0];if(speech.status!=='complete'||!audio)throw new Error('配音任务尚未完成');if(!next.assets.some(item=>item.id===audio.id))next.assets.push(audio);shot.narration=plan.narration;next.audioClips=[...(next.audioClips??[]).filter(clip=>clip.shotId!==shot.id||clip.role!=='voice'),{id:randomUUID(),assetId:audio.id,shotId:shot.id,role:'voice',startSeconds:0,trimStart:0,volume:1,fadeIn:0,fadeOut:0}];next.target.audioMode='mixed';}
     }
-    next.schemaVersion=2;next.extensions.workflowApplications={...(next.extensions.workflowApplications as object??{}),[record.id]:expectedRevision+1};
+    if(next.schemaVersion<2)next.schemaVersion=2;
+    next.extensions.workflowApplications={...(next.extensions.workflowApplications as object??{}),[record.id]:expectedRevision+1};
     fitCandidateAudio(next);
     return {expectedRevision,project:next,sources};
   }

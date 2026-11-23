@@ -86,5 +86,5 @@
 
 ## 验证范围与尚未验收边界
 
-- **已通过本地与协议回归验证**：`tests/agent-v2-full-spectrum.test.ts`、`tests/agent-v2-audit-remediation.test.ts` 与全量 648 项测试套件使用本机真实 FFmpeg / ffprobe / Chromium / Blender（可用时）与本地脚本化协议网关，实现 **59 / 59 全工具入口回归覆盖**，覆盖 16–120 镜制片圣经无损往返与分页读取、草稿与获批基线隔离、剧组子代理范围沙箱与 503 断点恢复、双目的地混合上传授权、真实大小音视频口型同步、侧链闪避混音与 `ebur128` 实测响度、CLI `--allow-images` 远程视觉时序审片及时间线自相对素材路径导出，**零外部计费 API 请求**。
+- **已通过本地与协议回归验证**：`tests/agent-v2-full-spectrum.test.ts`、`tests/agent-v2-audit-remediation.test.ts`、`tests/agent-v2-audit-recheck-closure.test.ts` 与全量 652 项测试套件使用本机真实 FFmpeg / ffprobe / Chromium / Blender（可用时）与本地脚本化协议网关，实现 **59 / 59 全工具入口回归覆盖**，覆盖 16–120 镜与 60+ 素材制片圣经/部门分页读取、草稿字段级增量合并与视频运动参考/多图身份绑定无损往返、剧组子代理范围外字幕/镜头沙箱与崩溃恢复幂等、口型模板能力门禁与制作模式切换入轨复核、下载 404/采用冲突/预览取消诚实回传、终态收件串行化、CLI `--allow-images` 远程视觉时序审片及时间线自相对素材路径导出，**零外部计费 API 请求**。
 - **尚未验收（不作为真实模型质量声明）**：真实付费商业大模型（DeepSeek / OpenAI / Gemini / 可灵 / 即梦 Seedance / ElevenLabs / Replicate 等）在线长片多轮编排稳定性、生成画质审美、真实口型自然度与跨平台发行签名公证仍需使用真实账户单独验收。
