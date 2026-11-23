@@ -21,7 +21,7 @@ import {taskFailure,withTaskFailure,type TaskFailureDiagnostic} from '../shared/
 export interface FrameCapture { frame:number; shotId:string; path:string; sha256:string }
 export interface RenderIssue { shotId?:string; frame?:number; message:string;failure?:TaskFailureDiagnostic;comparison?:ReturnType<typeof compareFramePng>&{phase:'backward'|'cold';frame:number;expectedHash:string;actualHash:string;fontsStatus:'loaded'|'loading'|'unavailable';fontFaces:number;deviceScaleFactor:number} }
 export interface RenderCheckResult { ok:boolean; errors:RenderIssue[]; frames:FrameCapture[]; reportPath?:string }
-export function renderCheckError(result:RenderCheckResult):Error{const error=new Error(result.errors.map(issue=>issue.message).join('\n'));return Object.assign(error,{failure:result.errors.find(issue=>issue.failure)?.failure??taskFailure(error,'render_check')});}
+export function renderCheckError(result:RenderCheckResult):Error{const error=new Error(result.errors.map(issue=>issue.shotId&&!issue.message.includes(issue.shotId)?`镜头 ${issue.shotId}：${issue.message}`:issue.message).join('\n'));return Object.assign(error,{failure:result.errors.find(issue=>issue.failure)?.failure??taskFailure(error,'render_check')});}
 interface ProjectServer { server:Server; origin:string; latestPage?:string; pages:Set<string> }
 const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.txt':'text/plain; charset=utf-8','.woff2':'font/woff2','.mp4':'video/mp4','.wav':'audio/wav','.mp3':'audio/mpeg','.m4a':'audio/mp4','.aac':'audio/aac','.flac':'audio/flac','.ogg':'audio/ogg'};
 
@@ -243,7 +243,7 @@ export class VideoRenderer {
         try{await (window as any).__VIDEO_WORKPACK__.ready();return {ok:true};}
         catch(error){const e=error as any;return {ok:false,message:e.message,shotId:e.shotId};}
       }),'Scene ready').catch(error=>{throw withTaskFailure(error,'render_scene_ready');});
-      if(!ready.ok){issues.push({shotId:ready.shotId,message:ready.message??'Renderer ready failed'});throw new Error(ready.message);}
+      if(!ready.ok){const e=new Error(ready.message??'Renderer ready failed') as Error&RenderIssue;e.shotId=ready.shotId;throw e;}
       return {browser,page,removeAbort:()=>signal?.removeEventListener('abort',cancel)};
     }catch(error){signal?.removeEventListener('abort',cancel);await browser.close().catch(()=>{});this.browsers.delete(browser);throw error;}
   }
@@ -258,7 +258,7 @@ export class VideoRenderer {
         return {ok:true,info};
       }catch(error){const e=error as any;return {ok:false,message:e.message,shotId:e.shotId,frame:e.frame};}
     },{frame,fps:spec.target.fps}),'Frame '+frame);
-    if(!result.ok){const error=new Error(result.message) as Error&RenderIssue;error.shotId=result.shotId;error.frame=result.frame;throw error;}
+    if(!result.ok){const error=new Error(result.message) as Error&RenderIssue;error.shotId=result.shotId??spec.shots.find(s=>frame>=s.startFrame&&frame<s.endFrame)?.id;error.frame=result.frame??frame;throw error;}
     for(let attempt=1;;attempt++){
       try{return {buffer:await screenshot(),shotId:result.info.sceneId};}
       catch(error){
@@ -357,7 +357,7 @@ export class VideoRenderer {
       }
       operation='render_seek';await this.verifySeek(connection.page,spec,frames,errors,signal);
       operation='source_mark_good';if(errors.length===0)for(const shot of project.shots)await this.store.markSourceGood(root,shot);
-    }catch(error){const e=error as Error&RenderIssue;errors.push({shotId:e.shotId,frame:e.frame,message:signal?.aborted?'Task cancelled':e.message,failure:taskFailure(error,operation)});}
+    }catch(error){const e=error as Error&RenderIssue;if(e.shotId)for(const it of errors)if(!it.shotId)it.shotId=e.shotId;errors.push({shotId:e.shotId,frame:e.frame,message:signal?.aborted?'Task cancelled':e.message,failure:taskFailure(error,operation)});}
     finally{if(connection){connection.removeAbort();await connection.browser.close().catch(()=>{});this.browsers.delete(connection.browser);}}
     for(const issue of errors)issue.failure??=taskFailure(new Error(issue.message),'render_check');
     const reportPath=path.join(reportRoot,'check.json');const result={ok:errors.length===0,errors:deduplicate(errors),frames,reportPath,projectRevision:project.revision};

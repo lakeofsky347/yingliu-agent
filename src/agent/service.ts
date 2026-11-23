@@ -246,9 +246,12 @@ export class AgentService {
             await this.spend(run.projectId, 'director', cost);
             await this.save(run);
           },
-          onToolCall: async (risk) => {
-            chargeTool(run.usage, 0, risk);
-            await this.save(run);
+          onToolCall: async (risk, innerExecId) => {
+            const subKey = innerExecId ? `${run.id}.subtool.${innerExecId}` : undefined;
+            if (!subKey || !(run.settledToolExecIds ?? []).includes(subKey)) {
+              chargeTool(run.usage, 0, risk);
+              if (subKey) (run.settledToolExecIds ??= []).push(subKey);
+            }
           },
           checkpoint: run.subagentCheckpoints?.[ckKey],
           saveCheckpoint: async (checkpoint) => {
@@ -410,45 +413,56 @@ export class AgentService {
     const flight = run.inFlight; if (!flight) return false;
     if ((await this.store.toolSuccesses(run.id)).some(receipt => receipt.execId === flight.execId)) return false;
     const entry = { execId: flight.execId, tool: flight.tool, at: now(), error: '运行中断时收费请求已发出，结果未知（可能已受理并计费）', attempts: 1 };
-    (run.uncertainSubmissions ??= []).push(entry); delete run.inFlight;
+    delete run.inFlight;
     const call = run.queue.find(item => item.execId === flight.execId);
     const savedReceipts = call && flight.tool === 'batch_generate_media' ? run.batchReceipts?.[call.id] : undefined;
     const knownEntries = savedReceipts ? Object.entries(savedReceipts).sort(([a], [b]) => Number(a) - Number(b)) : [];
     if (call && knownEntries.length > 0) {
-      // Partial batch crash: known items already charged via saveBatchItemReceipt; track them via waitingBatch while recording the in-flight item as uncertain!
+      let totalRequested = knownEntries.length;
+      try {
+        const parsedBatch = JSON.parse(call.arguments || '{}') as { items?: unknown };
+        if (Array.isArray(parsedBatch.items)) totalRequested = Math.min(8, parsedBatch.items.length);
+      } catch { /* keep knownEntries.length */ }
+      const hasMissingItem = knownEntries.length < totalRequested;
       const knownIds = knownEntries.map(([, tid]) => tid);
       const savedShots = run.batchReceiptShots?.[call.id] ?? {};
       const autoApplyShots: Record<string, string> = {};
       for (const [idxStr, tid] of knownEntries) {
         if (savedShots[Number(idxStr)]) autoApplyShots[tid] = savedShots[Number(idxStr)]!;
       }
-      const uncKey = `${run.id}.${flight.execId}.uncertain`;
-      if (!(run.settledToolExecIds ?? []).includes(uncKey)) {
-        run.usage.unknownCostCalls += 1;
-        (run.settledToolExecIds ??= []).push(uncKey);
+      if (hasMissingItem) {
+        // Only reserve an extra unknown-cost slot when an item genuinely lacked an acceptance receipt!
+        (run.uncertainSubmissions ??= []).push(entry);
+        const uncKey = `${run.id}.${flight.execId}.uncertain`;
+        if (!(run.settledToolExecIds ?? []).includes(uncKey)) {
+          run.usage.unknownCostCalls += 1;
+          (run.settledToolExecIds ??= []).push(uncKey);
+        }
+        await this.spend(run.projectId, flight.tool, null, false, uncKey);
+        await this.store.trace(run.id, { event: 'submission.uncertain', reason: 'interrupted', ...entry });
       }
-      await this.spend(run.projectId, flight.tool, null, false, uncKey);
       run.waitingBatch = {
         kind: 'media',
         ids: knownIds,
         callId: call.id,
         execId: flight.execId,
         ...(Object.keys(autoApplyShots).length ? { autoApplyShots } : {}),
-        uncertainCount: 1,
-        uncertainError: entry.error,
+        ...(hasMissingItem ? { uncertainCount: 1, uncertainError: entry.error } : {}),
       };
       run.queue = run.queue.filter(item => item !== call);
       delete run.batchReceipts![call.id];
       if (run.batchReceiptShots) delete run.batchReceiptShots[call.id];
-    } else {
-      if (call) { run.queue = run.queue.filter(item => item !== call); run.messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ error: entry.error, submissionUncertain: true, hint: '系统没有重新提交。不要自行重复调用；等待用户确认。' }) }); }
-      const uncKey = `${run.id}.${flight.execId}.uncertain`;
-      if (!(run.settledToolExecIds ?? []).includes(uncKey)) {
-        chargeTool(run.usage, null, 'cost');
-        (run.settledToolExecIds ??= []).push(uncKey);
-      }
-      await this.spend(run.projectId, flight.tool, null, false, uncKey);
+      await this.save(run);
+      return true;
     }
+    (run.uncertainSubmissions ??= []).push(entry);
+    if (call) { run.queue = run.queue.filter(item => item !== call); run.messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ error: entry.error, submissionUncertain: true, hint: '系统没有重新提交。不要自行重复调用；等待用户确认。' }) }); }
+    const uncKey = `${run.id}.${flight.execId}.uncertain`;
+    if (!(run.settledToolExecIds ?? []).includes(uncKey)) {
+      chargeTool(run.usage, null, 'cost');
+      (run.settledToolExecIds ??= []).push(uncKey);
+    }
+    await this.spend(run.projectId, flight.tool, null, false, uncKey);
     await this.store.trace(run.id, { event: 'submission.uncertain', reason: 'interrupted', ...entry }); await this.save(run); return true;
   }
   private async settled(id: string) { const active = this.active.get(id); if (active) await active.promise.catch(() => {}); }

@@ -2,6 +2,11 @@
 
 ## 未发布
 
+- 完成 **v2.0 第三轮审计全部 11 项边界优化与高并发确定性加固**（且完整保留场景代码检查—修复—复检核心业务闭环）：
+  - **并发排期再授权与口型模板反向门禁（P1–P3）**：`MediaTaskService` 在受连接并发限制排队的 `pending` 任务真正发起远端 HTTP 请求前再次调用 `authorizeOperation` 复核最新制作策略，确保工程切回纯代码模式时排队中的未发视频请求本地拦截（远端请求数为 0），而已在途任务继续回收；专用口型模板（如 `replicate-lipsync`）反向收窄可用操作为仅 `lip-sync-video`，前置拦截误投递的普通文生视频请求。
+  - **子代理拟音/尾帧幂等、同工具异目标第 7 项追踪与取消质检诚实回传（P2）**：`StudioService` `import` 新增 `requestId` 哈希幂等复用（`importRequests`），`synthesize_sfx` 与 `frame_handoff` 绑定执行 ID 且子代理检查点出队与 `usage.toolCalls` 合并为单次原子落盘，消除子步骤崩溃重放重复生成 WAV 素材或虚增调用计数；同轮第 7 项溢出跳过的同名不同目标写工具（如第 1 项改镜 1、第 7 项改镜 2）按目标签名与轮次隔离对账并保留原始 `callId`；子代理内 `render_check` 被取消或超时时诚实标为未通过（若同次委派后续复检通过则自动清除，100% 保留 `scene_coder` 核心编码修复闭环）；补齐 `video_clip_extract`、`video_clip_remove` 与 `audio` 在镜头沙箱下的越界门禁。
+  - **满额批次回执核销、邻镜报错归因、改镜草稿预演隔离与 7 图身份保留（P2–P3）**：`batch_generate_media` 全部子项回执均已落盘后若在最终总回执写入前中断，重启恢复不再虚增额外 `unknownCostCalls` 或失败数；无头预览报错标注具体 `shotId` 并在 `generateSceneCode` 检测到仅相邻镜头历史故障时跳过对健康目标镜头的盲目二次重写；工作台未批草稿已改写分镜提示词或自带预演图时，批准旧计划预演不再覆盖草稿画面与状态；角色已有 6 张辅助参考图并绑定第 7 张独立主身份图时，`Story -> DirectorDocument` 回写不再截断丢失主身份图。
+  - **百素材确定性游标分页、24 角色自适应分页与高并发测试隔离（P2）**：`summarizeProject` 按工程原始素材顺序严格游标切片（消除按引用重排导致的翻页重复/遗漏与 0 镜 100 素材死循环，末页不再返回 `nextAssetOffset`）；`story_get` 与 `bible_get` 新增 `characterOffset` / `characterLimit` 与多角色群像自适应分页；全量 v2 测试隔离 `projectsDirectory` 并加固句柄释放，消除高并发偶发抖动与进程驻留。
 - 完成 **v2.0 二轮复审全部 14 项次生边界问题清零加固**：
   - **制作策略入轨复核与口型模板能力门禁（P0）**：`ProjectHub.mediaPort` 接入 `authorizeOperation` 并在 `applyMediaResult` / `video.clip.save` 入轨前实时复核当前 Schema v3 `assertProductionOperation`（切换纯代码模式后保留历史生成素材可查，但拦截新视频计费请求与旧视频重新激活镜头）；新增 `templateAcceptsLipSync` 校验异步模板是否同时包含视频与配音占位符，在发出请求前阻断不具备口型能力的普通视频模板。
   - **受限部门字幕保护、名额预留、原子检查点与跳过回执（P0–P3）**：限定 `scopedShotIds` 时 `post_overlay_subtitle` 仅替换授权镜头字幕并严守范围外字幕与全局音轨不变性；`delegate_crew` 预留外层工具名额确保总调用次数不超 `maxToolCalls`；检查点持久化 `completedResult` 并随父队列 `settleToolSuccess` 同一次落盘原子清理，消除极端崩溃恢复重复写入窗口；新增 `skippedTools` 区分前置跳过（`skipped`）与单轮上限溢出跳过（`partial`）。

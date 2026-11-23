@@ -155,7 +155,7 @@ test('Audit #1, #3, #4, #5: Crew sub-agent enforces hard shot-scope sandbox, rec
     return { text: '7 调用配对与最新 revision 回执验证完成' };
   });
 
-  const app = await createApplication({ dataDirectory: dir, credentials: new MemorySecrets(), fetch: gw.fetch });
+  const app = await createApplication({ dataDirectory: dir, projectsDirectory: join(dir, 'projects'), credentials: new MemorySecrets(), fetch: gw.fetch });
   const call = async <T,>(ep: string, p: unknown = {}) => { const r = await app.route(ep, p); if (!r.ok) throw new Error(ep + ': ' + r.error.message); return r.value as T; };
   try {
     const c = await call<{ id: string }>('models.connection.save', { name: 'gw', protocol: 'chat-completions', baseUrl: 'http://gateway.test/v1', auth: 'none' });
@@ -213,7 +213,7 @@ test('Audit #1, #3, #4, #5: Crew sub-agent enforces hard shot-scope sandbox, rec
       if (pt === 1) return { toolCalls: [{ id: 'psh0', name: 'plan_shots', arguments: { shots: [{ id: 's1', shotId: shot1, summary: '首镜', durationSeconds: 3 }] } }] };
       return { text: '已建圣经' };
     });
-    const app2 = await createApplication({ dataDirectory: join(dir, 'sub2'), credentials: new MemorySecrets(), fetch: (u, i) => (pTurn < 3 ? seedGw.fetch(u, i) : gw.fetch(u, i)) });
+    const app2 = await createApplication({ dataDirectory: join(dir, 'sub2'), projectsDirectory: join(dir, 'sub2', 'projects'), credentials: new MemorySecrets(), fetch: (u, i) => (pTurn < 3 ? seedGw.fetch(u, i) : gw.fetch(u, i)) });
     const call2 = async <T,>(ep: string, p: unknown = {}) => { const r = await app2.route(ep, p); if (!r.ok) throw new Error(ep + ': ' + r.error.message); return r.value as T; };
     try {
       const c2 = await call2<{ id: string }>('models.connection.save', { name: 'gw', protocol: 'chat-completions', baseUrl: 'http://gateway.test/v1', auth: 'none' });
@@ -284,7 +284,7 @@ test('Audit #2 & #6: Sub-agent stops immediately on parent/project cost & step/t
     return res;
   };
 
-  const app = await createApplication({ dataDirectory: dir, credentials: new MemorySecrets(), fetch: delayedFetch });
+  const app = await createApplication({ dataDirectory: dir, projectsDirectory: join(dir, 'projects'), credentials: new MemorySecrets(), fetch: delayedFetch });
   const call = async <T,>(ep: string, p: unknown = {}) => { const r = await app.route(ep, p); if (!r.ok) throw new Error(ep + ': ' + r.error.message); return r.value as T; };
   callRef = call;
 
@@ -472,7 +472,7 @@ test('Audit #7 & #8: Batch preflight validation, durable per-item receipt reuse 
   });
 
   const app = await createApplication({
-    dataDirectory: dir, credentials: new MemorySecrets(),
+    dataDirectory: dir, projectsDirectory: join(dir, 'projects'), credentials: new MemorySecrets(),
     fetch: (u, i) => (String(u).includes('gateway.test') ? gw.fetch(u, i) : globalThis.fetch(u, i)),
   });
   const call = async <T,>(ep: string, p: unknown = {}) => { const r = await app.route(ep, p); if (!r.ok) throw new Error(ep + ': ' + r.error.message); return r.value as T; };
@@ -655,7 +655,7 @@ test('Audit #9, #10 & #11: Real-size Lip-Sync (>4KB media), Scene Code CAS prote
     return globalThis.fetch(u, i);
   };
 
-  const app = await createApplication({ dataDirectory: dir, credentials: new MemorySecrets(), fetch: delayedFetch });
+  const app = await createApplication({ dataDirectory: dir, projectsDirectory: join(dir, 'projects'), credentials: new MemorySecrets(), fetch: delayedFetch });
   const call = async <T,>(ep: string, p: unknown = {}) => { const r = await app.route(ep, p); if (!r.ok) throw new Error(ep + ': ' + r.error.message); return r.value as T; };
   callRef = call;
 
@@ -683,7 +683,7 @@ test('Audit #9, #10 & #11: Real-size Lip-Sync (>4KB media), Scene Code CAS prote
     // Run delegate_scene_code via agent
     let casTurn = 0;
     const appCas = await createApplication({
-      dataDirectory: join(dir, 'cas-sub'), credentials: new MemorySecrets(),
+      dataDirectory: join(dir, 'cas-sub'), projectsDirectory: join(dir, 'cas-sub', 'projects'), credentials: new MemorySecrets(),
       fetch: async (u, i) => {
         const b = JSON.parse(String(i?.body ?? '{}'));
         if (b.model === 'scene-coder-cas') {

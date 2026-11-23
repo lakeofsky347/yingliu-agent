@@ -259,35 +259,81 @@ function paginateStoryView(
   story: Story,
   args: Record<string, unknown>,
   maxChars = 10_200,
-): Story | (Omit<Story, 'shots'> & { shots: Story['shots']; shotOrder: string[]; pagination: { totalShots: number; offset: number; returnedShots: number; hasMore: boolean; nextOffset?: number; hint: string } }) {
-  const explicit = args.shotOffset !== undefined || args.shotLimit !== undefined || Array.isArray(args.shotIds);
-  if (!explicit && JSON.stringify(story).length <= maxChars) return story;
+): Record<string, unknown> | Story {
+  const explicitShots = args.shotOffset !== undefined || args.shotLimit !== undefined || Array.isArray(args.shotIds);
+  const explicitChars = args.characterOffset !== undefined || args.characterLimit !== undefined;
+  if (!explicitShots && !explicitChars && JSON.stringify(story).length <= maxChars) return story;
+
   const allShots = story.shots;
   const wantedSet = Array.isArray(args.shotIds) && args.shotIds.length ? new Set(args.shotIds.map(String)) : null;
   const offset = wantedSet ? 0 : Math.max(0, Math.min(allShots.length, Number.isSafeInteger(args.shotOffset) ? Number(args.shotOffset) : 0));
   const limit = wantedSet ? allShots.length : Math.max(1, Math.min(120, Number.isSafeInteger(args.shotLimit) ? Number(args.shotLimit) : allShots.length || 1));
   const candidates = wantedSet ? allShots.filter(s => wantedSet.has(s.shotId ?? s.id) || wantedSet.has(s.id)) : allShots.slice(offset, offset + limit);
   const shotOrder = allShots.map(s => s.shotId ?? s.id);
-  const buildPage = (slice: Story['shots']) => ({
-    ...story,
-    shotOrder,
-    shots: slice,
-    pagination: {
-      totalShots: allShots.length,
-      offset,
-      returnedShots: slice.length,
-      hasMore: !wantedSet && (offset + slice.length < allShots.length),
-      ...(wantedSet || offset + slice.length >= allShots.length ? {} : { nextOffset: offset + slice.length }),
-      hint: '分镜较多已分页返回；完整分镜顺序见 shotOrder，可传 shotOffset / shotLimit 读取后续分镜',
-    },
-  });
-  let count = candidates.length;
-  while (count > 1) {
-    const attempt = buildPage(candidates.slice(0, count));
+
+  const allChars = story.characters;
+  const charOff = Math.max(0, Math.min(allChars.length, Number.isSafeInteger(args.characterOffset) ? Number(args.characterOffset) : 0));
+  const charLim = Math.max(1, Math.min(100, Number.isSafeInteger(args.characterLimit) ? Number(args.characterLimit) : allChars.length || 1));
+  const charCandidates = allChars.slice(charOff, charOff + charLim);
+  const characterOrder = allChars.map(c => c.id);
+
+  const buildPage = (shotsSlice: Story['shots'], charsSlice: Story['characters'], compactGlobals = false) => {
+    const hasMoreShots = !wantedSet && (offset + shotsSlice.length < allShots.length);
+    const pagedShots = explicitShots || offset > 0 || hasMoreShots || shotsSlice.length < allShots.length;
+    const hasMoreChars = charOff + charsSlice.length < allChars.length;
+    const pagedChars = explicitChars || charOff > 0 || hasMoreChars || charsSlice.length < allChars.length;
+    return {
+      ...story,
+      ...(compactGlobals && story.locations?.length && story.locations.length > 8 ? { locations: story.locations.slice(0, 8), totalLocations: story.locations.length } : {}),
+      ...(compactGlobals && story.props?.length && story.props.length > 8 ? { props: story.props.slice(0, 8), totalProps: story.props.length } : {}),
+      ...(compactGlobals && story.continuityLog?.length && story.continuityLog.length > 8 ? { continuityLog: story.continuityLog.slice(-8), totalContinuityLog: story.continuityLog.length } : {}),
+      ...(pagedChars ? { characterOrder } : {}),
+      characters: charsSlice,
+      ...(pagedChars ? {
+        charactersPagination: {
+          totalCharacters: allChars.length,
+          offset: charOff,
+          returnedCharacters: charsSlice.length,
+          hasMore: hasMoreChars,
+          ...(hasMoreChars ? { nextOffset: charOff + charsSlice.length } : {}),
+          hint: '角色较多已分页返回；完整角色 ID 见 characterOrder，可传 characterOffset / characterLimit 读取后续角色',
+        },
+      } : {}),
+      shotOrder,
+      shots: shotsSlice,
+      ...(pagedShots ? {
+        pagination: {
+          totalShots: allShots.length,
+          offset,
+          returnedShots: shotsSlice.length,
+          hasMore: hasMoreShots,
+          ...(hasMoreShots ? { nextOffset: offset + shotsSlice.length } : {}),
+          hint: '分镜较多已分页返回；完整分镜顺序见 shotOrder，可传 shotOffset / shotLimit 读取后续分镜',
+        },
+      } : {}),
+    };
+  };
+
+  // Phase 1: Fit by shrinking shots while preserving requested characters
+  let shotCount = candidates.length;
+  while (shotCount > 1) {
+    const attempt = buildPage(candidates.slice(0, shotCount), charCandidates, false);
     if (JSON.stringify(attempt).length <= maxChars) return attempt;
-    count = Math.max(1, Math.floor(count * 0.65));
+    shotCount = Math.max(1, Math.floor(shotCount * 0.65));
   }
-  return buildPage(candidates.slice(0, Math.min(1, candidates.length)));
+  const minShots = candidates.slice(0, Math.min(1, candidates.length));
+  const fullCharsAttempt = buildPage(minShots, charCandidates, false);
+  if (JSON.stringify(fullCharsAttempt).length <= maxChars) return fullCharsAttempt;
+
+  // Phase 2: Ensemble cast (e.g. 24+ verbose characters) — shrink characters slice & compact globals so JSON ALWAYS fits <= maxChars!
+  let charCount = charCandidates.length;
+  while (charCount >= 1) {
+    const attempt = buildPage(minShots, charCandidates.slice(0, charCount), true);
+    if (JSON.stringify(attempt).length <= maxChars) return attempt;
+    if (charCount === 1) break;
+    charCount = Math.max(1, Math.floor(charCount * 0.65));
+  }
+  return buildPage(minShots, charCandidates.slice(0, Math.min(1, charCandidates.length)), true);
 }
 
 export function createTools(): AgentTool[] {
@@ -313,11 +359,13 @@ export function createTools(): AgentTool[] {
         });
         return { content: JSON.stringify({ ...summary, task: snapshot.task ? { kind: snapshot.task.kind, status: snapshot.task.status, message: snapshot.task.message } : null }), revision: snapshot.project?.revision };
       } },
-    { name: 'bible_get', risk: 'read', description: '读取统一制片圣经（剧本梗概、视觉风格、角色库、固定场景母版库 Locations、道具库 Props、三维世界布局、戏剧节拍、场记连续性与分镜表；百镜长片支持 shotOffset/shotLimit/shotIds 分页）。',
+    { name: 'bible_get', risk: 'read', description: '读取统一制片圣经（剧本梗概、视觉风格、角色库、固定场景母版库 Locations、道具库 Props、三维世界布局、戏剧节拍、场记连续性与分镜表；百镜/群像长片支持 shotOffset/shotLimit/shotIds 与 characterOffset/characterLimit 分页）。',
       parameters: object({
         shotOffset: int('可选：百镜分镜分页起始索引'),
         shotLimit: int('可选：单次读取分镜数量上限'),
         shotIds: { type: 'array', items: { type: 'string' }, description: '可选：按分镜/镜头 ID 精确读取' },
+        characterOffset: int('可选：多角色群像分页起始索引'),
+        characterLimit: int('可选：单次读取角色数量上限'),
       }),
       async run(args, ctx) {
         const [story, snap] = await Promise.all([ctx.docs.story(), ctx.port.snapshot(ctx.projectId)]);
@@ -326,11 +374,13 @@ export function createTools(): AgentTool[] {
         const pagedStory = paginateStoryView(story, args, 9_800);
         return { content: JSON.stringify({ story: pagedStory, directorDocument: directorDoc ? { version: directorDoc.version, status: directorDoc.status, hash: directorDoc.hash } : null, productionPolicy: snap.project?.productionPolicy ?? null }) };
       } },
-    { name: 'story_get', risk: 'read', description: '读取创作计划与制片圣经摘要（剧本、风格、角色库、场景库、道具库、分镜表、一致性分数；百镜长片支持 shotOffset/shotLimit/shotIds 分页）。',
+    { name: 'story_get', risk: 'read', description: '读取创作计划与制片圣经摘要（剧本、风格、角色库、场景库、道具库、分镜表、一致性分数；百镜/群像长片支持 shotOffset/shotLimit/shotIds 与 characterOffset/characterLimit 分页）。',
       parameters: object({
         shotOffset: int('可选：百镜分镜分页起始索引'),
         shotLimit: int('可选：单次读取分镜数量上限'),
         shotIds: { type: 'array', items: { type: 'string' }, description: '可选：按分镜/镜头 ID 精确读取' },
+        characterOffset: int('可选：多角色群像分页起始索引'),
+        characterLimit: int('可选：单次读取角色数量上限'),
       }),
       async run(args, ctx) {
         const story = await ctx.docs.story();
@@ -401,7 +451,7 @@ export function createTools(): AgentTool[] {
             const old = current.characters.find(o => o.id === c.id);
             if (!old) return c;
             const mergedRefs = c.referenceAssetIds.length ? c.referenceAssetIds : old.referenceAssetIds;
-            const keptIdentity = c.identityAssetId ?? (old.identityAssetId && mergedRefs.includes(old.identityAssetId) ? old.identityAssetId : undefined);
+            const keptIdentity = c.identityAssetId ?? (old.identityAssetId && (!c.referenceAssetIds.length || mergedRefs.includes(old.identityAssetId)) ? old.identityAssetId : undefined);
             return { ...c, referenceAssetIds: mergedRefs, ...(keptIdentity ? { identityAssetId: keptIdentity } : {}) };
           });
           const kept = current.characters.filter(c => !characters.some(n => n.id === c.id) && current.shots.some(s => s.characters.includes(c.id)));
@@ -474,7 +524,10 @@ export function createTools(): AgentTool[] {
       parameters: object({ id: str('角色 ID'), name: str('名字'), description: str('描述'), objective: str('可选：戏剧目标'), features: { type: 'array', items: { type: 'string' } }, referenceAssetIds: { type: 'array', items: { type: 'string' } }, identityAssetId: str('可选：显式指定角色主身份绑定的参考图 ID'), voice: str('音色 ID，如 alloy / nova / shimmer / echo') }, ['id', 'name']),
       async run(args, ctx) {
         const snapshot = await ctx.port.snapshot(ctx.projectId); const character = normalizeCharacter(args, 0);
-        const bad = character.referenceAssetIds.filter(id => !snapshot.project?.assets.some(a => a.id === id && a.kind === 'image')); if (bad.length) throw new Error('参考图不是工程中的图片素材：' + bad.join(', '));
+        const checkIds = character.identityAssetId && !character.referenceAssetIds.includes(character.identityAssetId)
+          ? [...character.referenceAssetIds, character.identityAssetId]
+          : character.referenceAssetIds;
+        const bad = checkIds.filter(id => !snapshot.project?.assets.some(a => a.id === id && a.kind === 'image')); if (bad.length) throw new Error('参考图不是工程中的图片素材：' + bad.join(', '));
         const story = await ctx.docs.updateStory(current => ({ ...current, characters: [...current.characters.filter(c => c.id !== character.id), character], updatedAt: new Date().toISOString() }));
         const rev = await syncBibleToProject(ctx, story, { promoteApproved: false, patch: { characterId: character.id } });
         return { content: json({ ok: true, version: story.version, revision: rev, character }), revision: rev };
@@ -1128,7 +1181,8 @@ export function createTools(): AgentTool[] {
         if (index < 0) throw new Error('镜头不存在'); if (index === 0) throw new Error('第一个镜头没有上一镜可承接');
         let end = 0; for (let i = 0; i < index; i++) end += project.shots.find(s => s.id === order[i])!.durationFrames;
         const frame = await ctx.port.capture(ctx.projectId, end - 1, ctx.signal);
-        const asset = await ctx.port.importImage(ctx.projectId, `尾帧承接 · ${order[index - 1]}→${order[index]}`, frame.bytes, frame.mime);
+        const reqId = typeof args.__callId === 'string' && args.__callId ? `${ctx.runId}.${args.__callId}` : undefined;
+        const asset = await ctx.port.importImage(ctx.projectId, `尾帧承接 · ${order[index - 1]}→${order[index]}`, frame.bytes, frame.mime, reqId);
         return { content: json({ ok: true, assetId: asset.id, fromShot: order[index - 1], frame: end - 1, hint: '把 assetId 作为 generate_video 的 imageAssetId' }) };
       } },
 
@@ -1234,12 +1288,15 @@ export function createTools(): AgentTool[] {
         if (!ctx.port.importAudio) throw new Error('当前环境不能导入音频');
         const kind = String(args.kind) as SynthKind; if (!SYNTH_KINDS.includes(kind)) throw new Error('kind 无效');
         const bytes = synthesize({ ...(args as unknown as SynthSpec), kind });
-        const asset = await ctx.port.importAudio(ctx.projectId, typeof args.name === 'string' && args.name.trim() ? args.name.trim().slice(0, 60) : '合成拟音 · ' + kind, bytes, 'audio/wav');
+        const reqId = typeof args.__callId === 'string' && args.__callId ? `${ctx.runId}.${args.__callId}` : undefined;
+        const asset = await ctx.port.importAudio(ctx.projectId, typeof args.name === 'string' && args.name.trim() ? args.name.trim().slice(0, 60) : '合成拟音 · ' + kind, bytes, 'audio/wav', reqId);
         let boundToTrack = false;
         if (args.bindToTrack === true || (typeof args.shotId === 'string' && args.shotId.trim())) {
           const latest = await ctx.port.snapshot(ctx.projectId);
           if (latest.project) {
-            await rpc(ctx, 'audio', { expectedRevision: latest.project.revision, operation: 'add', assetId: asset.id, role: 'sfx', ...(typeof args.shotId === 'string' && args.shotId.trim() ? { shotId: args.shotId.trim() } : {}), startSeconds: Number(args.startSeconds ?? 0), trimStart: 0, volume: Number.isFinite(Number(args.volume)) ? Number(args.volume) : 0.7, fadeIn: 0, fadeOut: 0 });
+            if (!latest.project.audioClips?.some(c => c.assetId === asset.id)) {
+              await rpc(ctx, 'audio', { expectedRevision: latest.project.revision, operation: 'add', assetId: asset.id, role: 'sfx', ...(typeof args.shotId === 'string' && args.shotId.trim() ? { shotId: args.shotId.trim() } : {}), startSeconds: Number(args.startSeconds ?? 0), trimStart: 0, volume: Number.isFinite(Number(args.volume)) ? Number(args.volume) : 0.7, fadeIn: 0, fadeOut: 0 });
+            }
             boundToTrack = true;
           }
         }
@@ -1449,8 +1506,25 @@ export function createTools(): AgentTool[] {
     // ==================== 9. 静帧/时序动态视觉审片、一致性与全量质检 ====================
     { name: 'render_check', risk: 'read', description: '刷新预览并检查资源与关键帧，返回渲染错误。', parameters: object({}),
       async run(_args, ctx) {
-        const task = projectTask(await rpc(ctx, 'preview', {}) as StudioSnapshot);
-        for (let i = 0; i < 240; i++) { ctx.signal.throwIfAborted(); const s = await ctx.port.snapshot(ctx.projectId); if (s.task?.id === task.id && s.task.status !== 'running') return { content: json({ taskId: task.id, status: s.task.status, message: s.task.message, error: s.task.error }), projectTask: task }; await new Promise(r => setTimeout(r, 250)); }
+        const curSnap = await ctx.port.snapshot(ctx.projectId);
+        const task = (curSnap.task?.kind === 'preview' && curSnap.task.status === 'running')
+          ? projectTask(curSnap)
+          : projectTask(await rpc(ctx, 'preview', {}) as StudioSnapshot);
+        for (let i = 0; i < 240; i++) {
+          ctx.signal.throwIfAborted();
+          const s = await ctx.port.snapshot(ctx.projectId);
+          if (s.task?.id === task.id) {
+            if (s.task.status !== 'running') return { content: json({ taskId: task.id, status: s.task.status, message: s.task.message, error: s.task.error }), projectTask: task };
+          } else {
+            const rec = await ctx.port.route('tasks', { projectId: ctx.projectId }).catch(() => ({ ok: false, value: undefined }));
+            const list = rec.ok && rec.value && typeof rec.value === 'object' ? ((rec.value as { tasks?: { id?: string; status?: string; message?: string; error?: string }[] }).tasks ?? []) : [];
+            const match = list.find(t => t.id === task.id);
+            if (match && match.status && match.status !== 'running') {
+              return { content: json({ taskId: task.id, status: match.status, message: match.message, error: match.error }), projectTask: task };
+            }
+          }
+          await new Promise(r => setTimeout(r, 250));
+        }
         return { content: json({ taskId: task.id, status: 'timeout', message: '预览检查超过 60 秒' }), projectTask: task };
       } },
     { name: 'capture_frame', risk: 'read', requires: ['vision'], description: '截取指定帧，返回视觉模型对画面的文字描述。', parameters: object({ frame: int('帧序号，从 0 开始') }, ['frame']),

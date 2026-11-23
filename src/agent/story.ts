@@ -58,7 +58,7 @@ export function normalizeCharacter(value: unknown, index: number): StoryCharacte
     ...(text(v.objective, 200) ? { objective: text(v.objective, 200) } : {}),
     ...(text(v.baselineEmotion, 120) ? { baselineEmotion: text(v.baselineEmotion, 120) } : {}),
     features: list(v.features, 12, 80),
-    referenceAssetIds: explicitIdentity && !refs.includes(explicitIdentity) ? [...refs, explicitIdentity] : refs,
+    referenceAssetIds: explicitIdentity && !refs.includes(explicitIdentity) && refs.length < 6 ? [...refs, explicitIdentity] : refs,
     ...(explicitIdentity ? { identityAssetId: explicitIdentity } : {}),
     ...(text(v.voice, 80) ? { voice: text(v.voice, 80) } : {}),
   };
@@ -185,7 +185,7 @@ export function buildDirectorDocumentFromStory(
     ...(c.objective ? { objective: c.objective } : {}),
     ...(c.baselineEmotion ? { baselineEmotion: c.baselineEmotion } : {}),
     features: c.features,
-    referenceAssetIds: c.referenceAssetIds.filter(id => imageIds.has(id)),
+    referenceAssetIds: c.referenceAssetIds.filter(id => imageIds.has(id)).slice(0, 6),
     ...(c.voice ? { voice: c.voice } : {}),
   });
   const mapChars = () => story.characters.map(mapChar);
@@ -252,6 +252,13 @@ export function buildDirectorDocumentFromStory(
           if (!targetSet.has(ds.shotId)) return ds;
           const storyShot = story.shots.find(ss => ss.shotId === ds.shotId || ss.id === ds.shotId);
           if (!storyShot?.previz) return ds;
+          // Bind previz approval strictly to matching shot content & asset: never overwrite a diverged draft shot's own previz!
+          const promptDiverged = ds.visualPrompt.trim() !== storyShot.summary.trim();
+          const draftHasDifferentPreviz = Boolean(ds.previz?.imageAssetId && ds.previz.imageAssetId !== storyShot.previz.imageAssetId);
+          const draftHasDifferentNote = Boolean(ds.previz?.note && ds.previz.note !== storyShot.previz.note);
+          if (promptDiverged || draftHasDifferentPreviz || draftHasDifferentNote) {
+            return ds;
+          }
           const refs = [...ds.references.map(r => structuredClone(r))];
           const ensureImgRef = (assetId: string | undefined, purpose: DirectorReference['purpose']) => {
             if (!assetId || !imageIds.has(assetId)) return;
@@ -384,12 +391,13 @@ export function mergeDirectorPlanIntoStory(
     style: plan.style ? normalizeStyle(plan.style) : current.style,
     characters: plan.characters.map(c => {
       const explicitIdentity = plan.identityMap.find(m => m.characterId === c.id)?.assetId;
+      const baseRefs = [...new Set(c.referenceAssetIds ?? [])];
       return {
         id: c.id, name: c.name, description: c.identity,
         ...(c.objective ? { objective: c.objective } : {}),
         ...(c.baselineEmotion ? { baselineEmotion: c.baselineEmotion } : {}),
         features: c.features ?? [],
-        referenceAssetIds: [...new Set([...(c.referenceAssetIds ?? []), ...plan.identityMap.filter(m => m.characterId === c.id).map(m => m.assetId)])],
+        referenceAssetIds: (explicitIdentity && !baseRefs.includes(explicitIdentity) && baseRefs.length < 6 ? [...baseRefs, explicitIdentity] : baseRefs).slice(0, 6),
         ...(explicitIdentity ? { identityAssetId: explicitIdentity } : {}),
         ...(c.voice ? { voice: c.voice } : {}),
       };

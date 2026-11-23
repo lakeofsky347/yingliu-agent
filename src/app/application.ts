@@ -117,11 +117,16 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
   }
   // A user edit can land between reading the revision and importing. A stale-revision import is rejected before anything
   // is written, so re-reading the latest revision and retrying (bounded, like agentVoice) cannot import twice.
-  const importAsset=async(id:string,name:string,description:string,bytes:Uint8Array,mime:string,failure:string)=>{
+  const importAsset=async(id:string,name:string,description:string,bytes:Uint8Array,mime:string,failure:string,requestId?:string)=>{
     const dataBase64=`data:${mime};base64,${Buffer.from(bytes).toString('base64')}`;
     for(let attempt=0;;attempt++){
       const current=await backend.call('current',{projectId:id});
-      try{const snapshot=await backend.call('import',{projectId:id,expectedRevision:current.project?.revision,name,description,mime,dataBase64});const asset=snapshot.project?.assets.at(-1);if(!asset)throw new Error(failure);return {id:asset.id,name:asset.name};}
+      try{
+        const snapshot=await backend.call<StudioSnapshot&{reusedAssetId?:string}>('import',{projectId:id,expectedRevision:current.project?.revision,name,description,mime,dataBase64,...(requestId?{requestId}:{})});
+        const asset=snapshot.reusedAssetId?snapshot.project?.assets.find(a=>a.id===snapshot.reusedAssetId):snapshot.project?.assets.at(-1);
+        if(!asset)throw new Error(failure);
+        return {id:asset.id,name:asset.name};
+      }
       catch(error){if(attempt>=2||!/版本冲突|REVISION_CONFLICT/.test(error instanceof Error?error.message:''))throw error;}
     }
   };
@@ -146,8 +151,8 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
       try{scene=(await providers.registry.resolve('scene')).model.name;}catch{}
       return {roles,models,...(director?{director}:{}),...(scene?{scene}:{})};
     },
-    importImage:async(id,name,bytes,mime)=>{if(!/^image\/(png|jpeg|webp)$/.test(mime))throw new Error('不支持的图片格式');return importAsset(id,name,'智能体截取的尾帧',bytes,mime,'图片导入失败');},
-    importAudio:async(id,name,bytes,mime)=>importAsset(id,name,'智能体本地合成',bytes,mime,'音频导入失败'),
+    importImage:async(id,name,bytes,mime,requestId)=>{if(!/^image\/(png|jpeg|webp)$/.test(mime))throw new Error('不支持的图片格式');return importAsset(id,name,'智能体截取的尾帧',bytes,mime,'图片导入失败',requestId);},
+    importAudio:async(id,name,bytes,mime,requestId)=>importAsset(id,name,'智能体本地合成',bytes,mime,'音频导入失败',requestId),
     generateAudio:async(id,role,prompt,{durationSeconds,signal,shotId})=>{
       const resolved=await providers.registry.resolve(role);
       if(role==='speech'&&resolved.connection.protocol==='speech'){const project=(await backend.call('current',{projectId:id})).project;const shot=shotId??project?.shotOrder[0];if(!shot||!project?.shots.some(item=>item.id===shot))throw new Error('配音目标镜头不存在');const asset=await agentVoice(id,shot,prompt,signal,{});return {id:asset.id,name:asset.name,cost:null};}
@@ -266,11 +271,23 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         contract:'只输出严格 JSON：{"html":"...","css":"...","js":"export function render(ctx) { ... }"}。DOM 节点须通过 ctx.root.querySelector 查询（禁止 document.getElementById），动画必须仅依赖 ctx.time 与 ctx.helpers，禁止 Date.now/setTimeout/requestAnimationFrame 或外链。若 hasVideo=true，底图透明不要遮挡底层视频。',
       };
       let parsed=await askSceneModel(basePayload);
+      const preSave=await backend.call('current',{projectId:id});
+      if(preSave.project&&preSave.project.revision!==baseRevision){
+        throw Object.assign(new Error(`工程版本冲突：期望 v${baseRevision}，当前 v${preSave.project.revision}；检测到并发编辑，未覆盖最新源码`),{code:'REVISION_CONFLICT'});
+      }
+      if(preSave.task?.kind==='preview'&&preSave.task.status==='running'){
+        await waitPreviewTask(preSave.task.id);
+      }
       // CAS-protected: bind strictly to `baseRevision` so concurrent manual edits are NEVER overwritten!
       let saved=await backend.call('saveSource',{projectId:id,shotId,expectedRevision:baseRevision,source:{html:parsed.html,css:parsed.css,js:parsed.js}});
       let checked=await waitPreviewTask(saved.task?.id);
       if(checked.status==='failed'){
         const errDetail=checked.error||checked.message||'渲染校验失败';
+        const citedShotIds=project.shots.map(s=>s.id).filter(sid=>errDetail.includes(sid));
+        const affectsTargetShot=citedShotIds.length===0||citedShotIds.includes(shotId);
+        if(!affectsTargetShot){
+          throw new Error(`目标镜头 ${shotId} 源码已保存，但整片预览因其他镜头故障未通过：${errDetail}`);
+        }
         parsed=await askSceneModel({...basePayload,currentSource:parsed,instruction:`${instruction}\n\n【紧急修复】上一版镜头源码在无头浏览器渲染校验时报错：${errDetail}。请修复该错误并返回完整合法 JSON {html,css,js}。`});
         saved=await backend.call('saveSource',{projectId:id,shotId,expectedRevision:saved.project?.revision,source:{html:parsed.html,css:parsed.css,js:parsed.js}});
         checked=await waitPreviewTask(saved.task?.id);
@@ -299,10 +316,14 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
         timeoutMs:Number(resolved.connection.requestTimeoutMs)||120000,maxTokens:Number(parameters.maxTokens)||4096,...(typeof parameters.temperature==='number'?{temperature:parameters.temperature}:{}),supportsTools:parameters.supportsTools!==false&&chatCompletionSupportsTools(resolved.connection.baseUrl,resolved.model.model)}};
     },
     resolveSubModel:async(preferRole)=>{
-      const resolved=await providers.resolveText(preferRole).catch(()=>providers.resolveText('director'));
-      const parameters=resolved.model.parameters as Record<string,unknown>;
-      return {connectionId:resolved.connection.id,parameters,config:{baseUrl:resolved.connection.baseUrl,model:resolved.model.model,key:await providers.registry.credential(resolved.connection),
-        timeoutMs:Number(resolved.connection.requestTimeoutMs)||120000,maxTokens:Number(parameters.maxTokens)||4096,...(typeof parameters.temperature==='number'?{temperature:parameters.temperature}:{}),supportsTools:parameters.supportsTools!==false&&chatCompletionSupportsTools(resolved.connection.baseUrl,resolved.model.model)}};
+      const build=async(role:'director'|'scene')=>{
+        const resolved=await providers.resolveText(role);
+        const key=await providers.registry.credential(resolved.connection);
+        const parameters=resolved.model.parameters as Record<string,unknown>;
+        return {connectionId:resolved.connection.id,parameters,config:{baseUrl:resolved.connection.baseUrl,model:resolved.model.model,key,
+          timeoutMs:Number(resolved.connection.requestTimeoutMs)||120000,maxTokens:Number(parameters.maxTokens)||4096,...(typeof parameters.temperature==='number'?{temperature:parameters.temperature}:{}),supportsTools:parameters.supportsTools!==false&&chatCompletionSupportsTools(resolved.connection.baseUrl,resolved.model.model)}};
+      };
+      return preferRole==='director'?build('director'):build(preferRole).catch(()=>build('director'));
     },
   });
   cleanups.push(()=>agent.dispose());

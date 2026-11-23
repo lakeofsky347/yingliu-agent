@@ -68,7 +68,8 @@ export function summarizeProject(project: VideoProject | null, options: ProjectS
     const vClips = compactMode && pagedShots ? vClipsAll.filter(c => activeShotIds.has(c.shotId)) : vClipsAll;
     const aClips = compactMode && pagedShots ? aClipsAll.filter(c => !c.shotId || activeShotIds.has(c.shotId)) : aClipsAll;
     const oClips = compactMode && pagedShots ? oClipsAll.filter(c => activeShotIds.has(c.shotId)) : oClipsAll;
-    const pagedAssets = explicitAssetPaging || assetsSlice.length < project.assets.length;
+    const hasMoreAssets = assetOff + assetsSlice.length < project.assets.length;
+    const pagedAssets = explicitAssetPaging || assetOff > 0 || hasMoreAssets;
     return {
       id: project.id, title: project.title, topic: project.topic, revision: project.revision, targetDuration: project.targetDuration,
       target: { width: project.target.width, height: project.target.height, fps, audioMode: project.target.audioMode },
@@ -92,8 +93,8 @@ export function summarizeProject(project: VideoProject | null, options: ProjectS
           totalAssets: project.assets.length,
           offset: assetOff,
           returnedAssets: assetsSlice.length,
-          hasMore: assetOff + assetsSlice.length < project.assets.length,
-          ...(assetOff + assetsSlice.length < project.assets.length ? { nextAssetOffset: assetOff + assetsSlice.length } : {}),
+          hasMore: hasMoreAssets,
+          ...(hasMoreAssets ? { nextAssetOffset: assetOff + assetsSlice.length } : {}),
           hint: '素材较多已分页返回；可用 project_get({ assetOffset, assetLimit }) 读取后续素材',
         },
       } : {}),
@@ -133,38 +134,34 @@ export function summarizeProject(project: VideoProject | null, options: ProjectS
     if (JSON.stringify(fullAssetsAttempt).length <= options.maxChars) return fullAssetsAttempt;
   }
 
-  // Phase 2: Many assets/clips (e.g. 60+ assets) — preserve requested shot page first while compacting & paginating assets so JSON NEVER exceeds maxChars!
-  let shotCount = Math.max(candidates.length, 0);
-  while (shotCount >= 1) {
+  // Phase 2: Many assets/clips (e.g. 60–100+ assets) — keep strict canonical asset index order so cursor pagination NEVER duplicates or skips IDs!
+  let shotCount = candidates.length;
+  while (true) {
     const targetShots = candidates.slice(0, shotCount);
-    const referencedIds = new Set<string>();
-    for (const s of targetShots) {
-      for (const id of s.assetIds ?? []) referencedIds.add(id);
-      for (const id of s.referenceIds ?? []) referencedIds.add(id);
-    }
-    const prioritizedAssets = explicitAssetPaging
-      ? assetCandidates
-      : [
-          ...assetCandidates.filter(a => referencedIds.has(a.id)),
-          ...assetCandidates.filter(a => !referencedIds.has(a.id)),
-        ];
-    let assetCount = prioritizedAssets.length;
+    let assetCount = assetCandidates.length;
     while (assetCount >= 0) {
+      if (assetCount === 0 && assetCandidates.length > 0 && shotCount > 1) break;
       const attempt = buildBase(
         targetShots,
         explicitPaging || targetShots.length < allOrdered.length || offset > 0,
-        prioritizedAssets.slice(0, assetCount),
+        assetCandidates.slice(0, assetCount),
         true,
       );
       if (JSON.stringify(attempt).length <= options.maxChars) return attempt;
       if (assetCount === 0) break;
-      assetCount = assetCount === 1 ? 0 : Math.max(1, Math.floor(assetCount * 0.6));
+      assetCount = assetCount === 1 ? 0 : Math.max(1, Math.floor(assetCount * 0.65));
     }
-    if (shotCount === 1) break;
+    if (shotCount <= 1) {
+      if (shotCount === 1 && assetCandidates.length > 0) {
+        const minAttempt = buildBase(targetShots, explicitPaging || targetShots.length < allOrdered.length || offset > 0, assetCandidates.slice(0, 1), true);
+        if (JSON.stringify(minAttempt).length <= options.maxChars) return minAttempt;
+      }
+      break;
+    }
     shotCount = Math.max(1, Math.floor(shotCount * 0.65));
   }
   const fallbackShots = candidates.slice(0, Math.min(1, candidates.length));
-  return buildBase(fallbackShots, explicitPaging || fallbackShots.length < allOrdered.length || offset > 0, [], true);
+  return buildBase(fallbackShots, explicitPaging || fallbackShots.length < allOrdered.length || offset > 0, assetCandidates.slice(0, Math.min(1, assetCandidates.length)), true);
 }
 
 /** User-supplied material may carry prompt injection: mark it as data, never instructions. */

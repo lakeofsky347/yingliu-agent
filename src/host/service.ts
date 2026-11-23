@@ -295,11 +295,20 @@ export class StudioService {
     const controller=new AbortController();this.controller=controller;this.task=task;
     try{await this.writeTaskJournal(root,task);}catch(error){task.status='failed';task.failure=taskFailure(error,'task_journal_start');task.error='任务记录保存失败：'+String(error);task.message=task.error;throw error;}
     this.job=(async()=>{
-      try{await work(controller.signal,task);controller.signal.throwIfAborted();task.status='complete';task.progress=1;task.message='已完成';}
-      catch(error){task.status=controller.signal.aborted?'cancelled':'failed';task.failure=taskFailure(error,'task_work');task.error=error instanceof Error?error.message:String(error);task.message=task.status==='cancelled'?'已取消':task.error;}
+      let nextStatus:RecordedTask['status']='complete',nextProgress=task.progress,nextMessage='已完成',nextError:string|undefined,nextFailure:RecordedTask['failure'];
+      try{await work(controller.signal,task);controller.signal.throwIfAborted();nextStatus='complete';nextProgress=1;nextMessage='已完成';}
+      catch(error){nextStatus=controller.signal.aborted?'cancelled':'failed';nextFailure=taskFailure(error,'task_work');nextError=error instanceof Error?error.message:String(error);nextMessage=nextStatus==='cancelled'?'已取消':nextError;}
       finally{
-        task.error=task.error?await this.redact(task.error):undefined;task.message=await this.redact(task.message);task.finishedAt=new Date().toISOString();
-        try{await this.writeTaskJournal(root,task);}catch(error){task.status='failed';task.failure=taskFailure(error,'task_journal_finish');task.error='任务结束记录保存失败：'+String(error);task.message=task.error;}
+        const finishedAt=new Date().toISOString();
+        const redactedErr=nextError?await this.redact(nextError):undefined;
+        const redactedMsg=await this.redact(nextMessage);
+        const completed:RecordedTask={...task,status:nextStatus,progress:nextProgress,message:redactedMsg,error:redactedErr,failure:nextFailure,finishedAt};
+        try{
+          await this.writeTaskJournal(root,completed);
+          Object.assign(task,completed);
+        }catch(error){
+          task.status='failed';task.failure=taskFailure(error,'task_journal_finish');task.error='任务结束记录保存失败：'+String(error);task.message=task.error;task.finishedAt=finishedAt;
+        }
       }
     })();
   }
@@ -363,7 +372,29 @@ export class StudioService {
         case 'open':this.assertIdle();this.root=resolve(String(data.path));this.project=await this.store.open(this.root);this.task=null;await this.recoverTask();await this.refreshAfterCommit();break;
         case 'save':{if(this.task?.status==='running'&&this.task.kind!=='export')this.assertIdle();const {project}=this.required();if(!data.project||data.project.id!==project.id)throw new Error('项目已切换，请刷新后重试');const next=structuredClone(data.project) as VideoProject;this.fitAudio(next);await this.persist({...next,outputs:project.outputs},{},'保存工程',undefined,data.deferPreview===true);break;}
         case 'apply':await this.apply(data);break;
-        case 'import':{this.assertIdle();const {root,project}=this.required();const asset=await this.store.importAsset(root,data,this.settings);const next=structuredClone(project);next.assets.push(asset);next.graph.positions[asset.id]=[60,80+(next.assets.length-1)*180];await this.persist(next,{},'导入素材');break;}
+        case 'import':{
+          const {root,project}=this.required();
+          const reqId=typeof data.requestId==='string'&&data.requestId.trim()?data.requestId.trim():undefined;
+          if(reqId){
+            if(reqId.length>300)throw new Error('导入 requestId 须为 1–300 字符');
+            const key=createHash('sha256').update(reqId).digest('hex');
+            const digest=createHash('sha256').update(JSON.stringify({name:data.name??'',mime:data.mime??'',path:data.path??'',len:typeof data.dataBase64==='string'?data.dataBase64.length:0})).digest('hex');
+            const existing=(project.extensions.importRequests as Record<string,{digest:string;assetId:string}>|undefined)?.[key];
+            if(existing&&project.assets.some(a=>a.id===existing.assetId)){
+              if(existing.digest!==digest)throw Object.assign(new Error('相同导入请求 ID 不能用于不同内容'),{code:'IMPORT_REQUEST_CONFLICT'});
+              return {ok:true,value:{...(await this.snapshot()),reusedAssetId:existing.assetId}};
+            }
+            this.assertIdle();
+            const asset=await this.store.importAsset(root,data,this.settings);
+            const next=structuredClone(project);
+            next.assets.push(asset);
+            next.graph.positions[asset.id]=[60,80+(next.assets.length-1)*180];
+            next.extensions={...next.extensions,importRequests:{...(next.extensions.importRequests as Record<string,unknown>|undefined),[key]:{digest,assetId:asset.id}}};
+            await this.persist(next,{},'导入素材');
+            return {ok:true,value:{...(await this.snapshot()),reusedAssetId:asset.id}};
+          }
+          this.assertIdle();const asset=await this.store.importAsset(root,data,this.settings);const next=structuredClone(project);next.assets.push(asset);next.graph.positions[asset.id]=[60,80+(next.assets.length-1)*180];await this.persist(next,{},'导入素材');break;
+        }
         case 'video.clip.save':{
           this.assertIdle();const next=structuredClone(this.required().project),raw=data.clip;
           if(!raw||typeof raw!=='object'||!['mute','keep'].includes(raw.audio??'mute'))throw new Error('视频片段参数无效');

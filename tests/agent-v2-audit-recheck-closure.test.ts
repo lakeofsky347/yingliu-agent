@@ -158,7 +158,7 @@ test('Recheck #01, #02, #03, #04, #11: Scoped subtitle preservation, strict oute
     return { text: `总导演已收到回执 (${mode})` };
   });
 
-  const app = await createApplication({ dataDirectory: dir, credentials: new MemorySecrets(), fetch: gw.fetch });
+  const app = await createApplication({ dataDirectory: dir, projectsDirectory: join(dir, 'projects'), credentials: new MemorySecrets(), fetch: gw.fetch });
   const call = async <T,>(ep: string, p: unknown = {}) => { const r = await app.route(ep, p); if (!r.ok) throw new Error(ep + ': ' + r.error.message); return r.value as T; };
   try {
     const c = await call<{ id: string }>('models.connection.save', { name: 'gw', protocol: 'chat-completions', baseUrl: 'http://gateway.test/v1', auth: 'none' });
@@ -233,44 +233,51 @@ test('Recheck #01, #02, #03, #04, #11: Scoped subtitle preservation, strict oute
 
     // #03: Capture exact disk state right when subagent finishes (completedResult persisted) BEFORE parent queue shifts, then recover & resume!
     const crashDir = join(dir, 'crash-recover');
-    const appCrash = await createApplication({ dataDirectory: crashDir, credentials: new MemorySecrets(), fetch: gw.fetch });
+    const appCrash = await createApplication({ dataDirectory: crashDir, projectsDirectory: join(crashDir, 'projects'), credentials: new MemorySecrets(), fetch: gw.fetch });
     const callCrash = async <T,>(ep: string, p: unknown = {}) => { const r = await appCrash.route(ep, p); if (!r.ok) throw new Error(ep + ': ' + r.error.message); return r.value as T; };
     let midFinishSnapshot: AgentRun | null = null;
-    const rawStore = (appCrash.agent as unknown as { store: { save: (r: AgentRun) => Promise<void> } }).store;
-    const origSave = rawStore.save.bind(rawStore);
-    rawStore.save = async (r: AgentRun) => {
-      await origSave(r);
-      const ckValues = Object.values(r.subagentCheckpoints ?? {});
-      if (!midFinishSnapshot && r.queue[0]?.name === 'delegate_crew' && ckValues.some(ck => Boolean(ck.completedResult))) {
-        midFinishSnapshot = structuredClone(r);
-      }
-    };
+    let crProjId = '';
+    let rCwId = '';
+    try {
+      const rawStore = (appCrash.agent as unknown as { store: { save: (r: AgentRun) => Promise<void> } }).store;
+      const origSave = rawStore.save.bind(rawStore);
+      rawStore.save = async (r: AgentRun) => {
+        await origSave(r);
+        const ckValues = Object.values(r.subagentCheckpoints ?? {});
+        if (!midFinishSnapshot && r.queue[0]?.name === 'delegate_crew' && ckValues.some(ck => Boolean(ck.completedResult))) {
+          midFinishSnapshot = structuredClone(r);
+        }
+      };
 
-    const cC = await callCrash<{ id: string }>('models.connection.save', { name: 'gw', protocol: 'chat-completions', baseUrl: 'http://gateway.test/v1', auth: 'none' });
-    const mC = await callCrash<{ id: string }>('models.model.save', { connectionId: cC.id, model: 'deepseek-chat', inputModalities: ['text'], outputModalities: ['text'], parameters: {} });
-    await callCrash('models.role.bind', { role: 'director', modelId: mC.id });
-    const crProj = await callCrash<StudioSnapshot>('create', { title: '崩溃恢复4镜测试' });
-    assert.equal(crProj.project!.shots.length, 3);
+      const cC = await callCrash<{ id: string }>('models.connection.save', { name: 'gw', protocol: 'chat-completions', baseUrl: 'http://gateway.test/v1', auth: 'none' });
+      const mC = await callCrash<{ id: string }>('models.model.save', { connectionId: cC.id, model: 'deepseek-chat', inputModalities: ['text'], outputModalities: ['text'], parameters: {} });
+      await callCrash('models.role.bind', { role: 'director', modelId: mC.id });
+      const crProj = await callCrash<StudioSnapshot>('create', { title: '崩溃恢复4镜测试' });
+      crProjId = crProj.project!.id;
+      assert.equal(crProj.project!.shots.length, 3);
 
-    mode = 'crash_window'; subTurn = 0; directorTurn = 0; capturedReceipts = [];
-    const rCw = await callCrash<PublicRun>('agent.start', { projectId: crProj.project!.id, goal: '追加一镜崩溃恢复', autoApprove: ['read', 'write'], maxReviewRounds: 0 });
-    const dCw = await waitRun(callCrash, rCw.id, ['complete', 'failed']);
-    assert.equal(dCw.status, 'complete');
-    assert.ok(midFinishSnapshot, '必须捕获到子代理已完成、父队列尚未出队的落盘瞬间');
-    assert.equal((await callCrash<StudioSnapshot>('current', { projectId: crProj.project!.id })).project!.shots.length, 4);
-    await appCrash.dispose();
+      mode = 'crash_window'; subTurn = 0; directorTurn = 0; capturedReceipts = [];
+      const rCw = await callCrash<PublicRun>('agent.start', { projectId: crProjId, goal: '追加一镜崩溃恢复', autoApprove: ['read', 'write'], maxReviewRounds: 0 });
+      rCwId = rCw.id;
+      const dCw = await waitRun(callCrash, rCwId, ['complete', 'failed']);
+      assert.equal(dCw.status, 'complete');
+      assert.ok(midFinishSnapshot, '必须捕获到子代理已完成、父队列尚未出队的落盘瞬间');
+      assert.equal((await callCrash<StudioSnapshot>('current', { projectId: crProjId })).project!.shots.length, 4);
+    } finally {
+      await appCrash.dispose();
+    }
 
     // Overwrite disk run JSON with the captured mid-finish snapshot (simulating process kill before settleToolSuccess) and restart!
-    await writeFile(join(crashDir, 'agent-runs', `${rCw.id}.json`), JSON.stringify(midFinishSnapshot, null, 2));
-    const appRestart = await createApplication({ dataDirectory: crashDir, credentials: new MemorySecrets(), fetch: gw.fetch });
+    await writeFile(join(crashDir, 'agent-runs', `${rCwId}.json`), JSON.stringify(midFinishSnapshot, null, 2));
+    const appRestart = await createApplication({ dataDirectory: crashDir, projectsDirectory: join(crashDir, 'projects'), credentials: new MemorySecrets(), fetch: gw.fetch });
     const callRestart = async <T,>(ep: string, p: unknown = {}) => { const r = await appRestart.route(ep, p); if (!r.ok) throw new Error(ep + ': ' + r.error.message); return r.value as T; };
     try {
-      const pausedRun = await callRestart<PublicRun>('agent.get', { runId: rCw.id });
+      const pausedRun = await callRestart<PublicRun>('agent.get', { runId: rCwId });
       assert.equal(pausedRun.status, 'paused');
-      await callRestart('agent.resume', { runId: rCw.id });
-      const doneRestart = await waitRun(callRestart, rCw.id, ['complete', 'failed']);
+      await callRestart('agent.resume', { runId: rCwId });
+      const doneRestart = await waitRun(callRestart, rCwId, ['complete', 'failed']);
       assert.equal(doneRestart.status, 'complete', doneRestart.message);
-      const snapAfterRestart = await callRestart<StudioSnapshot>('current', { projectId: crProj.project!.id });
+      const snapAfterRestart = await callRestart<StudioSnapshot>('current', { projectId: crProjId });
       assert.equal(snapAfterRestart.project!.shots.length, 4, '重启恢复后工程仍须保持 4 镜，严禁重复写入变为 5 镜');
     } finally {
       await appRestart.dispose();
@@ -291,7 +298,7 @@ test('Recheck #12: Deterministic sendMessage delivered during run.complete trace
     return { text: '即将被纠偏替代的旧答复' };
   });
 
-  const app = await createApplication({ dataDirectory: dir, credentials: new MemorySecrets(), fetch: gw.fetch });
+  const app = await createApplication({ dataDirectory: dir, projectsDirectory: join(dir, 'projects'), credentials: new MemorySecrets(), fetch: gw.fetch });
   const call = async <T,>(ep: string, p: unknown = {}) => { const r = await app.route(ep, p); if (!r.ok) throw new Error(ep + ': ' + r.error.message); return r.value as T; };
   try {
     const c = await call<{ id: string }>('models.connection.save', { name: 'gw', protocol: 'chat-completions', baseUrl: 'http://gateway.test/v1', auth: 'none' });
@@ -439,7 +446,7 @@ test('Recheck #06, #07, #08, #10: Media 404 pause propagation, dual autoApply co
     throw new Error('Unexpected URL: ' + url);
   };
 
-  const app = await createApplication({ dataDirectory: dir, credentials: new MemorySecrets(), fetch: customFetch });
+  const app = await createApplication({ dataDirectory: dir, projectsDirectory: join(dir, 'projects'), credentials: new MemorySecrets(), fetch: customFetch });
   const call = async <T,>(ep: string, p: unknown = {}) => { const r = await app.route(ep, p); if (!r.ok) throw new Error(ep + ': ' + r.error.message); return r.value as T; };
   try {
     const cChat = await call<{ id: string }>('models.connection.save', { name: 'gw', protocol: 'chat-completions', baseUrl: 'http://gateway.test/v1', auth: 'none' });
@@ -610,7 +617,7 @@ test('Recheck #06, #07, #08, #10: Media 404 pause propagation, dual autoApply co
       }
       return { text: '完成' };
     });
-    const appUi = await createApplication({ dataDirectory: join(dir, 'ui-consent'), credentials: new MemorySecrets(), fetch: (u, init) => (String(u).startsWith('http://gateway.test') ? lipGw.fetch(u, init) : customFetch(u, init)) });
+    const appUi = await createApplication({ dataDirectory: join(dir, 'ui-consent'), projectsDirectory: join(dir, 'ui-consent', 'projects'), credentials: new MemorySecrets(), fetch: (u, init) => (String(u).startsWith('http://gateway.test') ? lipGw.fetch(u, init) : customFetch(u, init)) });
     const callUi = async <T,>(ep: string, p: unknown = {}) => { const r = await appUi.route(ep, p); if (!r.ok) throw new Error(ep + ': ' + r.error.message); return r.value as T; };
     try {
       const cu1 = await callUi<{ id: string }>('models.connection.save', { name: 'gw', protocol: 'chat-completions', baseUrl: 'http://gateway.test/v1', auth: 'none' });
@@ -659,64 +666,83 @@ test('Recheck #06, #07, #08, #10: Media 404 pause propagation, dual autoApply co
 
     // #06c: Mid-batch snapshot while item 0 accepted & item 1 in-flight -> unknownCostCalls === 1 immediately, and restart tracks known item 0 without resubmitting item 1!
     const batchCrashDir = join(dir, 'batch-crash');
-    const appBc = await createApplication({ dataDirectory: batchCrashDir, credentials: new MemorySecrets(), fetch: customFetch });
+    const appBc = await createApplication({ dataDirectory: batchCrashDir, projectsDirectory: join(batchCrashDir, 'projects'), credentials: new MemorySecrets(), fetch: customFetch });
     const callBc = async <T,>(ep: string, p: unknown = {}) => { const r = await appBc.route(ep, p); if (!r.ok) throw new Error(ep + ': ' + r.error.message); return r.value as T; };
-    const cb1 = await callBc<{ id: string }>('models.connection.save', { name: 'gw', protocol: 'chat-completions', baseUrl: 'http://gateway.test/v1', auth: 'none' });
-    const mb1 = await callBc<{ id: string }>('models.model.save', { connectionId: cb1.id, model: 'deepseek-chat', inputModalities: ['text'], outputModalities: ['text'], parameters: { pricePerMInput: 0, pricePerMOutput: 0, priceCurrency: 'CNY' } });
-    await callBc('models.role.bind', { role: 'director', modelId: mb1.id });
-    const cb2 = await callBc<{ id: string }>('models.connection.save', { name: 'vid', protocol: 'video-gateway', baseUrl: 'http://vid-gw.test/v1', auth: 'none' });
-    const mb2 = await callBc<{ id: string }>('models.model.save', { connectionId: cb2.id, model: 'vid-v1', inputModalities: ['text'], outputModalities: ['video'], parameters: {} });
-    await callBc('models.role.bind', { role: 'video', modelId: mb2.id });
+    let rBcId = '';
+    let midRunDisk: AgentRun | null = null;
+    let knownItem0TaskId = '';
+    try {
+      const cb1 = await callBc<{ id: string }>('models.connection.save', { name: 'gw', protocol: 'chat-completions', baseUrl: 'http://gateway.test/v1', auth: 'none' });
+      const mb1 = await callBc<{ id: string }>('models.model.save', { connectionId: cb1.id, model: 'deepseek-chat', inputModalities: ['text'], outputModalities: ['text'], parameters: { pricePerMInput: 0, pricePerMOutput: 0, priceCurrency: 'CNY' } });
+      await callBc('models.role.bind', { role: 'director', modelId: mb1.id });
+      const cb2 = await callBc<{ id: string }>('models.connection.save', { name: 'vid', protocol: 'video-gateway', baseUrl: 'http://vid-gw.test/v1', auth: 'none' });
+      const mb2 = await callBc<{ id: string }>('models.model.save', { connectionId: cb2.id, model: 'vid-v1', inputModalities: ['text'], outputModalities: ['video'], parameters: {} });
+      await callBc('models.role.bind', { role: 'video', modelId: mb2.id });
 
-    let bcSnap = await callBc<StudioSnapshot>('create', { title: '批次中断记账与首项跟踪', productionMode: 'model_video' });
-    await callBc('production.set', { projectId: bcSnap.project!.id, expectedRevision: 0, mode: 'model_video', allowGeneratedImages: true, allowImportedVideo: true });
-    bcSnap = await callBc<StudioSnapshot>('current', { projectId: bcSnap.project!.id });
-    await callBc('rename', { projectId: bcSnap.project!.id, expectedRevision: bcSnap.project!.revision, title: '批次中断记账v2' });
-    bcSnap = await callBc<StudioSnapshot>('current', { projectId: bcSnap.project!.id });
-    shot1 = bcSnap.project!.shots[0]!.id;
-    shot2 = bcSnap.project!.shots[1]!.id;
+      let bcSnap = await callBc<StudioSnapshot>('create', { title: '批次中断记账与首项跟踪', productionMode: 'model_video' });
+      await callBc('production.set', { projectId: bcSnap.project!.id, expectedRevision: 0, mode: 'model_video', allowGeneratedImages: true, allowImportedVideo: true });
+      bcSnap = await callBc<StudioSnapshot>('current', { projectId: bcSnap.project!.id });
+      await callBc('rename', { projectId: bcSnap.project!.id, expectedRevision: bcSnap.project!.revision, title: '批次中断记账v2' });
+      bcSnap = await callBc<StudioSnapshot>('current', { projectId: bcSnap.project!.id });
+      shot1 = bcSnap.project!.shots[0]!.id;
+      shot2 = bcSnap.project!.shots[1]!.id;
 
-    phase = 'crash_batch';
-    batchItemCount = 0;
-    blockSecondBatchSubmit = true;
-    batchReceiptsCaptured.length = 0;
-    const secondInFlightPromise = new Promise<void>(r => { hooks.onSecondInFlight = r; });
+      phase = 'crash_batch';
+      batchItemCount = 0;
+      blockSecondBatchSubmit = false;
+      batchReceiptsCaptured.length = 0;
+      const secondInFlightPromise = new Promise<void>(r => { hooks.onSecondInFlight = r; });
 
-    const rBc = await callBc<PublicRun>('agent.start', { projectId: bcSnap.project!.id, goal: '测试批次中途崩溃', autoApprove: ['read', 'write'], maxReviewRounds: 0 });
-    const pBc = await waitRun(callBc, rBc.id, ['awaiting_approval', 'failed']);
-    await approvePending(callBc, pBc);
-    await secondInFlightPromise;
+      // Deterministically pause right when batch_generate_media dispatches item 1 (after item 0 receipt is persisted to disk!)
+      const origMediaGen = appBc.media.generate.bind(appBc.media);
+      let bcGenCalls = 0;
+      appBc.media.generate = async (req) => {
+        bcGenCalls++;
+        if (bcGenCalls === 2) {
+          hooks.onSecondInFlight?.();
+          await new Promise<void>(r => { hooks.releaseSecond = r; });
+        }
+        return origMediaGen(req);
+      };
 
-    // Inspect mid-batch persisted state BEFORE item 1 returns!
-    const midRunDisk = JSON.parse(await (await import('node:fs/promises')).readFile(join(batchCrashDir, 'agent-runs', `${rBc.id}.json`), 'utf8')) as AgentRun;
-    assert.equal(midRunDisk.usage.unknownCostCalls, 1, '首项受理落盘时未知费用计数必须已记为 1（不为 0）');
-    assert.ok(midRunDisk.inFlight, '整批仍在 inFlight');
-    const knownItem0TaskId = Object.values(midRunDisk.batchReceipts?.['b-crash'] ?? {})[0];
-    assert.ok(knownItem0TaskId, '首项 taskId 必须已落盘');
+      const rBc = await callBc<PublicRun>('agent.start', { projectId: bcSnap.project!.id, goal: '测试批次中途崩溃', autoApprove: ['read', 'write'], maxReviewRounds: 0 });
+      rBcId = rBc.id;
+      const pBc = await waitRun(callBc, rBcId, ['awaiting_approval', 'failed']);
+      await approvePending(callBc, pBc);
+      await secondInFlightPromise;
 
-    hooks.releaseSecond?.();
-    blockSecondBatchSubmit = false;
-    await waitRun(callBc, rBc.id, ['complete', 'failed']);
-    await appBc.dispose();
+      // Inspect mid-batch persisted state BEFORE item 1 returns!
+      midRunDisk = JSON.parse(await (await import('node:fs/promises')).readFile(join(batchCrashDir, 'agent-runs', `${rBcId}.json`), 'utf8')) as AgentRun;
+      assert.equal(midRunDisk.usage.unknownCostCalls, 1, '首项受理落盘时未知费用计数必须已记为 1（不为 0）');
+      assert.ok(midRunDisk.inFlight, '整批仍在 inFlight');
+      knownItem0TaskId = Object.values(midRunDisk.batchReceipts?.['b-crash'] ?? {})[0]!;
+      assert.ok(knownItem0TaskId, '首项 taskId 必须已落盘');
+      assert.equal(Object.keys(midRunDisk.batchReceipts?.['b-crash'] ?? {}).length, 1, '次项尚未受理落盘');
 
-    // Restore exact mid-batch disk record into a fresh directory (copying media-tasks so item 0 exists) and restart!
-    await writeFile(join(batchCrashDir, 'agent-runs', `${rBc.id}.json`), JSON.stringify(midRunDisk, null, 2));
-    // Remove toolSuccess receipt if any was left
+      hooks.releaseSecond?.();
+      await waitRun(callBc, rBcId, ['complete', 'failed']);
+    } finally {
+      hooks.releaseSecond?.();
+      await appBc.dispose();
+    }
+
+    // Restore exact mid-batch disk record (keeping item 0 media task on disk, removing item 1 task & toolSuccess receipt) and restart!
+    await writeFile(join(batchCrashDir, 'agent-runs', `${rBcId}.json`), JSON.stringify(midRunDisk, null, 2));
     await rm(join(batchCrashDir, 'agent-runs', 'tool-success'), { recursive: true, force: true });
     batchReceiptsCaptured.length = 0;
     const submitsBeforeRestart = gatewayVideoSubmits;
 
-    const appBcRestart = await createApplication({ dataDirectory: batchCrashDir, credentials: new MemorySecrets(), fetch: customFetch });
+    const appBcRestart = await createApplication({ dataDirectory: batchCrashDir, projectsDirectory: join(batchCrashDir, 'projects'), credentials: new MemorySecrets(), fetch: customFetch });
     const callBcRestart = async <T,>(ep: string, p: unknown = {}) => { const r = await appBcRestart.route(ep, p); if (!r.ok) throw new Error(ep + ': ' + r.error.message); return r.value as T; };
     try {
-      const recoveredBc = await callBcRestart<PublicRun>('agent.get', { runId: rBc.id });
+      const recoveredBc = await callBcRestart<PublicRun>('agent.get', { runId: rBcId });
       assert.equal(recoveredBc.status, 'paused');
       assert.equal(recoveredBc.uncertainSubmissions?.length, 1, '次项在途中断应登记为不确定请求');
       assert.equal(recoveredBc.waitingBatch?.ids[0], knownItem0TaskId, '已知首项必须继续由父运行 waitingBatch 跟踪');
       assert.equal(recoveredBc.usage.unknownCostCalls, 2, '已知首项 + 不确定次项合计 2 笔未知费用');
 
-      await callBcRestart('agent.resume', { runId: rBc.id });
-      const finishedBc = await waitRun(callBcRestart, rBc.id, ['complete', 'failed']);
+      await callBcRestart('agent.resume', { runId: rBcId });
+      const finishedBc = await waitRun(callBcRestart, rBcId, ['complete', 'failed']);
       assert.equal(finishedBc.status, 'complete');
       assert.equal(gatewayVideoSubmits, submitsBeforeRestart, '重启恢复绝不重新提交不确定次项');
       assert.equal(batchReceiptsCaptured.length, 1);
@@ -770,7 +796,7 @@ test('Recheck #09, #05, #13, #14: Preview cancel gate, Workbench Draft B field-l
     return { text: '120 镜部门委派读取验证通过' };
   });
 
-  const app = await createApplication({ dataDirectory: dir, credentials: new MemorySecrets(), fetch: gw.fetch });
+  const app = await createApplication({ dataDirectory: dir, projectsDirectory: join(dir, 'projects'), credentials: new MemorySecrets(), fetch: gw.fetch });
   const call = async <T,>(ep: string, p: unknown = {}) => { const r = await app.route(ep, p); if (!r.ok) throw new Error(ep + ': ' + r.error.message); return r.value as T; };
   try {
     const c = await call<{ id: string }>('models.connection.save', { name: 'gw', protocol: 'chat-completions', baseUrl: 'http://gateway.test/v1', auth: 'none' });

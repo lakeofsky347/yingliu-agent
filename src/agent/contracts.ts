@@ -14,7 +14,10 @@ export interface SubagentSkippedTool {
   id?: string;
   tool: string;
   reason: string;
-  kind: 'precondition' | 'turn_limit';
+  kind: 'precondition' | 'turn_limit' | 'cancelled' | 'timeout';
+  status?: string;
+  targetSig?: string;
+  turnStep?: number;
 }
 
 export interface SubagentCheckpoint {
@@ -178,12 +181,12 @@ export interface AgentPort {
   voice?(projectId: string, shotId: string, text: string, signal: AbortSignal, options?: { expectedRevision?: number; requestId?: string; voice?: string; speed?: number; speaker?: string }): Promise<{ id: string; name: string; revision?: number }>;
   /** Generate audio with a bound role (speech/music/sfx) and import it as a project asset. */
   generateAudio?(projectId: string, role: 'speech' | 'music' | 'sfx', prompt: string, options: { durationSeconds?: number; signal: AbortSignal; shotId?: string }): Promise<{ id: string; name: string; cost?: number | null }>;
-  /** Import locally synthesized audio bytes (WAV) as a project asset. */
-  importAudio?(projectId: string, name: string, bytes: Uint8Array, mime: string): Promise<{ id: string; name: string }>;
+  /** Import locally synthesized audio bytes (WAV) as a project asset (idempotent when requestId is supplied). */
+  importAudio?(projectId: string, name: string, bytes: Uint8Array, mime: string, requestId?: string): Promise<{ id: string; name: string }>;
   /** Which generation roles are currently bound (hot: read every step). */
   capabilities?(): Promise<Capabilities>;
-  /** Import image bytes (e.g. a captured tail frame) as a project asset. */
-  importImage?(projectId: string, name: string, bytes: Uint8Array, mime: string): Promise<{ id: string; name: string }>;
+  /** Import image bytes (e.g. a captured tail frame) as a project asset (idempotent when requestId is supplied). */
+  importImage?(projectId: string, name: string, bytes: Uint8Array, mime: string, requestId?: string): Promise<{ id: string; name: string }>;
   visionDestination?(): Promise<UploadDestination>;
   vision?(prompt: string, images: { mime: string; bytes: Uint8Array }[], signal: AbortSignal, authorizeUpload?: AuthorizeUpload): Promise<string>;
   imageReferenceDestination?(): Promise<UploadDestination>;

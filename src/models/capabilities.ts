@@ -60,8 +60,10 @@ export function getMediaCapabilities(resolved:ResolvedModel):MediaCapabilities {
     }else if(resolved.model.outputModalities.includes('video')){
       const acceptsImage=templateAcceptsImage(resolved.model.parameters);
       const acceptsLipSync=templateAcceptsLipSync(resolved.model.parameters);
-      const ops:MediaOperation[]=maxImgs>=2?['text-to-video','image-to-video','first-last-frame-video']:acceptsImage?['text-to-video','image-to-video']:['text-to-video'];
-      if(acceptsLipSync)ops.push('lip-sync-video');
+      const ops:MediaOperation[]=acceptsLipSync&&!acceptsImage
+        ?['lip-sync-video']
+        :maxImgs>=2?['text-to-video','image-to-video','first-last-frame-video']:acceptsImage?['text-to-video','image-to-video']:['text-to-video'];
+      if(acceptsLipSync&&!ops.includes('lip-sync-video'))ops.push('lip-sync-video');
       result.operations=ops;
       result.references=acceptsImage?{max:maxImgs||1,roles:['first_frame','last_frame','reference','character','style','layout','depth'],defaultRole:'first_frame'}:{max:0,roles:[],defaultRole:'first_frame'};
       result.parameters=[...VIDEO_PARAMETERS];

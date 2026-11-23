@@ -82,7 +82,32 @@ function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-/** Validate tool arguments against `scopedShotIds` before running any write tool in a sub-agent. */
+function extractCallTargetSig(toolName: string, rawArgs: string | Record<string, unknown>): string {
+  let obj: Record<string, unknown> = {};
+  if (typeof rawArgs === 'string') {
+    try {
+      const p = JSON.parse(rawArgs || '{}');
+      if (p && typeof p === 'object' && !Array.isArray(p)) obj = p as Record<string, unknown>;
+    } catch { return `${toolName}:raw:${rawArgs.slice(0, 120)}`; }
+  } else if (rawArgs && typeof rawArgs === 'object') {
+    obj = rawArgs;
+  }
+  const patchShots = Array.isArray(obj.patches)
+    ? (obj.patches as Record<string, unknown>[]).map(p => String(p?.shotId ?? p?.id ?? '')).filter(Boolean).sort()
+    : undefined;
+  const shotIds = Array.isArray(obj.shotIds) ? obj.shotIds.map(String).sort() : undefined;
+  const key = {
+    ...(typeof obj.shotId === 'string' ? { shotId: obj.shotId } : {}),
+    ...(patchShots?.length ? { patchShots } : {}),
+    ...(shotIds?.length ? { shotIds } : {}),
+    ...(typeof obj.id === 'string' ? { id: obj.id } : {}),
+    ...(typeof obj.clipId === 'string' ? { clipId: obj.clipId } : {}),
+    ...(typeof obj.assetId === 'string' ? { assetId: obj.assetId } : {}),
+    ...(typeof obj.topic === 'string' ? { topic: obj.topic } : {}),
+    ...(typeof obj.frame === 'number' ? { frame: obj.frame } : {}),
+  };
+  return `${toolName}:${JSON.stringify(key)}`;
+}
 export function assertSubagentToolScope(tool: AgentTool, args: Record<string, unknown>, scope: ReadonlySet<string>): void {
   if (tool.risk !== 'write' || !scope.size) return;
   const scopeList = [...scope].join(', ');
@@ -223,6 +248,23 @@ function buildScopedToolContext(baseCtx: ToolContext, scope: ReadonlySet<string>
             return { ok: false, error: { code: 'SCOPE_VIOLATION', message: `越界拦截：禁止修改范围外镜头 ${String(clip.shotId ?? '')} 的视频片段` } };
           }
         }
+        if (endpoint === 'video.clip.extract' || endpoint === 'video.clip.remove') {
+          const snap = await baseCtx.port.snapshot(baseCtx.projectId);
+          const vClip = snap.project?.videoClips?.find(c => c.id === String(payload.clipId ?? ''));
+          if (!vClip || !scope.has(vClip.shotId)) {
+            return { ok: false, error: { code: 'SCOPE_VIOLATION', message: `越界拦截：禁止提取或移除范围外镜头 ${vClip?.shotId ?? '未知'} 的视频片段` } };
+          }
+        }
+        if (endpoint === 'audio') {
+          const op = String(payload.operation ?? payload.action ?? '');
+          if (op === 'update' || op === 'remove') {
+            const snap = await baseCtx.port.snapshot(baseCtx.projectId);
+            const aClip = snap.project?.audioClips?.find(c => c.id === String(payload.clipId ?? ''));
+            if (aClip && (!aClip.shotId || !scope.has(aClip.shotId))) {
+              return { ok: false, error: { code: 'SCOPE_VIOLATION', message: `越界拦截：禁止修改或移除范围外音轨片段 ${aClip.id}` } };
+            }
+          }
+        }
         return baseCtx.port.route(endpoint, payload);
       },
     },
@@ -241,7 +283,7 @@ export interface SubagentRunOptions {
   fetch?: typeof fetch;
   checkBudget: (next: 'model' | 'tool') => Promise<string | null>;
   onModelTurn: (inputTokens: number, outputTokens: number, usageKnown: boolean, parameters: Record<string, unknown>) => Promise<void>;
-  onToolCall: (risk: ToolRisk) => Promise<void>;
+  onToolCall: (risk: ToolRisk, execId?: string) => Promise<void>;
   checkpoint?: SubagentCheckpoint;
   saveCheckpoint?: (checkpoint: SubagentCheckpoint) => Promise<void>;
   clearCheckpoint?: () => Promise<void>;
@@ -324,40 +366,68 @@ export async function runCrewSubagent(opts: SubagentRunOptions): Promise<ToolRes
       const toolBudgetErr = await opts.checkBudget('tool');
       if (toolBudgetErr) throw new SubagentBudgetExceededError(toolBudgetErr);
 
+      const execId = call.execId ?? randomUUID();
+      call.execId = execId;
       try {
         const parsed = JSON.parse(call.arguments || '{}');
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('参数须为 JSON 对象');
         assertSubagentToolScope(tool, parsed as Record<string, unknown>, scope);
-        const res = await tool.run({ ...(parsed as Record<string, unknown>), __callId: call.execId ?? randomUUID() }, scopedCtx);
-        await opts.onToolCall(tool.risk);
-        let skipReason: string | null = null;
+        const res = await tool.run({ ...(parsed as Record<string, unknown>), __callId: execId }, scopedCtx);
+        let skipEntry: { reason: string; kind: 'precondition' | 'cancelled' | 'timeout'; status?: string } | null = null;
+        let checkSucceeded = false;
         try {
           const outObj = JSON.parse(res.content);
-          if (outObj && typeof outObj === 'object' && !Array.isArray(outObj) && (outObj as { skipped?: unknown }).skipped === true) {
-            skipReason = String((outObj as { reason?: unknown; error?: unknown }).reason ?? (outObj as { error?: unknown }).error ?? '前置条件未满足而跳过');
+          if (outObj && typeof outObj === 'object' && !Array.isArray(outObj)) {
+            if ((outObj as { skipped?: unknown }).skipped === true) {
+              skipEntry = {
+                reason: String((outObj as { reason?: unknown; error?: unknown }).reason ?? (outObj as { error?: unknown }).error ?? '前置条件未满足而跳过'),
+                kind: 'precondition',
+              };
+            } else if ((outObj as { status?: unknown }).status === 'cancelled' || (outObj as { status?: unknown }).status === 'timeout') {
+              const st = String((outObj as { status: string }).status) as 'cancelled' | 'timeout';
+              skipEntry = {
+                reason: String((outObj as { error?: unknown; message?: unknown }).error ?? (outObj as { message?: unknown }).message ?? (st === 'cancelled' ? '操作或检查已取消，未得出通过结论' : '操作或检查超时，未得出通过结论')),
+                kind: st,
+                status: st,
+              };
+            } else if ((outObj as { status?: unknown }).status === 'complete' || (outObj as { pass?: unknown }).pass === true) {
+              checkSucceeded = true;
+            }
           }
         } catch { /* non-JSON output such as skill_read markdown */ }
-        if (skipReason !== null) {
-          state.skippedTools!.push({ id: call.id, tool: tool.name, reason: skipReason, kind: 'precondition' });
-          await opts.trace?.({ event: 'subagent.tool', department: spec.department, tool: tool.name, status: 'skipped', reason: bound(skipReason, 300) });
+        if (skipEntry !== null) {
+          state.skippedTools!.push({ id: call.id, tool: tool.name, reason: skipEntry.reason, kind: skipEntry.kind, ...(skipEntry.status ? { status: skipEntry.status } : {}), turnStep: state.stepIdx });
+          await opts.trace?.({ event: 'subagent.tool', department: spec.department, tool: tool.name, status: skipEntry.status ?? 'skipped', reason: bound(skipEntry.reason, 300) });
         } else {
           state.executedTools.push(tool.name);
-          const overflowIdx = state.skippedTools!.findIndex(s => s.kind === 'turn_limit' && s.tool === tool.name);
+          if (checkSucceeded) {
+            state.skippedTools = state.skippedTools!.filter(s => !(s.tool === tool.name && (s.kind === 'cancelled' || s.kind === 'timeout')));
+          }
+          const currentTargetSig = extractCallTargetSig(tool.name, parsed as Record<string, unknown>);
+          const overflowIdx = state.skippedTools!.findIndex(s =>
+            s.kind === 'turn_limit'
+            && (s.turnStep ?? 0) < state.stepIdx
+            && s.tool === tool.name
+            && s.targetSig === currentTargetSig,
+          );
           if (overflowIdx >= 0) state.skippedTools!.splice(overflowIdx, 1);
           await opts.trace?.({ event: 'subagent.tool', department: spec.department, tool: tool.name, status: 'complete', revision: res.revision });
         }
         if (res.revision !== undefined) state.latestRevision = res.revision;
         state.messages.push({ role: 'tool', tool_call_id: call.id, content: bound(res.content, 12_000) });
+        state.pendingCalls.shift();
+        await opts.onToolCall(tool.risk, execId);
+        await persistCheckpoint();
       } catch (error) {
         if (opts.parentCtx.signal.aborted || error instanceof SubagentBudgetExceededError) throw error;
-        await opts.onToolCall('read');
         const errMsg = error instanceof Error ? error.message : String(error);
         state.failedTools.push({ tool: tool.name, error: errMsg });
         state.messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ error: errMsg }) });
+        state.pendingCalls.shift();
+        await opts.onToolCall('read', execId);
+        await persistCheckpoint();
         await opts.trace?.({ event: 'subagent.tool', department: spec.department, tool: tool.name, status: 'failed', error: bound(errMsg, 300) });
       }
-      state.pendingCalls.shift();
-      await persistCheckpoint();
     }
   };
 
@@ -403,14 +473,23 @@ export async function runCrewSubagent(opts: SubagentRunOptions): Promise<ToolRes
     if (!turn.toolCalls.length) {
       const finalSnap = await opts.parentCtx.port.snapshot(opts.parentCtx.projectId).catch(() => null);
       const finalRev = finalSnap?.project?.revision ?? state.latestRevision;
-      const skippedList = state.skippedTools ?? [];
+      const skippedList = (state.skippedTools ?? []).map(({ id, tool, reason, kind, status }) => ({
+        ...(id ? { id } : {}),
+        tool,
+        reason,
+        kind,
+        ...(status ? { status } : {}),
+      }));
+      const allCancelled = state.executedTools.length === 0 && state.failedTools.length === 0 && skippedList.length > 0 && skippedList.every(s => s.kind === 'cancelled');
       const status = state.failedTools.length === 0 && skippedList.length === 0
         ? 'complete'
-        : state.executedTools.length > 0
-          ? 'partial'
-          : state.failedTools.length > 0
-            ? 'failed'
-            : 'skipped';
+        : allCancelled
+          ? 'cancelled'
+          : state.executedTools.length > 0
+            ? 'partial'
+            : state.failedTools.length > 0
+              ? 'failed'
+              : 'skipped';
       const finalResult: ToolResult = {
         content: JSON.stringify({
           ok: status === 'complete',
@@ -422,7 +501,7 @@ export async function runCrewSubagent(opts: SubagentRunOptions): Promise<ToolRes
           ...(state.failedTools.length ? { failedTools: state.failedTools } : {}),
           ...(skippedList.length ? { skippedTools: skippedList } : {}),
           revision: finalRev,
-          report: bound(turn.content || (status === 'complete' ? '专项任务已完成' : status === 'skipped' ? '前置条件未满足，操作已跳过' : '专项任务存在未执行或失败操作'), 3000),
+          report: bound(turn.content || (status === 'complete' ? '专项任务已完成' : status === 'cancelled' ? '检查或操作已取消，未得出通过结论' : status === 'skipped' ? '前置条件未满足，操作已跳过' : '专项任务存在未执行或失败操作'), 3000),
         }),
         revision: finalRev,
       };
@@ -439,11 +518,18 @@ export async function runCrewSubagent(opts: SubagentRunOptions): Promise<ToolRes
     state.pendingCalls = executable;
     for (const skipped of overflow) {
       const reason = `单轮最多执行 ${maxToolsPerTurn} 个工具调用，请下一轮继续调用该操作`;
-      state.skippedTools!.push({ id: skipped.id, tool: skipped.name, reason, kind: 'turn_limit' });
+      state.skippedTools!.push({
+        id: skipped.id,
+        tool: skipped.name,
+        reason,
+        kind: 'turn_limit',
+        targetSig: extractCallTargetSig(skipped.name, skipped.arguments),
+        turnStep: state.stepIdx,
+      });
       state.messages.push({
         role: 'tool',
         tool_call_id: skipped.id,
-        content: JSON.stringify({ skipped: true, error: reason }),
+        content: JSON.stringify({ skipped: true, callId: skipped.id, error: reason }),
       });
     }
     await persistCheckpoint();
@@ -453,7 +539,13 @@ export async function runCrewSubagent(opts: SubagentRunOptions): Promise<ToolRes
   // Exhausted maxSteps without reaching a clean stop turn
   const finalSnap = await opts.parentCtx.port.snapshot(opts.parentCtx.projectId).catch(() => null);
   const finalRev = finalSnap?.project?.revision ?? state.latestRevision;
-  const skippedList = state.skippedTools ?? [];
+  const skippedList = (state.skippedTools ?? []).map(({ id, tool, reason, kind, status }) => ({
+    ...(id ? { id } : {}),
+    tool,
+    reason,
+    kind,
+    ...(status ? { status } : {}),
+  }));
   const status = state.executedTools.length > 0 ? 'step_limit_partial' : state.failedTools.length > 0 ? 'failed' : skippedList.length > 0 ? 'skipped' : 'failed';
   const lastAssistant = [...state.messages].reverse().find(m => m.role === 'assistant');
   const exhaustedResult: ToolResult = {

@@ -163,7 +163,7 @@ test('v2 Unified Production Bible breaks 12-shot ceiling (16 shots) and syncs St
     return { text: '十六镜制片圣经与分镜结构已完成同步' };
   });
 
-  const app = await createApplication({ dataDirectory: dir, credentials: new MemorySecrets(), fetch: gw.fetch });
+  const app = await createApplication({ dataDirectory: dir, projectsDirectory: join(dir, 'projects'), credentials: new MemorySecrets(), fetch: gw.fetch });
   const call = async <T,>(ep: string, p: unknown = {}) => { const r = await app.route(ep, p); if (!r.ok) throw new Error(ep + ': ' + r.error.message); return r.value as T; };
   try {
     const c = await call<{ id: string }>('models.connection.save', { name: 'gw', protocol: 'chat-completions', baseUrl: 'http://gateway.test/v1', auth: 'none' });
@@ -280,7 +280,7 @@ test('v2 Virtual Film Crew: delegate_crew runs isolated department sub-agent and
     return { text: '美术总监子代理与场景代码专精模型已协同完成任务' };
   });
 
-  const app = await createApplication({ dataDirectory: dir, credentials: new MemorySecrets(), fetch: gw.fetch });
+  const app = await createApplication({ dataDirectory: dir, projectsDirectory: join(dir, 'projects'), credentials: new MemorySecrets(), fetch: gw.fetch });
   const call = async <T,>(ep: string, p: unknown = {}) => { const r = await app.route(ep, p); if (!r.ok) throw new Error(ep + ': ' + r.error.message); return r.value as T; };
   try {
     const c = await call<{ id: string }>('models.connection.save', { name: 'gw', protocol: 'chat-completions', baseUrl: 'http://gateway.test/v1', auth: 'none' });
@@ -573,6 +573,7 @@ writeFileSync(join(spec.outputDir, 'manifest.json'), JSON.stringify({ keyframe: 
 
   const app = await createApplication({
     dataDirectory: dir,
+    projectsDirectory: join(dir, 'projects'),
     credentials: new MemorySecrets(),
     fetch: (input, init) => {
       const u = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -747,6 +748,7 @@ test('v2 Multi-Character Voice Routing, Sequential Turn-Taking, Sidechain Auto-D
 
   const app = await createApplication({
     dataDirectory: dir,
+    projectsDirectory: join(dir, 'projects'),
     credentials: new MemorySecrets(),
     fetch: (input, init) => {
       const u = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;

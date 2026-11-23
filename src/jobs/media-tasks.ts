@@ -109,6 +109,8 @@ export class MediaTaskService {
       if(resolved.connection.protocol!=='async-task'&&resolved.connection.protocol!=='video-gateway'){
         throw new MediaCapabilityError('所选协议不支持口型同步能力：'+resolved.connection.protocol);
       }
+    }else if(resolved.connection.protocol==='async-task'&&templateAcceptsLipSync(resolved.model.parameters)&&!templateAcceptsImage(resolved.model.parameters)){
+      throw new MediaCapabilityError('当前绑定的是口型同步专用模板，需提供源视频与配音素材，不支持纯文本或普通视频生成');
     }
     const policyFingerprint=this.projects.authorizeOperation?await this.projects.authorizeOperation(input.projectId,input.operation,input.shotId):undefined;
     if(needsMediaUpload(input.operation)&&authorizeUpload)authorizeUpload(uploadDestination(resolved));
@@ -187,6 +189,9 @@ export class MediaTaskService {
   private async run(task:MediaTask,signal:AbortSignal):Promise<void>{try{
     signal.throwIfAborted();let remote:RemoteJob|null=null;
     if(task.phase==='pending'){
+      if(this.projects.authorizeOperation){
+        task.productionPolicyFingerprint=await this.projects.authorizeOperation(task.projectId,task.operation,task.shotId);
+      }
       const inputs=await this.inputs(task),context=await this.context(task,signal);task.phase='submitting';task.metrics??={};task.metrics.submittedAt??=new Date().toISOString();task.message='正在提交生成请求';await this.persist(task);signal.throwIfAborted();
       const input:AdapterInput={clientRequestId:task.clientRequestId,model:task.model,operation:task.operation,prompt:task.prompt,inputs,parameters:task.parameters};
       remote=isImageOp(task.operation)?await generateImage(context,input):await submitVideo(context,input);
@@ -209,6 +214,7 @@ export class MediaTaskService {
     if(!files.length)throw new Error('生成结果没有可采用素材');task.files=files;task.metrics??={};task.metrics.readyAt=new Date().toISOString();task.metrics.downloadBytes=total;if(task.metrics.remoteCompletedAt)task.metrics.downloadMs=Date.parse(task.metrics.readyAt)-Date.parse(task.metrics.remoteCompletedAt);task.phase='ready';task.progress=1;task.message='素材已就绪，等待采用';task.observation='paused';delete task.error;await this.persist(task);
   }catch(error){
     task.observation='paused';task.error=await this.redact(task,errorText(error));if(signal.aborted){task.message='已停止本地等待，云端状态以查询结果为准';}
+    else if(task.phase==='pending'&&(error as {submissionUncertain?:unknown})?.submissionUncertain===false){task.phase='failed';task.resumeOnStart=false;task.message='发送前制作策略或能力校验未通过，未发起远程计费请求';}
     else if(task.phase==='submitting'){task.phase='unknown';task.message='提交结果待确认；没有重新提交';}
     else {task.message=task.remoteStatus==='succeeded'?'素材获取或检查失败，可重试获取':'任务已暂停，可恢复查询';}
     await this.persist(task);
