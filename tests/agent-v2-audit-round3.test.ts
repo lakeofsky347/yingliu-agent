@@ -860,6 +860,21 @@ test('Round3 #09, #05, #13, #14a & #14b: Neighboring shot error attribution, div
     const after09 = await call<StudioSnapshot>('current', { projectId: pid09 });
     assert.equal(after09.project!.revision, 2, '工程版本应仅推进 1 次（1 -> 2），不得连写两次变为 4');
 
+    await call('environment', { projectId: pid09, browserPath: join(dir, 'missing-chromium') });
+    sceneModelCalls = 0;
+    try {
+      await assert.rejects(
+        () => delegateSceneTool.run({ expectedRevision: 2, shotId: s1_09, instruction: '保留健康的第一稿' }, ctx09),
+        /Chrome\/Chromium unavailable/,
+      );
+      assert.equal(sceneModelCalls, 1);
+      const unavailable = await call<StudioSnapshot>('current', { projectId: pid09 });
+      assert.equal(unavailable.project!.revision, 3);
+      assert.equal(unavailable.task!.status, 'failed');
+    } finally {
+      await call('environment', { projectId: pid09, browserPath: after09.environment.browserPath });
+    }
+
     // 2) #05 & #13: Diverged Draft B wide-shot previz isolation on real agent.approve + 6 auxiliary refs + 7th independent identity image preservation!
     let p5 = await call<StudioSnapshot>('create', { title: '草稿改镜预演隔离与7图保留' });
     const pid5 = p5.project!.id;

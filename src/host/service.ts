@@ -9,7 +9,7 @@ import type {VideoProject,StudioSnapshot,TaskState,EnvironmentSettings,ProviderG
 import {approveDirectorDocument,saveDirectorDocument} from '../director/document.ts';
 import {localExportQuality,localQualityFrames,type LocalQualityFrame,type LocalQualityReport} from '../workflows/local-quality.ts';
 import type {HostContext} from './platform.ts';
-import {ProjectStore,projectPath,validateStoredProject,validateSources} from './store.ts';
+import {ProjectStore,projectPath,validateStoredProject,validateSources,type ImportAssetInput} from './store.ts';
 import {VideoRenderer,detectEnvironment,renderCheckError} from './renderer.ts';
 import {sanitizeTaskFailure,taskFailure} from '../shared/task-diagnostic.ts';
 import {AppSceneGenerator,parseSceneSource,normalizeStoryboard} from './generator.ts';
@@ -18,6 +18,7 @@ import {BlenderRunner,type PrevizSceneSpec} from './blender.ts';
 import {synthesizeLocalSfx} from '../media/local-sfx.ts';
 import {analyzeAudioAcoustics,deconstructReferenceVideo} from '../media/deconstruct.ts';
 import {deriveSubtitles,formatAss,formatEdl,formatFcpxml,formatOtio,formatSrt} from '../media/delivery.ts';
+import {hashMediaFile} from '../media/video.ts';
 import {inspectGeneratedMedia,readProjectImage} from '../media/inspect.ts';
 import type { GeneratedFile, MediaOperation, MediaProjectPort, MediaTask } from '../jobs/contracts.ts';
 import {inspectCredential,isCredentialError,updateCredential} from '../app/secrets.ts';
@@ -26,6 +27,30 @@ import {normalizeVideoStyle} from '../shared/video-style.ts';
 
 interface TaskRequest { endpoint:'preview'|'export'|'generate'; payload:Record<string,string> }
 interface RecordedTask extends TaskState { appRecordVersion?:1; revision?:number; request?:TaskRequest; retryOf?:string; outputId?:string }
+
+async function importedSourceHash(root:string,asset:Asset):Promise<string>{
+  if(asset.kind==='text')return createHash('sha256').update(asset.text??'').digest('hex');
+  if(asset.sourceSha256)return asset.sourceSha256;
+  return hashMediaFile(await projectPath(root,(asset.originalPath??asset.path)!));
+}
+
+async function matchesImportedContent(root:string,asset:Asset,input:ImportAssetInput,originalHash?:string):Promise<boolean>{
+  let incoming:string;
+  if(asset.kind==='text'&&typeof input.text==='string'){
+    incoming=createHash('sha256').update(input.text).digest('hex');
+  }else if(typeof input.dataBase64==='string'){
+    incoming=createHash('sha256').update(input.dataBase64.replace(/^data:[^;]+;base64,/,''),'base64').digest('hex');
+  }else if(input.path){
+    try{incoming=asset.kind==='text'?createHash('sha256').update(await readFile(input.path,'utf8')).digest('hex'):await hashMediaFile(input.path);}
+    catch(error){
+      // Repeating an already completed path import also works after the original was moved.
+      if((error as NodeJS.ErrnoException).code==='ENOENT')return true;
+      throw error;
+    }
+  }else return false;
+  // Receipts from older projects have only the request shape and the retained asset.
+  return incoming===(originalHash??await importedSourceHash(root,asset));
+}
 
 export class StudioService {
   readonly store:ProjectStore;readonly renderer=new VideoRenderer();
@@ -273,6 +298,7 @@ export class StudioService {
       try{const value=JSON.parse(await readFile(await projectPath(root,'.studio/tasks/'+name),'utf8')) as RecordedTask;
         if(value.id+'.json'!==name||typeof value.startedAt!=='string'||!['storyboard','scenes','modify','preview','export','audio'].includes(value.kind)||!['running','complete','failed','cancelled'].includes(value.status))continue;
         const task:RecordedTask={id:value.id,kind:value.kind,status:value.status,startedAt:value.startedAt,progress:Number.isFinite(value.progress)?value.progress:0,message:await this.redact(String(value.message??'')),logPath:await projectPath(root,'.studio/tasks/'+name),finishedAt:typeof value.finishedAt==='string'?value.finishedAt:undefined,error:typeof value.error==='string'?await this.redact(value.error):undefined,failure:sanitizeTaskFailure(value.failure),shotId:typeof value.shotId==='string'?value.shotId:undefined,appRecordVersion:value.appRecordVersion===1?1:undefined,revision:Number.isSafeInteger(value.revision)?value.revision:undefined,retryOf:typeof value.retryOf==='string'?value.retryOf:undefined,outputId:typeof value.outputId==='string'?value.outputId:undefined};
+        if(Array.isArray(value.failedShotIds))task.failedShotIds=value.failedShotIds.filter(id=>typeof id==='string');
         const request=value.appRecordVersion===1&&value.request?this.recordedRequest(value.request.endpoint,value.request.payload):undefined;
         if(request&&((request.endpoint==='preview'||request.endpoint==='export')?request.endpoint===value.kind:request.payload.kind===value.kind)){
           for(const key of Object.keys(request.payload))request.payload[key]=await this.redact(request.payload[key]!);task.request=request;
@@ -332,7 +358,7 @@ export class StudioService {
     let checked=await this.renderer.check(root,this.required().project,this.settings,signal);
     if(!checked.ok){
       this.progress(this.task?.progress??0,'发现代码错误，正在修复');
-      const errors=checked.errors.filter(e=>!e.shotId||e.shotId===shotId);if(!errors.length)throw renderCheckError(checked);
+      const errors=checked.errors.filter(e=>e.shotId===shotId);if(!errors.length)throw renderCheckError(checked);
       const repaired=await generator.scene(this.required().project,this.required().project.shots.find(s=>s.id===shotId)!,route,signal,source,`修复运行错误，保留当前设计和可编辑参数：${JSON.stringify(errors)}`);
       signal.throwIfAborted();await this.enqueue(async()=>{signal.throwIfAborted();await this.persist(this.required().project,{[shotId]:{html:repaired.html,css:repaired.css,js:repaired.js}},'模型修复镜头',this.task?.id);});checked=await this.renderer.check(root,this.required().project,this.settings,signal);
     }
@@ -375,25 +401,27 @@ export class StudioService {
         case 'import':{
           const {root,project}=this.required();
           const reqId=typeof data.requestId==='string'&&data.requestId.trim()?data.requestId.trim():undefined;
+          let key:string|undefined,digest:string|undefined;
           if(reqId){
             if(reqId.length>300)throw new Error('导入 requestId 须为 1–300 字符');
-            const key=createHash('sha256').update(reqId).digest('hex');
-            const digest=createHash('sha256').update(JSON.stringify({name:data.name??'',mime:data.mime??'',path:data.path??'',len:typeof data.dataBase64==='string'?data.dataBase64.length:0})).digest('hex');
-            const existing=(project.extensions.importRequests as Record<string,{digest:string;assetId:string}>|undefined)?.[key];
-            if(existing&&project.assets.some(a=>a.id===existing.assetId)){
-              if(existing.digest!==digest)throw Object.assign(new Error('相同导入请求 ID 不能用于不同内容'),{code:'IMPORT_REQUEST_CONFLICT'});
-              return {ok:true,value:{...(await this.snapshot()),reusedAssetId:existing.assetId}};
+            key=createHash('sha256').update(reqId).digest('hex');
+            digest=createHash('sha256').update(JSON.stringify({name:data.name??'',mime:data.mime??'',path:data.path??'',len:typeof data.dataBase64==='string'?data.dataBase64.length:0})).digest('hex');
+            const existing=(project.extensions.importRequests as Record<string,{digest:string;assetId:string;contentHash?:string}>|undefined)?.[key];
+            const prior=existing&&project.assets.find(a=>a.id===existing.assetId);
+            if(prior){
+              if(existing.digest!==digest||!await matchesImportedContent(root,prior,data,existing.contentHash))throw Object.assign(new Error('相同导入请求 ID 不能用于不同内容'),{code:'IMPORT_REQUEST_CONFLICT'});
+              return {ok:true,value:{...(await this.snapshot()),reusedAssetId:prior.id}};
             }
-            this.assertIdle();
-            const asset=await this.store.importAsset(root,data,this.settings);
-            const next=structuredClone(project);
-            next.assets.push(asset);
-            next.graph.positions[asset.id]=[60,80+(next.assets.length-1)*180];
-            next.extensions={...next.extensions,importRequests:{...(next.extensions.importRequests as Record<string,unknown>|undefined),[key]:{digest,assetId:asset.id}}};
-            await this.persist(next,{},'导入素材');
-            return {ok:true,value:{...(await this.snapshot()),reusedAssetId:asset.id}};
           }
-          this.assertIdle();const asset=await this.store.importAsset(root,data,this.settings);const next=structuredClone(project);next.assets.push(asset);next.graph.positions[asset.id]=[60,80+(next.assets.length-1)*180];await this.persist(next,{},'导入素材');break;
+          this.assertIdle();
+          const asset=await this.store.importAsset(root,data,this.settings);
+          const next=structuredClone(project);
+          next.assets.push(asset);
+          next.graph.positions[asset.id]=[60,80+(next.assets.length-1)*180];
+          if(key)next.extensions.importRequests={...(next.extensions.importRequests as Record<string,unknown>|undefined),[key]:{digest,assetId:asset.id,contentHash:await importedSourceHash(root,asset)}};
+          await this.persist(next,{},'导入素材');
+          if(key)return {ok:true,value:{...(await this.snapshot()),reusedAssetId:asset.id}};
+          break;
         }
         case 'video.clip.save':{
           this.assertIdle();const next=structuredClone(this.required().project),raw=data.clip;
@@ -489,7 +517,14 @@ export class StudioService {
           return {ok:true,value:{projectId:project.id,revision:project.revision,frames}};
         }
         case 'source':{const {root,project}=this.required();const shot=project.shots.find(s=>s.id===data.shotId);if(!shot)throw new Error('镜头已不存在');return {ok:true,value:await this.store.readSource(root,shot)};}
-        case 'saveSource':{this.assertIdle();const {root,project}=this.required();const shot=project.shots.find(s=>s.id===data.shotId);if(!shot)throw new Error('镜头已不存在');const source=parseSceneSource(JSON.stringify(data.source));await this.persist(project,{[shot.id]:source},'保存镜头源码');await this.start('preview',async signal=>{const checked=await this.renderer.check(root,this.required().project,this.settings,signal);if(!checked.ok)throw renderCheckError(checked);await this.store.markSourceGood(root,shot);},shot.id,this.recordedRequest('preview',data));break;}
+        case 'saveSource':{this.assertIdle();const {root,project}=this.required();const shot=project.shots.find(s=>s.id===data.shotId);if(!shot)throw new Error('镜头已不存在');const source=parseSceneSource(JSON.stringify(data.source));await this.persist(project,{[shot.id]:source},'保存镜头源码');await this.start('preview',async (signal,task)=>{
+            const checked=await this.renderer.check(root,this.required().project,this.settings,signal);
+            if(!checked.ok){
+              task.failedShotIds=[...new Set(checked.errors.flatMap(issue=>issue.shotId?[issue.shotId]:[]))];
+              throw renderCheckError(checked);
+            }
+            await this.store.markSourceGood(root,shot);
+          },shot.id,this.recordedRequest('preview',data));break;}
         case 'restoreSource':{this.assertIdle();const {root,project}=this.required();const shot=project.shots.find(s=>s.id===data.shotId);if(!shot)throw new Error('镜头已不存在');const source=await this.store.restorationSource(root,shot);await this.persist(project,{[shot.id]:source},'恢复镜头源码');break;}
         case 'preview':{
           const {root,project}=this.required();

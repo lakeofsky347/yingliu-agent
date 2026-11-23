@@ -1,16 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { deflateSync } from 'node:zlib';
-import { createProject, defaultSceneSource } from '../src/core/index.ts';
+import { createProject, defaultProductionPolicy, defaultSceneSource } from '../src/core/index.ts';
 import { AgentService, type ResolvedAgentModel } from '../src/agent/service.ts';
 import type { AgentPort, Capabilities, PublicRun } from '../src/agent/contracts.ts';
 import type { StudioSnapshot, VideoProject } from '../src/shared/types.ts';
 import { activeTools, alignToVoice, createTools } from '../src/agent/tools.ts';
 import { anchorPrompt, dataChecks, emptyStory, frameIssue, normalizeShots, pngLuma, type Story } from '../src/agent/story.ts';
 import { needsApproval, budgetFrom, emptyUsage } from '../src/agent/budget.ts';
+import { approveDirectorDocument, readDirectorDocument, saveDirectorDocument } from '../src/director/document.ts';
+import { DIRECTOR_RULESET_VERSION } from '../src/director/index.ts';
+import type { DirectorPlan } from '../src/director/contracts.ts';
 import { SKILLS } from '../src/agent/skills.ts';
 import { toolGateway } from './model-gateway.ts';
 
@@ -166,4 +169,127 @@ test('app endpoints: story / ledger / budget / qc round-trip and image import fo
     assert.equal((await call<{ report: unknown }>('agent.qc.last', { projectId })).report, null);
     const r = await app.route('story.save', { projectId, expectedVersion: 0, story: {} }); assert.equal(r.ok, false);
   } finally { await app.dispose(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('previz approvals follow the reviewed shot across a draft, workbench approval and process restart', async t => {
+  for (const scenario of ['activeChanged', 'depthDraft', 'cameraDraft', 'unrelatedApproved', 'legacy', 'conflict']) {
+    await t.test(scenario, async () => {
+      const d = await mkdtemp(join(tmpdir(), 'agent-previz-'));
+      const { port: testPort, project } = port({ roles: [] });
+      const gw = toolGateway((_body, turn) => turn === 0 ? { toolCalls: [{ id: 'review', name: 'submit_previz_review',
+        arguments: { summary: '审核第一镜', shots: [{ shotId: 'a', imageAssetId: 'img' }] } }] } : { text: '已收到工具回执' });
+      const serviceOptions = { resolveModel: model, fetch: gw.fetch, maxReviewRounds: 0 };
+      let service = new AgentService(d, testPort, serviceOptions);
+      try {
+        const planA: DirectorPlan = {
+          version: 1, ruleSetVersion: DIRECTOR_RULESET_VERSION, filmKind: 'general', characters: [], storyBeats: [], worldLayouts: [], identityMap: [],
+          shots: ['a', 'b'].map(id => ({ shotId: id, title: '手写导演标题' + id, visualPrompt: '手部特写', camera: '固定', durationSeconds: 2, audioStrategy: 'silent', narration: '',
+            performance: [], dialogue: [], events: [], acceptance: [], references: [], previz: { status: 'rendered', imageAssetId: 'img', depthAssetId: 'depthA' } })),
+        };
+        const draftA = saveDirectorDocument(project, planA, { expectedVersion: 0 });
+        project.extensions.directorDocument = draftA;
+        const activeA = approveDirectorDocument(project, { expectedVersion: draftA.version, expectedHash: draftA.hash });
+        project.extensions.directorDocument = activeA;
+        await service.syncFromDirectorPlan('p', activeA.plan, true, activeA);
+
+        const planB = structuredClone(planA);
+        if (scenario === 'activeChanged') delete planB.shots[0].previz;
+        if (scenario === 'depthDraft') planB.shots[0].previz!.depthAssetId = 'depthB';
+        if (scenario === 'cameraDraft') planB.shots[0].camera = '俯拍';
+        planB.shots[1].visualPrompt = '修改另一镜';
+        const draftB = saveDirectorDocument(project, planB, { expectedVersion: activeA.version });
+        project.extensions.directorDocument = draftB;
+        const started = await service.start({ projectId: 'p', goal: '审核第一镜预演' });
+        const pending = (await settle(service, started.id, ['awaiting_approval', 'failed'])).pending!;
+        assert.equal(pending.tool, 'submit_previz_review');
+        await service.dispose();
+        if (scenario === 'legacy') {
+          const file = join(d, started.id + '.json');
+          const checkpoint = JSON.parse(await readFile(file, 'utf8'));
+          assert.ok(checkpoint.queue[0].previzReview);
+          delete checkpoint.queue[0].previzReview;
+          await writeFile(file, JSON.stringify(checkpoint));
+        }
+        service = new AgentService(d, testPort, serviceOptions);
+        if (scenario === 'activeChanged' || scenario === 'unrelatedApproved') {
+          const activeB = approveDirectorDocument(project, { expectedVersion: draftB.version, expectedHash: draftB.hash });
+          project.extensions.directorDocument = activeB;
+          await service.syncFromDirectorPlan('p', activeB.plan, true, activeB);
+        }
+        if (scenario === 'conflict') testPort.commit = async () => { throw Object.assign(new Error('版本已变化'), { code: 'REVISION_CONFLICT' }); };
+        await service.approve(started.id, pending.callId, pending.execId, pending.argsHash);
+        const final = await settle(service, started.id, ['complete', 'failed']);
+        assert.equal(final.status, 'complete', final.message);
+        const active = (await service.story('p')).shots[0], doc = readDirectorDocument(project)!;
+        assert.equal(doc.plan.shots[0].title, '手写导演标题a');
+        assert.deepEqual(doc.plan.shots[1], draftB.plan.shots[1]);
+        if (scenario === 'activeChanged' || scenario === 'legacy' || scenario === 'conflict') {
+          assert.ok(final.transcript.some(m => m.role === 'tool' && /重新提交预演审阅单|版本已变化/.test(m.content)));
+          assert.equal(active.previz?.status, scenario === 'activeChanged' ? undefined : 'rendered');
+          assert.deepEqual(doc.plan.shots[0].previz, draftB.plan.shots[0].previz);
+        } else {
+          assert.equal(active.previz?.status, 'approved');
+          assert.equal(doc.plan.shots[0].previz?.status, scenario === 'unrelatedApproved' ? 'approved' : 'rendered');
+          assert.equal(doc.plan.shots[0].previz?.depthAssetId, scenario === 'depthDraft' ? 'depthB' : 'depthA');
+          assert.equal(doc.plan.shots[0].camera, scenario === 'cameraDraft' ? '俯拍' : '固定');
+        }
+      } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
+    });
+  }
+});
+
+test('cinematographer receives valid story and bible pages for every layout and location', async () => {
+  const d = await mkdtemp(join(tmpdir(), 'agent-section-pages-'));
+  const { port: testPort, project } = port({ roles: [] });
+  const shotIds = Array.from({ length: 100 }, (_, i) => 'shot-00000000-0000-0000-0000-' + String(i).padStart(12, '0'));
+  project.shots = shotIds.map(id => ({ ...project.shots[0], id }));
+  project.shotOrder = shotIds;
+  project.productionPolicy = { ...defaultProductionPolicy('hybrid'), baseMode: 'code_animation', hybridGrants: [{
+    id: 'grant', projectId: project.id, shotIds, operations: ['video'], confirmedAt: new Date(0).toISOString(),
+  }] };
+  const locations = Array.from({ length: 20 }, (_, i) => ({ id: 'loc' + i, name: '房间' + i, description: '长廊与镜头站位'.repeat(100) }));
+  const worldLayouts = Array.from({ length: 12 }, (_, i) => ({ id: 'lay' + i, description: '立面' + i,
+    anchors: Array.from({ length: 24 }, (_, j) => ({ id: '演员站位' + j, position: [i, j, 0] as [number, number, number] })) }));
+  const characters = Array.from({ length: 24 }, (_, i) => ({ id: 'c' + i, name: '演员' + i, description: '身世背景'.repeat(120), features: [], referenceAssetIds: [] }));
+  const parts = new Map<string, string[]>(), seen = new Set<string>();
+  const lengths: number[] = [];
+  let parentTurn = 0, crewTurn = 0;
+  const names = ['story_get', 'bible_get'];
+  const gw = toolGateway(body => {
+    if (!body.messages[0].content.includes('你正在作为子代理协助总导演')) return parentTurn++ === 0
+      ? { toolCalls: [{ name: 'delegate_crew', arguments: { department: 'cinematographer', task: '清点布局与场景母版' } }] }
+      : { text: '结束' };
+    if (crewTurn++ === 0) return { toolCalls: names.map(name => ({ id: name, name, arguments: {} })) };
+    const next = [];
+    for (const msg of body.messages.filter((m: { role: string }) => m.role === 'tool')) {
+      const id = String(msg.tool_call_id);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      lengths.push(msg.content.length);
+      const data = JSON.parse(msg.content), page = data.story ?? data;
+      const name = id.split('-')[0];
+      if (name === 'bible_get') assert.deepEqual(data.productionPolicy.hybridGrants[0].shotIds, shotIds);
+      if (id === name) {
+        assert.equal(page.sectionTotals.worldLayouts, 12);
+        for (const section of ['locations', 'worldLayouts']) next.push({ id: name + '-' + section + '-0', name, arguments: { section } });
+      } else {
+        const { section, nextOffset } = page.sectionPagination;
+        const key = name + '-' + section;
+        parts.set(key, [...parts.get(key) ?? [], ...page[section].map((row: { id: string }) => row.id)]);
+        if (nextOffset !== undefined) next.push({ id: key + '-' + nextOffset, name, arguments: { section, offset: nextOffset } });
+      }
+    }
+    return next.length ? { toolCalls: next } : { text: '清点完成' };
+  });
+  const service = new AgentService(d, testPort, { resolveModel: model, fetch: gw.fetch, maxReviewRounds: 0 });
+  try {
+    await service.docs('p').updateStory(s => ({ ...s, locations, worldLayouts, characters, shots: normalizeShots([{ summary: '全景', durationSeconds: 2 }], characters) }));
+    const r = await service.start({ projectId: 'p', goal: '委派摄影读取圣经' });
+    assert.equal((await settle(service, r.id, ['complete', 'failed'])).status, 'complete');
+    for (const name of names) {
+      assert.deepEqual(parts.get(name + '-locations'), locations.map(row => row.id));
+      assert.deepEqual(parts.get(name + '-worldLayouts'), worldLayouts.map(row => row.id));
+    }
+    assert.ok(lengths.every(n => n <= 12_000));
+  } finally { await service.dispose(); await rm(d, { recursive: true, force: true }); }
 });

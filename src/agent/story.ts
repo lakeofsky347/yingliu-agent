@@ -198,21 +198,22 @@ export function buildDirectorDocumentFromStory(
     return c.referenceAssetIds.find(id => imageIds.has(id));
   };
 
-  // Never clobber unapproved workbench draft edits OR promote a draft during incremental entity/previz sync!
-  if (existingDoc && (existingDoc.status === 'draft' && options.promoteApproved !== true || (existingDoc.status === 'draft' && Boolean(options.patch)))) {
-    const draftPlan: DirectorPlan = structuredClone(existingDoc.plan);
+  // A review changes the listed shots' previz and references only, including on an approved workbench plan.
+  const scopedPreviz = Boolean(options.patch?.previzShotIds?.length);
+  if (existingDoc && (scopedPreviz || (existingDoc.status === 'draft' && (!options.promoteApproved || options.patch)))) {
+    const patchedPlan: DirectorPlan = structuredClone(existingDoc.plan);
     const p = options.patch;
     if (p) {
       if (p.characterId) {
         const updatedChar = story.characters.find(c => c.id === p.characterId);
         if (updatedChar) {
           const mapped = mapChar(updatedChar);
-          const idx = draftPlan.characters.findIndex(c => c.id === p.characterId);
-          if (idx >= 0) draftPlan.characters[idx] = mapped;
-          else draftPlan.characters.push(mapped);
+          const idx = patchedPlan.characters.findIndex(c => c.id === p.characterId);
+          if (idx >= 0) patchedPlan.characters[idx] = mapped;
+          else patchedPlan.characters.push(mapped);
           const chosenAsset = pickIdentityAsset(updatedChar);
-          draftPlan.identityMap = [
-            ...draftPlan.identityMap.filter(m => m.characterId !== p.characterId),
+          patchedPlan.identityMap = [
+            ...patchedPlan.identityMap.filter(m => m.characterId !== p.characterId),
             ...(chosenAsset ? [{ characterId: p.characterId, assetId: chosenAsset }] : []),
           ];
         }
@@ -221,45 +222,50 @@ export function buildDirectorDocumentFromStory(
         const updatedLoc = (story.locations ?? []).find(l => l.id === p.locationId);
         if (updatedLoc) {
           const mappedLoc = { ...updatedLoc, referenceAssetIds: (updatedLoc.referenceAssetIds ?? []).filter(id => imageIds.has(id)) };
-          const locs = [...(draftPlan.locations ?? [])];
+          const locs = [...(patchedPlan.locations ?? [])];
           const idx = locs.findIndex(l => l.id === p.locationId);
           if (idx >= 0) locs[idx] = mappedLoc;
           else locs.push(mappedLoc);
-          draftPlan.locations = locs;
+          patchedPlan.locations = locs;
         }
       }
       if (p.propId) {
         const updatedProp = (story.props ?? []).find(pr => pr.id === p.propId);
         if (updatedProp) {
           const mappedProp = { ...updatedProp, referenceAssetIds: (updatedProp.referenceAssetIds ?? []).filter(id => imageIds.has(id)) };
-          const props = [...(draftPlan.props ?? [])];
+          const props = [...(patchedPlan.props ?? [])];
           const idx = props.findIndex(pr => pr.id === p.propId);
           if (idx >= 0) props[idx] = mappedProp;
           else props.push(mappedProp);
-          draftPlan.props = props;
+          patchedPlan.props = props;
         }
       }
       if (p.continuityShotId) {
         const updatedEntry = (story.continuityLog ?? []).find(e => e.shotId === p.continuityShotId);
         if (updatedEntry) {
-          const logs = [...(draftPlan.continuityLog ?? []).filter(e => e.shotId !== p.continuityShotId), structuredClone(updatedEntry)];
-          draftPlan.continuityLog = logs;
+          const logs = [...(patchedPlan.continuityLog ?? []).filter(e => e.shotId !== p.continuityShotId), structuredClone(updatedEntry)];
+          patchedPlan.continuityLog = logs;
         }
       }
       if (p.previzShotIds?.length) {
         const targetSet = new Set(p.previzShotIds);
-        draftPlan.shots = draftPlan.shots.map(ds => {
-          if (!targetSet.has(ds.shotId)) return ds;
-          const storyShot = story.shots.find(ss => ss.shotId === ds.shotId || ss.id === ds.shotId);
+        const order = project.shotOrder.length ? project.shotOrder : project.shots.map(s => s.id);
+        const reviewed = new Map(story.shots.flatMap((s, i) => targetSet.has(s.shotId ?? s.id)
+          ? [[s.shotId ?? order[i], s] as const] : []));
+        patchedPlan.shots = patchedPlan.shots.map(ds => {
+          const storyShot = reviewed.get(ds.shotId);
           if (!storyShot?.previz) return ds;
-          // Bind previz approval strictly to matching shot content & asset: never overwrite a diverged draft shot's own previz!
-          const promptDiverged = ds.visualPrompt.trim() !== storyShot.summary.trim();
-          const draftHasDifferentPreviz = Boolean(ds.previz?.imageAssetId && ds.previz.imageAssetId !== storyShot.previz.imageAssetId);
-          const draftHasDifferentNote = Boolean(ds.previz?.note && ds.previz.note !== storyShot.previz.note);
-          if (promptDiverged || draftHasDifferentPreviz || draftHasDifferentNote) {
-            return ds;
+          if (existingDoc.status === 'draft') {
+            const promptChanged = ds.visualPrompt.trim() !== storyShot.summary.trim();
+            const cameraChanged = (ds.camera ?? ds.events[0]?.camera ?? '') !== storyShot.camera || (ds.shotType ?? '') !== storyShot.shotType;
+            const differentPreview = ds.previz && (
+              (ds.previz.imageAssetId && ds.previz.imageAssetId !== storyShot.previz.imageAssetId) ||
+              ds.previz.depthAssetId !== storyShot.previz.depthAssetId || ds.previz.videoAssetId !== storyShot.previz.videoAssetId ||
+              (ds.previz.note && ds.previz.note !== storyShot.previz.note)
+            );
+            if (promptChanged || cameraChanged || differentPreview) return ds;
           }
-          const refs = [...ds.references.map(r => structuredClone(r))];
+          const refs = ds.references;
           const ensureImgRef = (assetId: string | undefined, purpose: DirectorReference['purpose']) => {
             if (!assetId || !imageIds.has(assetId)) return;
             if (!refs.some(r => r.assetId === assetId && r.purpose === purpose)) {
@@ -272,16 +278,15 @@ export function buildDirectorDocumentFromStory(
         });
       }
     }
-    const checkedDraft = validateDirectorPlan(draftPlan);
-    if (!checkedDraft.ok || !checkedDraft.plan) return existingDoc;
-    const nextHash = directorPlanHash(checkedDraft.plan);
+    const checked = validateDirectorPlan(patchedPlan);
+    if (!checked.ok || !checked.plan) return existingDoc;
+    const nextHash = directorPlanHash(checked.plan);
     if (nextHash === existingDoc.hash) return existingDoc;
     return {
-      schemaVersion: 1,
+      ...existingDoc,
       version: existingDoc.version + 1,
-      status: 'draft',
       hash: nextHash,
-      plan: checkedDraft.plan,
+      plan: checked.plan,
       updatedAt: new Date().toISOString(),
     };
   }
@@ -428,7 +433,7 @@ export function mergeDirectorPlanIntoStory(
         ...(s.events.length ? { shotEvents: structuredClone(s.events) } : {}),
         ...(s.references.length ? { references: structuredClone(s.references) } : {}),
         ...(s.acceptance.length ? { acceptance: structuredClone(s.acceptance) } : {}),
-        ...(s.previz ?? existing?.previz ? { previz: structuredClone(s.previz ?? existing?.previz) } : {}),
+        ...(s.previz ? { previz: structuredClone(s.previz) } : {}),
       };
     }),
     status: approved ? 'approved' : 'empty',
@@ -443,11 +448,11 @@ export class ProjectDocs<T extends { version: number }> {
   constructor(private readonly directory: string, private readonly empty: (projectId: string) => T) {}
   private file(projectId: string) { if (!SAFE.test(projectId)) throw new Error('工程 ID 无效'); return join(this.directory, projectId + '.json'); }
   async get(projectId: string): Promise<T> { await this.queue.catch(() => {}); return this.read(projectId); }
-  update(projectId: string, change: (current: T) => T, expectedVersion?: number): Promise<T> {
+  update(projectId: string, change: (current: T) => T | Promise<T>, expectedVersion?: number): Promise<T> {
     const work = async () => {
       const current = await this.read(projectId);
       if (expectedVersion !== undefined && expectedVersion !== current.version) throw Object.assign(new Error(`版本已变化（当前 ${current.version}），请重新读取`), { code: 'REVISION_CONFLICT' });
-      const next = { ...change(structuredClone(current)), version: current.version + 1 };
+      const next = { ...await change(structuredClone(current)), version: current.version + 1 };
       await mkdir(this.directory, { recursive: true });
       await writeDurableFile(this.file(projectId), JSON.stringify(next, null, 1));
       return next;

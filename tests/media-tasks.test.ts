@@ -29,7 +29,10 @@ test('images become validated candidates, do not send credentials to artifact ho
 });
 test('lost video submission is reconciled after restart without another POST',async t=>{
   const video=Buffer.concat([Buffer.from([0,0,0,24]),Buffer.from('ftypmp42'),Buffer.alloc(20)]);const f=await fixture(t,{loseSubmitResponse:true,video});
-  const task=await f.service.generate({projectId:'film',expectedRevision:3,operation:'text-to-video',prompt:'a test video'});await settle(f.service,task.id,t=>t.phase==='unknown');await f.restart();const ready=await settle(f.service,task.id,t=>t.phase==='ready');assert.equal(ready.remoteStatus,'succeeded');assert.equal(f.gateway.requests.filter(r=>r.method==='POST'&&r.path==='/v1/media/jobs').length,1);assert.ok(f.gateway.requests.some(r=>r.path.startsWith('/v1/media/jobs?clientRequestId=')));
+  f.port.authorizeOperation=async()=>'original';
+  const task=await f.service.generate({projectId:'film',expectedRevision:3,operation:'text-to-video',prompt:'a test video'});await settle(f.service,task.id,t=>t.phase==='unknown');
+  f.port.authorizeOperation=async()=>{throw new Error('新决定禁止生成');};
+  await f.restart();const ready=await settle(f.service,task.id,t=>t.phase==='ready');assert.equal(ready.remoteStatus,'succeeded');assert.equal(f.gateway.requests.filter(r=>r.method==='POST'&&r.path==='/v1/media/jobs').length,1);assert.ok(f.gateway.requests.some(r=>r.path.startsWith('/v1/media/jobs?clientRequestId=')));
 });
 test('image download retry never regenerates a paid image',async t=>{
   const f=await fixture(t,{failDownloadOnce:true});const task=await f.service.generate({projectId:'film',expectedRevision:3,operation:'text-to-image',prompt:'a test image'});await settle(f.service,task.id,t=>t.observation==='paused'&&t.remoteStatus==='succeeded');await f.service.retry(task.id);await settle(f.service,task.id,t=>t.phase==='ready');assert.equal(f.gateway.requests.filter(r=>r.path==='/v1/images/generations').length,1);
@@ -37,6 +40,31 @@ test('image download retry never regenerates a paid image',async t=>{
 test('reference image upload needs explicit consent and stores only hashes',async t=>{
   const f=await fixture(t,{queued:true});await assert.rejects(f.service.generate({projectId:'film',expectedRevision:3,operation:'image-to-video',prompt:'animate',imageAssetIds:['image-1']}),/明确允许/);
   const task=await f.service.generate({projectId:'film',expectedRevision:3,operation:'image-to-video',prompt:'animate',imageAssetIds:['image-1'],allowImageUpload:true});await settle(f.service,task.id,t=>t.remoteStatus==='running');await f.service.pause(task.id);const record=await readFile(join(f.directory,'media-tasks',task.id+'.json'),'utf8');assert.ok(!record.includes('data:image'));assert.ok(!record.includes('fixture-secret'));assert.equal(JSON.parse(record).inputHashes.length,1);
+});
+test('a new production decision during reference reading stops only the queued submission and releases its cost',async t=>{
+  const f=await fixture(t);
+  let decision='first',reads=0;
+  let markBlocked!:()=>void,unblock!:()=>void;
+  const blocked=new Promise<void>(r=>{markBlocked=r;}),release=new Promise<void>(r=>{unblock=r;});
+  f.port.authorizeOperation=async()=>decision;
+  f.port.readImage=async()=>{
+    if(++reads===2){markBlocked();await release;}
+    return {bytes:pngFixture,mime:'image/png'};
+  };
+  const request={projectId:'film',expectedRevision:3,operation:'image-to-video' as const,prompt:'animate',imageAssetIds:['image-1'],allowImageUpload:true};
+  try {
+    const old=await f.service.generate(request);
+    await blocked;
+    decision='reconfirmed';
+    unblock();
+    const stopped=await settle(f.service,old.id,t=>t.phase==='failed');
+    assert.equal(stopped.productionPolicyFingerprint,'first');
+    assert.equal(stopped.usage?.cost,0);
+    assert.equal(f.gateway.requests.length,0);
+    const fresh=await f.service.generate(request);
+    await settle(f.service,fresh.id,t=>Boolean(t.remoteJobId));
+    assert.equal(f.gateway.requests.filter(r=>r.method==='POST').length,1);
+  } finally {unblock();}
 });
 test('pause survives restart and unsupported cancellation never claims cloud cancellation',async t=>{
   const f=await fixture(t,{queued:true,cancelSupported:false});const task=await f.service.generate({projectId:'film',expectedRevision:3,operation:'text-to-video',prompt:'test'});await settle(f.service,task.id,t=>t.remoteStatus==='running');const cancelled=await f.service.cancel(task.id);assert.notEqual(cancelled.phase,'cancelled');assert.equal(cancelled.observation,'paused');assert.match(cancelled.message,/未确认/);const before=f.gateway.requests.length;await f.restart();await new Promise(r=>setTimeout(r,30));assert.equal(f.gateway.requests.length,before);
@@ -115,6 +143,6 @@ test('a lost image submission remains unknown across restart and retry without a
 
 test('cancelling a queued local task never submits it or claims a remote cancellation',async t=>{
   const f=await fixture(t,{queued:true});await f.registry.saveConnection({id:'video',concurrency:1});const first=await f.service.generate({projectId:'film',expectedRevision:3,operation:'text-to-video',prompt:'occupy slot'});await settle(f.service,first.id,t=>t.remoteStatus==='running');
-  const queued=await f.service.generate({projectId:'film',expectedRevision:3,operation:'text-to-video',prompt:'cancel before submit'});const cancelled=await f.service.cancel(queued.id);assert.equal(cancelled.phase,'cancelled');assert.equal(cancelled.remoteStatus,undefined);assert.match(cancelled.message,/本地/);
+  const queued=await f.service.generate({projectId:'film',expectedRevision:3,operation:'text-to-video',prompt:'cancel before submit'});const cancelled=await f.service.cancel(queued.id);assert.equal(cancelled.phase,'cancelled');assert.equal(cancelled.usage?.cost,0);assert.equal(cancelled.remoteStatus,undefined);assert.match(cancelled.message,/本地/);
   await f.service.pause(first.id);await new Promise(r=>setTimeout(r,20));assert.equal(f.gateway.requests.filter(r=>r.method==='POST'&&r.path==='/v1/media/jobs').length,1);assert.equal(f.gateway.requests.filter(r=>r.path.endsWith('/cancel')).length,0);await assert.rejects(f.service.retry(queued.id),/已结束/);
 });

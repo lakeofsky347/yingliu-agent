@@ -147,8 +147,8 @@ export class ProjectHub {
     if(!this.projectSessions(project).includes(sessionId))resultValue(await service.rpc('save',{expectedRevision:project.revision,project:{...project,sessionIds:sessions,extensions:{...project.extensions,sessionIds:sessions}}}));
     await this.saveIndex(index=>{index.sessions[sessionId]=project.id;});
   }
-  private async decorate(service:StudioService,sessionId?:string):Promise<HubSnapshot>{
-    const snapshot=await service.snapshot();
+  private async decorate(service:StudioService,sessionId?:string,committed?:StudioSnapshot):Promise<HubSnapshot>{
+    const snapshot=committed??await service.snapshot();
     const selected=snapshot.project?.id===this.index.selected;
     return {...snapshot,providers:this.providers,tts:this.tts??snapshot.tts,sessionId:sessionId??(selected?this.selectedSession:undefined)??(snapshot.project?this.projectSessions(snapshot.project)[0]:undefined),focus:selected?this.focus:undefined,projects:structuredClone(this.index.projects.filter(item=>!item.archived)),recent:snapshot.recent.filter(item=>!this.index.projects.find(entry=>entry.id===item.id)?.archived),styles:structuredClone(this.styles)};
   }
@@ -238,6 +238,11 @@ export class ProjectHub {
       const result=await service.rpc(endpoint,data);if(!result.ok)return result;
       if(['source','inspect','thumbnails','history','tasks','jobs','quality.check','quality.last','media.deconstruct','audio.analyze','delivery.export','media.assetDataUrl'].includes(endpoint))return result;
       if(['director.document.save','director.document.approve'].includes(endpoint)){await this.remember(await service.snapshot());return result;}
+      if(endpoint==='import'){
+        const imported=result.value as StudioSnapshot;
+        await this.remember(imported);
+        return {ok:true,value:await this.decorate(service,sessionId,imported)};
+      }
       if(endpoint==='catalog')this.providers=(result.value as StudioSnapshot).providers;
       if(endpoint==='tts'){const snapshot=result.value as StudioSnapshot;this.tts=snapshot.tts;}
       await this.remember(await service.snapshot());return {ok:true,value:await this.decorate(service,sessionId)};

@@ -123,7 +123,7 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
       const current=await backend.call('current',{projectId:id});
       try{
         const snapshot=await backend.call<StudioSnapshot&{reusedAssetId?:string}>('import',{projectId:id,expectedRevision:current.project?.revision,name,description,mime,dataBase64,...(requestId?{requestId}:{})});
-        const asset=snapshot.reusedAssetId?snapshot.project?.assets.find(a=>a.id===snapshot.reusedAssetId):snapshot.project?.assets.at(-1);
+        const asset=requestId?snapshot.project?.assets.find(a=>a.id===snapshot.reusedAssetId):snapshot.project?.assets.at(-1);
         if(!asset)throw new Error(failure);
         return {id:asset.id,name:asset.name};
       }
@@ -233,26 +233,27 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
           .catch(()=>providers.complete([{role:'user',content:prompt}],'你是映流智能体的专精动态图形与场景代码工程师。只返回合法 JSON 对象 {html,css,js}。',signal,undefined,'director'));
         return parseSceneSource(raw);
       };
-      const waitPreviewTask=async(taskId:string|undefined):Promise<{status:'complete'|'failed'|'cancelled'|'timeout'|'missing';error?:string;message?:string}>=>{
+      type PreviewOutcome={status:'complete'|'failed'|'cancelled'|'timeout'|'missing';error?:string;message?:string;failedShotIds?:string[]};
+      const waitPreviewTask=async(taskId:string|undefined):Promise<PreviewOutcome>=>{
         if(!taskId)return {status:'missing',error:'保存镜头源码后未返回预览校验任务 ID'};
         for(let i=0;i<240;i++){
           signal.throwIfAborted();
           const snap=await backend.call('current',{projectId:id});
           if(snap.task?.id===taskId){
-            if(snap.task.status!=='running')return {status:snap.task.status as 'complete'|'failed'|'cancelled',error:snap.task.error,message:snap.task.message};
+            if(snap.task.status!=='running')return {status:snap.task.status as 'complete'|'failed'|'cancelled',error:snap.task.error,message:snap.task.message,failedShotIds:snap.task.failedShotIds};
           }else{
             const recorded=await backend.route('tasks',{projectId:id}).catch(()=>({ok:false,value:undefined}));
-            const list=recorded.ok&&recorded.value&&typeof recorded.value==='object'?((recorded.value as {tasks?:{id?:string;status?:string;error?:string;message?:string}[]}).tasks??[]):[];
+            const list=recorded.ok&&recorded.value&&typeof recorded.value==='object'?((recorded.value as {tasks?:{id?:string;status?:string;error?:string;message?:string;failedShotIds?:string[]}[]}).tasks??[]):[];
             const match=list.find(t=>t.id===taskId);
             if(match&&match.status&&match.status!=='running'){
-              return {status:match.status as 'complete'|'failed'|'cancelled',error:match.error,message:match.message};
+              return {status:match.status as 'complete'|'failed'|'cancelled',error:match.error,message:match.message,failedShotIds:match.failedShotIds};
             }
           }
           await new Promise(r=>setTimeout(r,60));
         }
         return {status:'timeout',error:'镜头预览渲染校验等待超时'};
       };
-      const assertPreviewVerified=(outcome:{status:'complete'|'failed'|'cancelled'|'timeout'|'missing';error?:string;message?:string})=>{
+      const assertPreviewVerified=(outcome:PreviewOutcome)=>{
         if(outcome.status==='complete')return;
         if(outcome.status==='cancelled'){
           throw Object.assign(new Error('镜头源码已保存，但预览渲染校验已被取消，未通过渲染校验'),{code:'PREVIEW_CANCELLED'});
@@ -283,10 +284,9 @@ export async function createApplication(options:{dataDirectory:string;projectsDi
       let checked=await waitPreviewTask(saved.task?.id);
       if(checked.status==='failed'){
         const errDetail=checked.error||checked.message||'渲染校验失败';
-        const citedShotIds=project.shots.map(s=>s.id).filter(sid=>errDetail.includes(sid));
-        const affectsTargetShot=citedShotIds.length===0||citedShotIds.includes(shotId);
-        if(!affectsTargetShot){
-          throw new Error(`目标镜头 ${shotId} 源码已保存，但整片预览因其他镜头故障未通过：${errDetail}`);
+        if(!checked.failedShotIds?.includes(shotId)){
+          const reason=checked.failedShotIds?.length?'其他镜头故障':'未定位到目标源码的错误';
+          throw new Error(`目标镜头 ${shotId} 源码已保存，但整片预览因${reason}未通过：${errDetail}`);
         }
         parsed=await askSceneModel({...basePayload,currentSource:parsed,instruction:`${instruction}\n\n【紧急修复】上一版镜头源码在无头浏览器渲染校验时报错：${errDetail}。请修复该错误并返回完整合法 JSON {html,css,js}。`});
         saved=await backend.call('saveSource',{projectId:id,shotId,expectedRevision:saved.project?.revision,source:{html:parsed.html,css:parsed.css,js:parsed.js}});

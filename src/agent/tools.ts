@@ -1,12 +1,12 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { compileDirectorPlan } from '../app/conversation.ts';
 import type { ChatInput } from '../app/contracts.ts';
 import { addShot, applyProductionPolicy, assertProductionComposition, assertProductionOperation, defaultProductionPolicy, defaultSceneSource, deleteShot, reorderShots, updateShot, updateTarget } from '../core/index.ts';
 import { normalizeStoryboard } from '../host/generator.ts';
 import { buildContactSheetPng } from '../host/contact-sheet.ts';
 import { readDirectorDocument, saveDirectorDocument, approveDirectorDocument } from '../director/document.ts';
-import type { AgentTool, Capabilities, CrewDepartment, JsonSchema, ProjectTaskRef, ReferenceUploadGroup, ToolContext, ToolResult } from './contracts.ts';
-import { bound, summarizeProject } from './context.ts';
+import type { AgentTool, Capabilities, CrewDepartment, JsonSchema, ProjectTaskRef, PrevizReviewBinding, ReferenceUploadGroup, ToolContext, ToolResult } from './contracts.ts';
+import { bound, MAX_TOOL_RESULT_CHARS, summarizeProject } from './context.ts';
 import { synthesize, type SynthKind, type SynthSpec } from './synth.ts';
 import type { AudioClip, OverlayClip, ProductionMode, Shot, ShotColorGrade, ShotTransition, StudioSnapshot, SubtitleCue, VideoProject } from '../shared/types.ts';
 import {
@@ -41,10 +41,24 @@ function projectTask(snapshot: StudioSnapshot): ProjectTaskRef {
 }
 function agentInput(ctx: ToolContext, message: string): ChatInput { return { message, projectId: ctx.projectId, provider: 'agent', model: 'agent', intent: 'modify' }; }
 
+/** Bind only the reviewed shots, so unrelated work can continue while approval is pending. */
+export function previzReviewBinding(story: Story, project: VideoProject | null, args: Record<string, unknown>): PrevizReviewBinding {
+  const targets = new Set((Array.isArray(args.shots) ? args.shots : []).map(item => item?.shotId));
+  const shots = story.shots.filter(s => targets.has(s.id) || targets.has(s.shotId));
+  const order = project?.shotOrder.length ? project.shotOrder : project?.shots.map(s => s.id);
+  const ids = new Set(shots.map(s => s.shotId ?? order?.[story.shots.indexOf(s)]));
+  const doc = project && readDirectorDocument(project);
+  const hash = (rows: unknown[]) => createHash('sha256').update(JSON.stringify(rows)).digest('hex');
+  return {
+    shotsHash: hash(shots),
+    ...(doc?.status === 'approved' ? { approvedShotsHash: hash(doc.plan.shots.filter(s => ids.has(s.shotId))), approvedDocHash: doc.hash } : {}),
+  };
+}
+
 /** Synchronize Story into project.extensions.directorDocument whenever possible, returning the latest project revision. */
-async function syncBibleToProject(ctx: ToolContext, story: Story, options: DirectorSyncOptions = {}): Promise<number | undefined> {
+async function syncBibleToProject(ctx: ToolContext, story: Story, options: DirectorSyncOptions = {}, baseSnapshot?: StudioSnapshot): Promise<number | undefined> {
   try {
-    const snap = await ctx.port.snapshot(ctx.projectId);
+    const snap = baseSnapshot ?? await ctx.port.snapshot(ctx.projectId);
     if (!snap.project) return undefined;
     if (!snap.project.shots.length) return snap.project.revision;
     let existing;
@@ -55,7 +69,8 @@ async function syncBibleToProject(ctx: ToolContext, story: Story, options: Direc
     next.extensions = { ...next.extensions, directorDocument: doc };
     const committed = await ctx.port.commit(ctx.projectId, snap.project.revision, next, {}, '智能体：同步制片圣经与导演计划文档');
     return committed.project?.revision ?? snap.project.revision;
-  } catch {
+  } catch (error) {
+    if (baseSnapshot) throw error;
     try { return (await ctx.port.snapshot(ctx.projectId)).project?.revision; } catch { return undefined; }
   }
 }
@@ -255,11 +270,59 @@ export async function qualityCheck(ctx: ToolContext): Promise<QcReport> {
   return report;
 }
 
+const storySections = ['shots', 'characters', 'locations', 'props', 'worldLayouts', 'storyBeats', 'continuityLog', 'consistency'] as const;
+type StorySection = (typeof storySections)[number];
+const storyReadParameters = object({
+  shotOffset: int('可选：分镜分页起始索引'), shotLimit: int('可选：单次读取分镜数量上限'),
+  shotIds: { type: 'array', items: { type: 'string' }, description: '可选：按分镜/镜头 ID 精确读取' },
+  characterOffset: int('可选：角色分页起始索引'), characterLimit: int('可选：单次读取角色数量上限'),
+  section: { type: 'string', enum: [...storySections], description: '只读取指定集合。按 sectionPagination.nextOffset 继续；超长单条按 nextTextOffset 继续。' },
+  offset: int('指定 section 时的起始项索引'), limit: int('指定 section 时的返回项数上限'),
+  textOffset: int('超长单条记录的 JSON 文本续读位置，使用上次返回的 nextTextOffset'),
+});
+function storyRows(story: Story, section: StorySection): readonly unknown[] {
+  return section === 'consistency' ? Object.values(story.consistency) : story[section] ?? [];
+}
+function readStorySection(story: Story, section: StorySection, args: Record<string, unknown>, maxChars: number) {
+  const rows = storyRows(story, section);
+  const offset = Math.max(0, Math.min(rows.length, Number.isSafeInteger(args.offset) ? Number(args.offset) : 0));
+  const limit = Math.max(1, Number.isSafeInteger(args.limit) ? Number(args.limit) : rows.length);
+  const page = (items: readonly unknown[]) => {
+    const next = offset + items.length;
+    return { [section]: items, sectionPagination: { section, total: rows.length, offset, returned: items.length, hasMore: next < rows.length, ...(next < rows.length ? { nextOffset: next } : {}) } };
+  };
+  let count = Math.min(limit, rows.length - offset);
+  while (count > 0) {
+    const result = page(rows.slice(offset, offset + count));
+    if (JSON.stringify(result).length <= maxChars) return result;
+    count = Math.floor(count / 2);
+  }
+  if (offset === rows.length) return page([]);
+
+  // A detailed shot can itself exceed the transport limit. Retain the same record cursor until its JSON is complete.
+  const encoded = JSON.stringify(rows[offset]);
+  const start = Math.max(0, Math.min(encoded.length, Number.isSafeInteger(args.textOffset) ? Number(args.textOffset) : 0));
+  let length = Math.min(encoded.length - start, maxChars - 400);
+  for (;;) {
+    const end = start + length;
+    const nextOffset = end < encoded.length ? offset : offset + 1;
+    const result = { itemJson: encoded.slice(start, end), sectionPagination: { section, total: rows.length, offset, textOffset: start,
+      hasMore: nextOffset < rows.length, ...(nextOffset < rows.length ? { nextOffset } : {}), ...(end < encoded.length ? { nextTextOffset: end } : {}) } };
+    if (JSON.stringify(result).length <= maxChars) return result;
+    length = Math.floor(length / 2);
+  }
+}
+
 function paginateStoryView(
   story: Story,
   args: Record<string, unknown>,
   maxChars = 10_200,
 ): Record<string, unknown> | Story {
+  if (args.section !== undefined) {
+    const section = storySections.find(name => name === args.section);
+    if (!section) throw new Error('未知制片圣经集合，请使用工具定义中的 section');
+    return readStorySection(story, section, args, maxChars);
+  }
   const explicitShots = args.shotOffset !== undefined || args.shotLimit !== undefined || Array.isArray(args.shotIds);
   const explicitChars = args.characterOffset !== undefined || args.characterLimit !== undefined;
   if (!explicitShots && !explicitChars && JSON.stringify(story).length <= maxChars) return story;
@@ -277,6 +340,8 @@ function paginateStoryView(
   const charCandidates = allChars.slice(charOff, charOff + charLim);
   const characterOrder = allChars.map(c => c.id);
 
+  const sectionTotals = Object.fromEntries(storySections.map(name => [name, storyRows(story, name).length]));
+  const sectionHint = '可传 section 和 offset 单独读取集合，使用 sectionPagination 的游标续读。';
   const buildPage = (shotsSlice: Story['shots'], charsSlice: Story['characters'], compactGlobals = false) => {
     const hasMoreShots = !wantedSet && (offset + shotsSlice.length < allShots.length);
     const pagedShots = explicitShots || offset > 0 || hasMoreShots || shotsSlice.length < allShots.length;
@@ -284,6 +349,7 @@ function paginateStoryView(
     const pagedChars = explicitChars || charOff > 0 || hasMoreChars || charsSlice.length < allChars.length;
     return {
       ...story,
+      ...(compactGlobals ? { worldLayouts: [], storyBeats: [], consistency: {}, sectionTotals, sectionHint } : {}),
       ...(compactGlobals && story.locations?.length && story.locations.length > 8 ? { locations: story.locations.slice(0, 8), totalLocations: story.locations.length } : {}),
       ...(compactGlobals && story.props?.length && story.props.length > 8 ? { props: story.props.slice(0, 8), totalProps: story.props.length } : {}),
       ...(compactGlobals && story.continuityLog?.length && story.continuityLog.length > 8 ? { continuityLog: story.continuityLog.slice(-8), totalContinuityLog: story.continuityLog.length } : {}),
@@ -325,7 +391,7 @@ function paginateStoryView(
   const fullCharsAttempt = buildPage(minShots, charCandidates, false);
   if (JSON.stringify(fullCharsAttempt).length <= maxChars) return fullCharsAttempt;
 
-  // Phase 2: Ensemble cast (e.g. 24+ verbose characters) — shrink characters slice & compact globals so JSON ALWAYS fits <= maxChars!
+  // Retain the existing shot and character cursors when the ensemble or global collections fill the page.
   let charCount = charCandidates.length;
   while (charCount >= 1) {
     const attempt = buildPage(minShots, charCandidates.slice(0, charCount), true);
@@ -333,7 +399,12 @@ function paginateStoryView(
     if (charCount === 1) break;
     charCount = Math.max(1, Math.floor(charCount * 0.65));
   }
-  return buildPage(minShots, charCandidates.slice(0, Math.min(1, charCandidates.length)), true);
+  const first = buildPage(minShots, charCandidates.slice(0, 1), true);
+  if (JSON.stringify(first).length <= maxChars) return first;
+  const compact = { ...first, locations: [], props: [], continuityLog: [] };
+  if (JSON.stringify(compact).length <= maxChars) return compact;
+  // An individual shot or the full order can exceed one message. The section reader can return it losslessly.
+  return { projectId: story.projectId, version: story.version, status: story.status, sectionTotals, sectionHint };
 }
 
 export function createTools(): AgentTool[] {
@@ -360,28 +431,25 @@ export function createTools(): AgentTool[] {
         return { content: JSON.stringify({ ...summary, task: snapshot.task ? { kind: snapshot.task.kind, status: snapshot.task.status, message: snapshot.task.message } : null }), revision: snapshot.project?.revision };
       } },
     { name: 'bible_get', risk: 'read', description: '读取统一制片圣经（剧本梗概、视觉风格、角色库、固定场景母版库 Locations、道具库 Props、三维世界布局、戏剧节拍、场记连续性与分镜表；百镜/群像长片支持 shotOffset/shotLimit/shotIds 与 characterOffset/characterLimit 分页）。',
-      parameters: object({
-        shotOffset: int('可选：百镜分镜分页起始索引'),
-        shotLimit: int('可选：单次读取分镜数量上限'),
-        shotIds: { type: 'array', items: { type: 'string' }, description: '可选：按分镜/镜头 ID 精确读取' },
-        characterOffset: int('可选：多角色群像分页起始索引'),
-        characterLimit: int('可选：单次读取角色数量上限'),
-      }),
+      parameters: storyReadParameters,
       async run(args, ctx) {
         const [story, snap] = await Promise.all([ctx.docs.story(), ctx.port.snapshot(ctx.projectId)]);
         let directorDoc = null;
         if (snap.project) { try { directorDoc = readDirectorDocument(snap.project) ?? null; } catch { directorDoc = null; } }
-        const pagedStory = paginateStoryView(story, args, 9_800);
-        return { content: JSON.stringify({ story: pagedStory, directorDocument: directorDoc ? { version: directorDoc.version, status: directorDoc.status, hash: directorDoc.hash } : null, productionPolicy: snap.project?.productionPolicy ?? null }) };
+        const directorDocument = directorDoc ? { version: directorDoc.version, status: directorDoc.status, hash: directorDoc.hash } : null;
+        const policy = snap.project?.productionPolicy;
+        let productionPolicy: unknown = policy ?? null;
+        if (policy?.hybridGrants && JSON.stringify(policy).length > MAX_TOOL_RESULT_CHARS - 1_500) {
+          const { hybridGrants, ...summary } = policy;
+          productionPolicy = { ...summary, totalHybridGrants: hybridGrants.length, hybridGrantsOmitted: true };
+        }
+        const metadata = { directorDocument, productionPolicy };
+        const available = MAX_TOOL_RESULT_CHARS - JSON.stringify({ story: null, ...metadata }).length;
+        const pagedStory = paginateStoryView(story, args, Math.min(9_800, available));
+        return { content: JSON.stringify({ story: pagedStory, ...metadata }) };
       } },
     { name: 'story_get', risk: 'read', description: '读取创作计划与制片圣经摘要（剧本、风格、角色库、场景库、道具库、分镜表、一致性分数；百镜/群像长片支持 shotOffset/shotLimit/shotIds 与 characterOffset/characterLimit 分页）。',
-      parameters: object({
-        shotOffset: int('可选：百镜分镜分页起始索引'),
-        shotLimit: int('可选：单次读取分镜数量上限'),
-        shotIds: { type: 'array', items: { type: 'string' }, description: '可选：按分镜/镜头 ID 精确读取' },
-        characterOffset: int('可选：多角色群像分页起始索引'),
-        characterLimit: int('可选：单次读取角色数量上限'),
-      }),
+      parameters: storyReadParameters,
       async run(args, ctx) {
         const story = await ctx.docs.story();
         return { content: JSON.stringify(paginateStoryView(story, args, 10_600)) };
@@ -833,8 +901,22 @@ export function createTools(): AgentTool[] {
       async run(args, ctx) {
         const items = Array.isArray(args.shots) ? args.shots as Record<string, unknown>[] : [];
         if (!items.length) throw new Error('shots 不能为空');
+        const summary = need(args, 'summary');
+        if (items.some(item => !item || typeof item.shotId !== 'string' || !item.shotId)) throw new Error('待审镜头缺少 shotId');
         const approvedIds: string[] = [];
-        const story = await ctx.docs.updateStory(current => {
+        let rev: number | undefined;
+        await ctx.docs.updateStory(async current => {
+          const snap = await ctx.port.snapshot(ctx.projectId);
+          if (ctx.previzReview) {
+            const binding = previzReviewBinding(current, snap.project, args);
+            const prior = ctx.previzReview;
+            const changedOnWorkbench = binding.approvedShotsHash && (prior.approvedShotsHash
+              ? binding.approvedShotsHash !== prior.approvedShotsHash
+              : binding.approvedDocHash !== current.approvedDocHash);
+            if (binding.shotsHash !== prior.shotsHash || changedOnWorkbench) {
+              throw Object.assign(new Error('待审镜头或其预演已变化，请重新提交预演审阅单'), { code: 'STALE_APPROVAL' });
+            }
+          }
           const at = new Date().toISOString();
           const shots = current.shots.map(s => {
             const hit = items.find(item => item.shotId === s.id || item.shotId === s.shotId);
@@ -852,11 +934,12 @@ export function createTools(): AgentTool[] {
               },
             };
           });
-          return { ...current, shots, updatedAt: at };
+          if (items.some(item => !current.shots.some(s => item.shotId === s.id || item.shotId === s.shotId))) throw new Error('待审镜头已变化，请重新提交预演审阅单');
+          const next = { ...current, shots, updatedAt: at };
+          rev = await syncBibleToProject(ctx, next, { promoteApproved: true, patch: { previzShotIds: approvedIds } }, snap);
+          return next;
         });
-        const targetPrevizIds = approvedIds.length ? approvedIds : items.map(i => String(i.shotId));
-        const rev = await syncBibleToProject(ctx, story, { promoteApproved: true, patch: { previzShotIds: targetPrevizIds } });
-        return { content: json({ ok: true, revision: rev, approvedShots: targetPrevizIds, summary: need(args, 'summary'), next: '白模预演已获批准！若已接入生图模型，推荐先调 stylize_keyframe 生成正式美术风格首帧，再调 generate_video / batch_generate_media 实际呈现。' }), revision: rev };
+        return { content: json({ ok: true, revision: rev, approvedShots: approvedIds, summary, next: '白模预演已获批准！若已接入生图模型，推荐先调 stylize_keyframe 生成正式美术风格首帧，再调 generate_video / batch_generate_media 实际呈现。' }), revision: rev };
       } },
 
     // ==================== 6. 多模态生成、关键帧桥梁、批次并发与口型驱动 ====================

@@ -2,10 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { AgentEvent, AgentMessage, AgentPort, AgentRun, AgentStartInput, AgentTool, CrewDepartment, PublicRun, ReferenceUploadGroup, RunStep, ToolCall, ToolResult, ToolRisk, ToolSuccessReceipt } from './contracts.ts';
 import { chatTurn, looksLikeNoToolSupport, type ChatConfig } from './model-client.ts';
 import { backoff, budgetFrom, chargeModel, chargeTool, classify, emptyUsage, needsApproval, overBudget, tokenCost } from './budget.ts';
-import { bound, capabilityPrompt, compressMessages, summarizeProject, systemPrompt } from './context.ts';
+import { MAX_TOOL_RESULT_CHARS, bound, capabilityPrompt, compressMessages, summarizeProject, systemPrompt } from './context.ts';
 import { RunStore } from './run-store.ts';
-import { activeTools, createTools, qualityCheck } from './tools.ts';
-import { runCrewSubagent, SubagentBudgetExceededError } from './subagents.ts';
+import { activeTools, createTools, previzReviewBinding, qualityCheck } from './tools.ts';
+import { runCrewSubagent, SubagentBudgetExceededError, SubagentCheckpointError } from './subagents.ts';
 import type { AgentDocs, Capabilities, ToolContext } from './contracts.ts';
 import { join } from 'node:path';
 import { submissionOf } from './submission.ts';
@@ -105,6 +105,13 @@ export function migrateStory(v: Record<string, unknown>): Story | null {
 }
 /** Approval binding: run + tool + canonical arguments. */
 export function argsHash(runId: string, tool: string, args: Record<string, unknown>): string { return createHash('sha256').update(runId + '\0' + tool + '\0' + canonical(args)).digest('hex'); }
+function batchItemCount(args?: string): number | undefined {
+  if (!args) return;
+  try {
+    const { items } = JSON.parse(args);
+    if (Array.isArray(items)) return Math.min(8, items.length);
+  } catch { /* Legacy records may lack recoverable arguments. */ }
+}
 function sleep(ms: number, signal: AbortSignal) { return new Promise<void>((resolve, reject) => { const timer = setTimeout(() => { signal.removeEventListener('abort', stop); resolve(); }, ms); const stop = () => { clearTimeout(timer); reject(signal.reason); }; signal.addEventListener('abort', stop, { once: true }); }); }
 
 /** Hierarchical Showrunner + Specialized Crew Sub-Agents + Batch Scheduler loop with approval gates, budgets, durable resume and traces. */
@@ -412,17 +419,14 @@ export class AgentService {
   private async settleInFlight(run: AgentRun): Promise<boolean> {
     const flight = run.inFlight; if (!flight) return false;
     if ((await this.store.toolSuccesses(run.id)).some(receipt => receipt.execId === flight.execId)) return false;
-    const entry = { execId: flight.execId, tool: flight.tool, at: now(), error: '运行中断时收费请求已发出，结果未知（可能已受理并计费）', attempts: 1 };
+    const entry = { execId: flight.execId, tool: flight.tool, at: now(), error: '运行中断时收费请求的提交结果未知（可能已受理并计费）', attempts: 1 };
     delete run.inFlight;
     const call = run.queue.find(item => item.execId === flight.execId);
     const savedReceipts = call && flight.tool === 'batch_generate_media' ? run.batchReceipts?.[call.id] : undefined;
     const knownEntries = savedReceipts ? Object.entries(savedReceipts).sort(([a], [b]) => Number(a) - Number(b)) : [];
-    if (call && knownEntries.length > 0) {
-      let totalRequested = knownEntries.length;
-      try {
-        const parsedBatch = JSON.parse(call.arguments || '{}') as { items?: unknown };
-        if (Array.isArray(parsedBatch.items)) totalRequested = Math.min(8, parsedBatch.items.length);
-      } catch { /* keep knownEntries.length */ }
+    const totalRequested = flight.tool === 'batch_generate_media'
+      ? batchItemCount(call?.arguments) ?? knownEntries.length : 0;
+    if (call && totalRequested > 0) {
       const hasMissingItem = knownEntries.length < totalRequested;
       const knownIds = knownEntries.map(([, tid]) => tid);
       const savedShots = run.batchReceiptShots?.[call.id] ?? {};
@@ -435,7 +439,8 @@ export class AgentService {
         (run.uncertainSubmissions ??= []).push(entry);
         const uncKey = `${run.id}.${flight.execId}.uncertain`;
         if (!(run.settledToolExecIds ?? []).includes(uncKey)) {
-          run.usage.unknownCostCalls += 1;
+          if (knownEntries.length) run.usage.unknownCostCalls += 1;
+          else chargeTool(run.usage, null, 'cost');
           (run.settledToolExecIds ??= []).push(uncKey);
         }
         await this.spend(run.projectId, flight.tool, null, false, uncKey);
@@ -444,13 +449,14 @@ export class AgentService {
       run.waitingBatch = {
         kind: 'media',
         ids: knownIds,
+        requestedCount: totalRequested,
         callId: call.id,
         execId: flight.execId,
         ...(Object.keys(autoApplyShots).length ? { autoApplyShots } : {}),
         ...(hasMissingItem ? { uncertainCount: 1, uncertainError: entry.error } : {}),
       };
       run.queue = run.queue.filter(item => item !== call);
-      delete run.batchReceipts![call.id];
+      if (run.batchReceipts) delete run.batchReceipts[call.id];
       if (run.batchReceiptShots) delete run.batchReceiptShots[call.id];
       await this.save(run);
       return true;
@@ -853,12 +859,22 @@ export class AgentService {
     }
 
     const grant = (run.approvals ?? []).findIndex(item => item.execId === call.execId && item.tool === tool.name && item.argsHash === hash);
-    if (grant >= 0) run.approvals!.splice(grant, 1);
-    else {
+    if (grant >= 0) {
+      run.approvals!.splice(grant, 1);
+      if (tool.name === 'submit_previz_review' && !call.previzReview) {
+        respond(JSON.stringify({ error: '旧预演审批缺少镜头版本，请重新提交预演审阅单' }));
+        await this.save(run); return 'next';
+      }
+      ctx.previzReview = call.previzReview;
+    } else {
       const estimate = tool.estimate?.(args) ?? (tool.risk === 'cost' ? null : 0);
       const uncertain = tool.risk === 'cost' && run.uncertainSubmissions?.length ? '此前有收费请求结果未知（可能已受理并扣费），再次提交需要你确认' : null;
       const reason = uncertain ?? needsApproval(tool.risk, run.policy.autoApprove, run.budget, run.usage, estimate, tool.risk === 'cost' ? await this.ledgers.get(run.projectId) : undefined);
       if (reason) {
+        if (tool.name === 'submit_previz_review') {
+          const [story, snap] = await Promise.all([ctx.docs.story(), ctx.port.snapshot(ctx.projectId)]);
+          call.previzReview = previzReviewBinding(story, snap.project, args);
+        }
         run.pending = { callId: call.id, execId: call.execId, argsHash: hash, tool: tool.name, risk: tool.risk, arguments: bound(call.arguments, 4000), reason, estimate };
         run.status = 'awaiting_approval'; run.message = `等待批准：${tool.name}（${reason}）`;
         await this.step(run, { kind: 'approval', status: 'pending', tool: tool.name, callId: call.id, risk: tool.risk, arguments: bound(call.arguments, 2000), summary: reason });
@@ -886,6 +902,10 @@ export class AgentService {
     catch (error) {
       if (signal.aborted) throw error;
       delete run.inFlight;
+      if (error instanceof SubagentCheckpointError) {
+        await this.finishStep(run, step, { status: 'failed', error: error.message });
+        throw error; // A resume continues the pending delegation at its saved checkpoint.
+      }
       if (error instanceof SubagentBudgetExceededError) {
         if (run.usage.toolCalls < run.budget.maxToolCalls) chargeTool(run.usage, 0, tool.risk);
         await this.finishStep(run, step, { status: 'skipped', summary: '子代理触及预算上限：' + error.reason });
@@ -1101,6 +1121,7 @@ export class AgentService {
             readyUnappliedCount += 1;
           }
           outcomes.push({
+            index: idx,
             taskId: item.id,
             shotId: batch.autoApplyShots?.[item.id],
             state: finalState,
@@ -1111,27 +1132,47 @@ export class AgentService {
           });
         }
         const uncertainCount = batch.uncertainCount ?? 0;
-        const failedCount = (outcomes.length - succeededCount) + uncertainCount;
+        // Receipts are saved before the next item starts. Only the first missing item may have been sent.
+        let requestedCount = batch.requestedCount;
+        if (requestedCount === undefined && uncertainCount > 0) {
+          // Older snapshots kept the original arguments in the assistant tool call.
+          for (const message of [...run.messages].reverse()) {
+            if (message.role !== 'assistant') continue;
+            const call = message.tool_calls?.find(c => c.id === batch.callId && c.function.name === 'batch_generate_media');
+            if (call) { requestedCount = batchItemCount(call.function.arguments); break; }
+          }
+        }
+        const originalCountKnown = requestedCount !== undefined || uncertainCount === 0;
+        requestedCount = Math.max(requestedCount ?? 0, outcomes.length + uncertainCount);
+        const notStartedCount = requestedCount - outcomes.length - uncertainCount;
+        for (let i = 0; i < uncertainCount; i++) outcomes.push({ index: outcomes.length, state: 'submission_uncertain' });
+        for (let i = 0; i < notStartedCount; i++) outcomes.push({ index: outcomes.length, state: 'not_started' });
+        const failedCount = requestedCount - succeededCount;
         const latestRev = (await this.port.snapshot(run.projectId)).project?.revision;
+        const summary = {
+          ok: failedCount === 0,
+          partial: succeededCount > 0 && failedCount > 0,
+          ...(originalCountKnown ? { requestedCount } : { accountedCount: requestedCount }),
+          succeededCount,
+          failedCount,
+          ...(notStartedCount > 0 ? { notStartedCount } : {}),
+          ...(readyUnappliedCount > 0 ? { readyUnappliedCount } : {}),
+          ...(uncertainCount > 0 ? { submissionUncertain: true, uncertainCount, uncertainError: batch.uncertainError } : {}),
+          revision: latestRev,
+          results: outcomes,
+        };
+        const content = JSON.stringify(summary);
         run.messages.push({
           role: 'tool',
           tool_call_id: batch.callId,
-          content: bound(JSON.stringify({
-            ok: failedCount === 0,
-            partial: succeededCount > 0 && failedCount > 0,
-            succeededCount,
-            failedCount,
-            ...(readyUnappliedCount > 0 ? { readyUnappliedCount } : {}),
-            ...(uncertainCount > 0 ? { submissionUncertain: true, uncertainCount, uncertainError: batch.uncertainError } : {}),
-            revision: latestRev,
-            results: outcomes,
-          })),
+          content: content.length <= MAX_TOOL_RESULT_CHARS ? content : JSON.stringify(summary, (key, value) =>
+            key === 'error' && typeof value === 'string' ? bound(value, 160) : value),
         });
         delete run.waitingBatch;
         run.status = 'running';
         run.message = failedCount === 0
           ? `批次并发生成已完成（${outcomes.length} 项）`
-          : `批次并发生成已结束（成功 ${succeededCount}/${outcomes.length + uncertainCount}，未完成/需处理 ${failedCount} 项）`;
+          : `批次并发生成已结束（${originalCountKnown ? '请求' : '可核对'} ${requestedCount} 项，成功 ${succeededCount} 项，未完成/需处理 ${failedCount} 项）`;
         await this.save(run);
         return;
       }

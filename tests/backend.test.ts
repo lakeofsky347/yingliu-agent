@@ -103,6 +103,30 @@ test('asset imports require a revision and reject concurrent stale writes before
   }finally{await f.close();}
 });
 
+test('retrying an import returns its original asset after another import and rejects changed content',async()=>{
+  const f=await fixture();try{
+    const created=await f.backend.call<StudioSnapshot>('create',{title:'素材重试'});
+    const projectId=created.project!.id;
+    const input={projectId,name:'字幕.txt',text:'第一稿',requestId:'import-caption'};
+    const first=await f.backend.call<StudioSnapshot>('import',{...input,expectedRevision:0});
+    const originalId=first.project!.assets[0]!.id;
+    await f.backend.call('import',{projectId,name:'其他素材',text:'另一个文件',expectedRevision:1});
+    const replay=await f.backend.call<StudioSnapshot&{reusedAssetId:string}>('import',{...input,expectedRevision:2});
+    assert.equal(replay.reusedAssetId,originalId);
+    assert.equal(replay.project!.revision,2);
+    const conflict=await f.backend.route('import',{...input,text:'第二稿',expectedRevision:2});
+    assert.ok(!conflict.ok);
+    assert.equal(conflict.error.code,'IMPORT_REQUEST_CONFLICT');
+
+    const edited=structuredClone(replay.project!);
+    edited.assets[0]!.text='用户手工改过的字幕';
+    await f.backend.call('save',{projectId,expectedRevision:2,project:edited,deferPreview:true});
+    const afterEdit=await f.backend.call<StudioSnapshot&{reusedAssetId:string}>('import',{...input,expectedRevision:3});
+    assert.equal(afterEdit.reusedAssetId,originalId);
+    assert.equal(afterEdit.project!.assets[0]!.text,'用户手工改过的字幕');
+  }finally{await f.close();}
+});
+
 test('audio add, update, removal and synthesis require revisions inside the project queue',async()=>{
   const f=await fixture();try{
     const project=createProject('音轨版本保护');project.assets.push({id:'audio-fixture',kind:'audio',name:'测试音频',description:'persistence fixture, not media QA',path:'assets/fixture.wav',mime:'audio/wav',duration:1});

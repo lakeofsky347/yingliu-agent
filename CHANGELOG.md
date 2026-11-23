@@ -2,6 +2,10 @@
 
 ## 未发布
 
+- 完成 **v2.0 第四轮审计全部边界与并发一致性修复**（并发媒体门禁、批次中断对账、子代理断点与预演审批绑定）：
+  - **并发读取后策略再校验与未发批次费用核销**：`MediaTaskService` 在实际发出 HTTP 请求前再次调用 `authorizeOperation` 校验最新制作策略指纹，避免读取素材期间切换模式或往返切换后旧排队任务继续外发；本地策略拦截与未提交取消明确记 `usage.cost = 0`；`batch_generate_media` 持久化 `requestedCount` 并在中断恢复后显式列出 `submission_uncertain` 与 `not_started` 子项，同时截断超长子项错误信息保证工具回包始终在字符上限内。
+  - **剧组子代理断点重试、精确重写归因与真实渲染失败回传**：`runCrewSubagent` 对检查点写失败先以原状态快照重试一次再抛出 `SubagentCheckpointError`（保留父级 `delegate_crew` 排队调用供恢复），避免误消费下一工具或重复回复；`turn_limit` 溢出跳过项通过忽略 `expectedRevision` 的参数深度比对精确核销；`render_check` 返回 `status: 'failed'` 时写入 `failedTools` 并在后续复检通过时清除；`TaskState.failedShotIds` 精确归因目标镜头失败，环境缺失或邻镜故障不再盲目重写健康目标镜头。
+  - **预演审批镜头快照绑定、圣经全集合游标分页与素材导入幂等**：`submit_previz_review` 在提交审批时绑定目标镜头与工作台已批准计划哈希（`previzReview`），审批执行时若目标镜头或工作台批准状态已变更则拒绝旧单（`STALE_APPROVAL`），并保留草稿相机/深度图编辑与正式清空的预演状态；`bible_get` / `story_get` 新增 `section`、`offset`、`limit`、`textOffset` 集合与超长单条续读游标，配合 `hybridGrants` 摘要兜底保证百镜与多场景布局工程不超限；`StudioService` `import` 按内容哈希校验 `requestId` 幂等复用并在 `ProjectHub` 透传 `reusedAssetId`。
 - 完成 **v2.0 第三轮审计全部 11 项边界优化与高并发确定性加固**（且完整保留场景代码检查—修复—复检核心业务闭环）：
   - **并发排期再授权与口型模板反向门禁（P1–P3）**：`MediaTaskService` 在受连接并发限制排队的 `pending` 任务真正发起远端 HTTP 请求前再次调用 `authorizeOperation` 复核最新制作策略，确保工程切回纯代码模式时排队中的未发视频请求本地拦截（远端请求数为 0），而已在途任务继续回收；专用口型模板（如 `replicate-lipsync`）反向收窄可用操作为仅 `lip-sync-video`，前置拦截误投递的普通文生视频请求。
   - **子代理拟音/尾帧幂等、同工具异目标第 7 项追踪与取消质检诚实回传（P2）**：`StudioService` `import` 新增 `requestId` 哈希幂等复用（`importRequests`），`synthesize_sfx` 与 `frame_handoff` 绑定执行 ID 且子代理检查点出队与 `usage.toolCalls` 合并为单次原子落盘，消除子步骤崩溃重放重复生成 WAV 素材或虚增调用计数；同轮第 7 项溢出跳过的同名不同目标写工具（如第 1 项改镜 1、第 7 项改镜 2）按目标签名与轮次隔离对账并保留原始 `callId`；子代理内 `render_check` 被取消或超时时诚实标为未通过（若同次委派后续复检通过则自动清除，100% 保留 `scene_coder` 核心编码修复闭环）；补齐 `video_clip_extract`、`video_clip_remove` 与 `audio` 在镜头沙箱下的越界门禁。

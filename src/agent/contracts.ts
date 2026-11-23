@@ -16,7 +16,6 @@ export interface SubagentSkippedTool {
   reason: string;
   kind: 'precondition' | 'turn_limit' | 'cancelled' | 'timeout';
   status?: string;
-  targetSig?: string;
   turnStep?: number;
 }
 
@@ -26,13 +25,16 @@ export interface SubagentCheckpoint {
   stepIdx: number;
   pendingCalls: ToolCall[];
   executedTools: string[];
-  failedTools: { tool: string; error: string }[];
+  failedTools: { tool: string; error: string; id?: string; status?: 'failed' }[];
   skippedTools?: SubagentSkippedTool[];
   latestRevision?: number;
   completedResult?: ToolResult;
 }
 
+export interface PrevizReviewBinding { shotsHash: string; approvedShotsHash?: string; approvedDocHash?: string }
+
 export interface ToolContext {
+  previzReview?: PrevizReviewBinding;
   runId: string; projectId: string; signal: AbortSignal; port: AgentPort;
   /** Per-project structured plan (story.json / Production Bible) and spend ledger. */
   docs: AgentDocs;
@@ -53,7 +55,7 @@ export interface ToolContext {
 }
 export interface AgentDocs {
   story(): Promise<Story>;
-  updateStory(change: (story: Story) => Story, expectedVersion?: number): Promise<Story>;
+  updateStory(change: (story: Story) => Story | Promise<Story>, expectedVersion?: number): Promise<Story>;
   ledger(): Promise<Ledger>;
   saveQc(report: QcReport): Promise<void>;
 }
@@ -91,7 +93,7 @@ export interface AgentTool {
 export type GenRole = 'image' | 'video' | 'speech' | 'music' | 'sfx' | 'vision' | 'blender';
 export interface Capabilities { roles: GenRole[]; director?: string; scene?: string; models?: Partial<Record<GenRole, string>> }
 /** `id` is the provider's tool_call_id (only used to thread tool messages); `execId` is server-generated and single-use. */
-export interface ToolCall { id: string; name: string; arguments: string; execId?: string }
+export interface ToolCall { id: string; name: string; arguments: string; execId?: string; previzReview?: PrevizReviewBinding }
 export type AgentMessage =
   | { role: 'system' | 'user'; content: string | AgentContent[] }
   | { role: 'assistant'; content: string | null; tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[] }
@@ -131,7 +133,7 @@ export interface AgentRun {
   queue: ToolCall[];
   pending?: PendingApproval;
   waiting?: { kind: 'media' | 'workflow'; id: string; callId: string; execId?: string };
-  waitingBatch?: { kind: 'media'; ids: string[]; callId: string; execId?: string; autoApplyShots?: Record<string, string>; uncertainCount?: number; uncertainError?: string };
+  waitingBatch?: { kind: 'media'; ids: string[]; callId: string; execId?: string; autoApplyShots?: Record<string, string>; requestedCount?: number; uncertainCount?: number; uncertainError?: string };
   taskRefs?: (ProjectTaskRef & { callId: string; execId?: string })[];
   /** Usage settlement keys already applied to this snapshot; the project ledger has its own atomic deduplication. */
   settledToolExecIds?: string[];

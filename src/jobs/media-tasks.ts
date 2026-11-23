@@ -2,6 +2,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {mkdir,readFile,readdir,rename,open,rm,stat,realpath} from 'node:fs/promises';
 import {createReadStream} from 'node:fs';
 import {join,resolve,sep} from 'node:path';
+import {fetch as hostFetch} from '../host/http.ts';
 import {type AdapterContext,type AdapterInput} from '../models/adapters/media.ts';
 import {artifactAuth,cancelGeneration,pollGeneration,submitGeneration} from '../models/adapters/official.ts';
 import {cancelTemplate,pollTemplate,resolveTemplate,submitTemplate} from '../models/adapters/template.ts';
@@ -141,7 +142,7 @@ export class MediaTaskService {
       if(parameters.aspectRatio!==undefined&&(typeof parameters.aspectRatio!=='string'||parameters.aspectRatio.length>32))throw new Error('画面比例参数无效');
       for(const [key,limitKey]of [['durationSeconds','maxDurationSeconds'],['width','maxWidth'],['height','maxHeight'],['fps','maxFps']] as const){const value=parameters[key],hardLimit={durationSeconds:120,width:8192,height:8192,fps:120}[key],configured=resolved.model.parameters[limitKey];if(configured!==undefined&&(typeof configured!=='number'||!Number.isFinite(configured)||configured<=0))throw new Error('模型参数上限无效：'+limitKey);const limit=Math.min(hardLimit,typeof configured==='number'?configured:hardLimit);if(value!==undefined&&(typeof value!=='number'||value<=0||value>limit))throw new Error('生成参数超过模型范围：'+key);}
     }
-    const now=new Date().toISOString(),task:MediaTask={version:1,id:randomUUID(),clientRequestId:input.clientRequestId??randomUUID(),projectId:input.projectId,...(input.shotId?{shotId:input.shotId}:{}),startRevision:project.revision,operation:input.operation,prompt:input.prompt.trim(),imageAssetIds:[...ids],...(input.videoAssetId?{videoAssetId:input.videoAssetId}:{}),...(input.audioAssetId?{audioAssetId:input.audioAssetId}:{}),inputHashes:[],connection:structuredClone(resolved.connection),model:structuredClone(resolved.model),parameters,phase:'pending',observation:'active',progress:0,message:'等待生成',createdAt:now,updatedAt:now,files:[],resumeOnStart:true,...(policyFingerprint?{productionPolicyFingerprint:policyFingerprint}:{}),...(input.referenceRoles?{referenceRoles:[...input.referenceRoles]}:{}),...(input.requiresAudio!==undefined?{requiresAudio:input.requiresAudio}:{}),...(input.ownerSessionId?{ownerSessionId:input.ownerSessionId}:{})};
+    const now=new Date().toISOString(),task:MediaTask={version:1,id:randomUUID(),clientRequestId:input.clientRequestId??randomUUID(),projectId:input.projectId,...(input.shotId?{shotId:input.shotId}:{}),startRevision:project.revision,operation:input.operation,prompt:input.prompt.trim(),imageAssetIds:[...ids],...(input.videoAssetId?{videoAssetId:input.videoAssetId}:{}),...(input.audioAssetId?{audioAssetId:input.audioAssetId}:{}),inputHashes:[],connection:structuredClone(resolved.connection),model:structuredClone(resolved.model),parameters,phase:'pending',observation:'active',progress:0,message:'等待生成',createdAt:now,updatedAt:now,files:[],resumeOnStart:true,...(policyFingerprint!==undefined?{productionPolicyFingerprint:policyFingerprint}:{}),...(input.referenceRoles?{referenceRoles:[...input.referenceRoles]}:{}),...(input.requiresAudio!==undefined?{requiresAudio:input.requiresAudio}:{}),...(input.ownerSessionId?{ownerSessionId:input.ownerSessionId}:{})};
     await this.inputs(task,false);this.tasks.set(task.id,task);try{await this.persist(task);}catch(error){this.tasks.delete(task.id);throw error;}this.schedule();return this.public(task);
     }finally{release?.();}
   }
@@ -186,13 +187,25 @@ export class MediaTaskService {
     const template=resolveTemplate(task.model.parameters);
     return template.responseType==='binary'||template.idPath==='';
   }
-  private async run(task:MediaTask,signal:AbortSignal):Promise<void>{try{
+  private async run(task:MediaTask,signal:AbortSignal):Promise<void>{
+    let preparingSubmission=task.phase==='pending';
+    try{
     signal.throwIfAborted();let remote:RemoteJob|null=null;
     if(task.phase==='pending'){
-      if(this.projects.authorizeOperation){
-        task.productionPolicyFingerprint=await this.projects.authorizeOperation(task.projectId,task.operation,task.shotId);
-      }
-      const inputs=await this.inputs(task),context=await this.context(task,signal);task.phase='submitting';task.metrics??={};task.metrics.submittedAt??=new Date().toISOString();task.message='正在提交生成请求';await this.persist(task);signal.throwIfAborted();
+      const inputs=await this.inputs(task),context=await this.context(task,signal);
+      const send=context.fetch??hostFetch;
+      context.fetch=async(url,init)=>{
+        if(this.projects.authorizeOperation){
+          const current=await this.projects.authorizeOperation(task.projectId,task.operation,task.shotId,task.productionPolicyFingerprint);
+          if(task.productionPolicyFingerprint!==undefined&&current!==task.productionPolicyFingerprint){
+            throw Object.assign(new Error('排队期间制作决定已更新，请按新决定重新发起生成'),{code:'PRODUCTION_POLICY_VIOLATION',submissionUncertain:false});
+          }
+        }
+        signal.throwIfAborted();
+        preparingSubmission=false;
+        return send(url,init);
+      };
+      task.phase='submitting';task.metrics??={};task.metrics.submittedAt??=new Date().toISOString();task.message='正在提交生成请求';await this.persist(task);signal.throwIfAborted();
       const input:AdapterInput={clientRequestId:task.clientRequestId,model:task.model,operation:task.operation,prompt:task.prompt,inputs,parameters:task.parameters};
       remote=isImageOp(task.operation)?await generateImage(context,input):await submitVideo(context,input);
       this.applyRemote(task,remote);await this.persist(task);
@@ -213,8 +226,9 @@ export class MediaTaskService {
     }
     if(!files.length)throw new Error('生成结果没有可采用素材');task.files=files;task.metrics??={};task.metrics.readyAt=new Date().toISOString();task.metrics.downloadBytes=total;if(task.metrics.remoteCompletedAt)task.metrics.downloadMs=Date.parse(task.metrics.readyAt)-Date.parse(task.metrics.remoteCompletedAt);task.phase='ready';task.progress=1;task.message='素材已就绪，等待采用';task.observation='paused';delete task.error;await this.persist(task);
   }catch(error){
+    if(preparingSubmission&&task.phase==='submitting'){task.phase='pending';if(task.metrics)delete task.metrics.submittedAt;}
     task.observation='paused';task.error=await this.redact(task,errorText(error));if(signal.aborted){task.message='已停止本地等待，云端状态以查询结果为准';}
-    else if(task.phase==='pending'&&(error as {submissionUncertain?:unknown})?.submissionUncertain===false){task.phase='failed';task.resumeOnStart=false;task.message='发送前制作策略或能力校验未通过，未发起远程计费请求';}
+    else if(task.phase==='pending'&&(error as {submissionUncertain?:unknown})?.submissionUncertain===false){task.phase='failed';task.usage={cost:0};task.resumeOnStart=false;task.message='发送前制作策略或能力校验未通过，未发起远程计费请求';}
     else if(task.phase==='submitting'){task.phase='unknown';task.message='提交结果待确认；没有重新提交';}
     else {task.message=task.remoteStatus==='succeeded'?'素材获取或检查失败，可重试获取':'任务已暂停，可恢复查询';}
     await this.persist(task);
@@ -224,7 +238,7 @@ export class MediaTaskService {
   async retry(taskId:string):Promise<MediaTask>{const task=await this.required(taskId);this.assertMutable(task);if(this.stopped)throw new Error('媒体任务服务正在关闭');const finishing=this.running.get(taskId);if(finishing){if(task.observation==='active')return this.public(task);await finishing.promise;}if(terminal.has(task.phase))throw new Error('已结束的生成不能重投；如需新结果请明确新建生成任务');if(task.phase==='ready')return this.public(task);task.observation='active';task.resumeOnStart=true;if(task.phase==='unknown')task.phase='submitting';delete task.error;task.message='恢复查询或素材获取';await this.persist(task);this.schedule();return this.public(task);}
   async pause(taskId:string):Promise<MediaTask>{const task=await this.required(taskId);this.assertMutable(task);task.observation='paused';task.resumeOnStart=false;const running=this.running.get(taskId);running?.controller.abort(new Error('用户已停止本地等待'));await running?.promise;task.message=terminal.has(task.phase)||task.phase==='ready'?task.message:'已停止本地等待，云端任务可能仍在执行';await this.persist(task);return this.public(task);}
   async cancel(taskId:string):Promise<MediaTask>{const task=await this.required(taskId);this.assertMutable(task);await this.pause(taskId);if(task.remoteStatus==='succeeded'||terminal.has(task.phase)||task.phase==='ready')return this.public(task);
-    task.cancelRequested=true;if(task.phase==='pending'&&!task.remoteJobId){task.phase='cancelled';task.message='已取消尚未提交的本地任务';await this.persist(task);return this.public(task);}if(task.operation==='text-to-image'&&task.connection.protocol!=='async-task'||!task.remoteJobId||task.model.parameters.supportsCancel===false){task.message='已停止等待；此任务尚不能确认云端取消';await this.persist(task);return this.public(task);}
+    task.cancelRequested=true;if(task.phase==='pending'&&!task.remoteJobId){task.phase='cancelled';task.usage={cost:0};task.message='已取消尚未提交的本地任务';await this.persist(task);return this.public(task);}if(task.operation==='text-to-image'&&task.connection.protocol!=='async-task'||!task.remoteJobId||task.model.parameters.supportsCancel===false){task.message='已停止等待；此任务尚不能确认云端取消';await this.persist(task);return this.public(task);}
     try{const remote=await cancelVideo(await this.context(task,new AbortController().signal),task.remoteJobId);this.applyRemote(task,remote);task.message=remote.status==='cancelled'?'云端已确认取消':remote.status==='succeeded'?'云端已完成，可恢复获取素材':'已请求云端取消，尚未确认';
       if(remote.status==='queued'||remote.status==='running'){task.message='已请求云端取消，尚未确认；继续查询最终状态';task.observation='active';task.resumeOnStart=true;await this.persist(task);this.schedule();return this.public(task);}}
     catch(error){task.error=await this.redact(task,errorText(error));task.message='云端取消未确认；可恢复查询';}await this.persist(task);return this.public(task);
